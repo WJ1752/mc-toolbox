@@ -1,0 +1,19 @@
+# 构建产物
+dist/
+data/
+runtime/
+node_modules/
+
+# WebView2 SDK 缓存（构建时自动拉取）
+host/lib/
+
+# 本机临时工具（含绝对路径）
+dl-mt.mjs
+
+# 工作区/记忆（私有）
+.workbuddy/
+
+# 日志与系统
+*.log
+.DS_Store
+Thumbs.db

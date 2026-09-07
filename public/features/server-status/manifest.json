@@ -1,0 +1,16 @@
+{
+  "id": "server-status",
+  "name": "服务器在线测试",
+  "desc": "单次探测一台 Java / 基岩版服务器的状态与延迟",
+  "icon": "🌐",
+  "color": "#3ba0ff",
+  "version": "1.0.0",
+  "author": "builtin",
+  "size": {
+    "w": 1,
+    "h": 1
+  },
+  "builtin": true,
+  "enabled": true,
+  "entry": "tile.js"
+}

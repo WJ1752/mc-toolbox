@@ -1,0 +1,15 @@
+{
+  "name": "mc-toolbox",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Minecraft 工具箱 - 磁贴式可扩展工具集",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js --dev"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

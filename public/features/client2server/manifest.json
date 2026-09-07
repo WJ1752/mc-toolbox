@@ -1,0 +1,16 @@
+{
+  "id": "client2server",
+  "name": "客户端转服务端",
+  "desc": "按 modid 识别并移除仅客户端 mod，支持自定义 modid 库",
+  "icon": "🧹",
+  "color": "#c084fc",
+  "version": "1.0.0",
+  "author": "builtin",
+  "size": {
+    "w": 2,
+    "h": 2
+  },
+  "builtin": true,
+  "enabled": true,
+  "entry": "tile.js"
+}

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Minecraft 工具箱</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%235ec96a'/><rect x='6' y='6' width='9' height='9' fill='%23000' opacity='.25'/><rect x='17' y='17' width='9' height='9' fill='%23000' opacity='.25'/></svg>" />
+<link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-logo" aria-hidden="true"></span>
+      <div class="brand-text">
+        <strong>Minecraft 工具箱</strong>
+        <small id="brandSub">磁贴式 · 可扩展</small>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <button class="btn btn-ghost" id="btnCollapseAll" title="全部折叠 / 展开">⇱ 全部折叠</button>
+      <button class="btn btn-ghost" id="btnAddTile" title="添加磁贴">＋ 添加磁贴</button>
+      <button class="btn btn-ghost" id="btnReload" title="重新加载功能">↻ 重载</button>
+      <button class="btn btn-ghost" id="btnSettings" title="设置">⚙ 设置</button>
+    </div>
+    <div class="win-controls" id="winControls" hidden>
+      <button type="button" data-act="min" title="最小化"><i class="ico ico-min" aria-hidden="true"></i></button>
+      <button type="button" data-act="max" title="最大化"><i class="ico ico-max" aria-hidden="true"></i><i class="ico ico-restore" aria-hidden="true"></i></button>
+      <button type="button" data-act="close" title="关闭"><i class="ico ico-close" aria-hidden="true"></i></button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <div class="grid" id="grid"></div>
+    <div class="empty-hint" id="emptyHint" hidden>
+      <p>还没有任何磁贴。</p>
+      <button class="btn btn-primary" id="btnEmptyAdd">＋ 添加磁贴</button>
+    </div>
+  </main>
+
+  <!-- 设置页 -->
+  <div class="settings-page" id="settingsPage" hidden>
+    <div class="settings-inner">
+      <div class="settings-head">
+        <h2>设置</h2>
+        <button class="btn btn-ghost" id="btnCloseSettings">✕ 关闭</button>
+      </div>
+      <div class="settings-body">
+        <nav class="settings-nav" id="settingsNav"></nav>
+        <div class="settings-content" id="settingsContent"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 弹窗 / 抽屉 -->
+  <div class="modal-root" id="modalRoot" hidden>
+    <div class="modal-backdrop" data-close="1"></div>
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-head">
+        <h3 id="modalTitle"></h3>
+        <button class="btn btn-icon" id="modalClose">✕</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+      <div class="modal-foot" id="modalFoot"></div>
+    </div>
+  </div>
+
+  <div class="toast-root" id="toastRoot"></div>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

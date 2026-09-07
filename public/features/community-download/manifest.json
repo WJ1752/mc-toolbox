@@ -1,0 +1,16 @@
+{
+  "id": "community-download",
+  "name": "社区资源下载",
+  "desc": "从 Modrinth / CurseForge 搜索并下载 mod、整合包、数据包、资源包、光影",
+  "icon": "📥",
+  "color": "#22d3ee",
+  "version": "1.0.0",
+  "author": "builtin",
+  "size": {
+    "w": 2,
+    "h": 2
+  },
+  "builtin": true,
+  "enabled": true,
+  "entry": "tile.js"
+}

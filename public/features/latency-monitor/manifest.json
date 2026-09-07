@@ -1,0 +1,16 @@
+{
+  "id": "latency-monitor",
+  "name": "服务器延迟监测",
+  "desc": "同时持续监测多台服务器，每台服务器以可拖动磁贴展示，点击可放大查看详情",
+  "icon": "📡",
+  "color": "#5ec96a",
+  "version": "1.0.0",
+  "author": "builtin",
+  "size": {
+    "w": 2,
+    "h": 2
+  },
+  "builtin": true,
+  "enabled": true,
+  "entry": "tile.js"
+}

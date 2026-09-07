@@ -1,0 +1,16 @@
+{
+  "id": "server-core",
+  "name": "服务端核心下载",
+  "desc": "下载指定 MC 版本的官方 / Fabric / Forge / NeoForge / Quilt / Paper 服务端核心",
+  "icon": "🖥️",
+  "color": "#f59e0b",
+  "version": "1.0.0",
+  "author": "builtin",
+  "size": {
+    "w": 2,
+    "h": 2
+  },
+  "builtin": true,
+  "enabled": true,
+  "entry": "tile.js"
+}
