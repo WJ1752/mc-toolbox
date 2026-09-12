@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
-import { PUBLIC_DIR, FEATURES_DIR, DATA_DIR, CONFIG_DIR, CLIENT_MODS_DIR, ROOT, safeJoin } from './paths.js'
+import { PUBLIC_DIR, FEATURES_DIR, DATA_DIR, CONFIG_DIR, CLIENT_MODS_DIR, ROOT, safeJoin, getDirs } from './paths.js'
 import { store } from './store.js'
 import { DEFAULT_SETTINGS, DEFAULT_CLIENT_MODS } from './defaults.js'
 import { scanFeatures, removeFeature } from './features.js'
@@ -11,6 +11,7 @@ import { scanModsDir, listDir, moveModsToBackup, deleteMods, disableMods, enable
 import * as community from './community.js'
 import * as servercore from './servercore.js'
 import * as saveeditor from './saveeditor.js'
+import * as dirsMgmt from './dirs.js'
 import { setProxy } from './http.js'
 
 const MIME = {
@@ -407,6 +408,20 @@ on('POST', '/api/saveeditor/player', async (req) => {
   } catch (e) {
     return { error: e.message }
   }
+})
+
+// ---------------- 存储目录（查看 / 迁移 / 恢复默认） ----------------
+on('GET', '/api/dirs', async () => dirsMgmt.listDirs())
+
+on('POST', '/api/dirs/change', async (req) => {
+  const body = await readBody(req)
+  if (!body.target) return { error: '缺少目标目录' }
+  return dirsMgmt.changeDir(String(body.which || ''), body.target)
+})
+
+on('POST', '/api/dirs/reset', async (req) => {
+  const body = await readBody(req)
+  return dirsMgmt.resetDir(String(body.which || ''))
 })
 
 // ---------------- 文件系统 ----------------

@@ -136,10 +136,67 @@ function _seaConfigDir()    { return joinUserDocuments(CONFIG_SUBDIR) }
 //   CLIENT_MODS_DIR  → Documents\MC Toolbox\client-mods 仅客户端 mod 库
 //   DATA_DIR         → LOCALAPPDATA\MC Toolbox\data     运行数据（history 历史曲线、日志）
 //   RUNTIME_DIR      → LOCALAPPDATA\MC Toolbox\runtime  解压出的前端静态
-export const DATA_DIR        = isSEA ? _seaDataDir()      : _devDataDir()
-export const RUNTIME_DIR     = isSEA ? _seaRuntimeDir()   : _devRuntimeDir()
-export const CLIENT_MODS_DIR = isSEA ? _seaClientModsDir(): _devDataDir()
-export const CONFIG_DIR      = isSEA ? _seaConfigDir()    : _devDataDir()
+//
+// 前三个目录支持用户自定义（设置 → 数据管理 → 存储目录）：
+//   自定义值记录在「引导文件」dirs.json 里，它固定放在【默认】数据目录下、永不迁移，
+//   启动期同步读取；运行期由 applyDirs() 切换（ESM 实时绑定，惰性读取方立即生效）。
+const DEFAULT_DATA_DIR        = isSEA ? _seaDataDir()       : _devDataDir()
+const DEFAULT_CLIENT_MODS_DIR = isSEA ? _seaClientModsDir() : _devDataDir()
+const DEFAULT_CONFIG_DIR      = isSEA ? _seaConfigDir()     : _devDataDir()
+const DIRS_FILE = path.join(DEFAULT_DATA_DIR, 'dirs.json')
+
+function readDirsFile() {
+  try {
+    const obj = JSON.parse(fs.readFileSync(DIRS_FILE, 'utf8'))
+    const out = {}
+    for (const k of ['configDir', 'clientModsDir', 'dataDir']) {
+      const v = obj[k]
+      if (typeof v === 'string' && v.trim() && path.isAbsolute(v.trim())) out[k] = path.resolve(v.trim())
+    }
+    return out
+  } catch { return {} }
+}
+
+const _customDirs = readDirsFile()
+
+export let DATA_DIR        = _customDirs.dataDir       || DEFAULT_DATA_DIR
+export let CLIENT_MODS_DIR = _customDirs.clientModsDir || DEFAULT_CLIENT_MODS_DIR
+export let CONFIG_DIR      = _customDirs.configDir     || DEFAULT_CONFIG_DIR
+export const RUNTIME_DIR   = isSEA ? _seaRuntimeDir()  : _devRuntimeDir()
+
+// 运行时切换目录（文件迁移由 dirs.js 完成后调用）。
+// next 的值：绝对路径 = 启用自定义；null = 恢复默认；undefined = 不动。
+export function applyDirs(next) {
+  for (const k of ['configDir', 'clientModsDir', 'dataDir']) {
+    const v = next[k]
+    if (v === undefined) continue
+    if (v !== null && (!String(v).trim() || !path.isAbsolute(String(v).trim()))) {
+      throw new Error('目录必须是绝对路径：' + v)
+    }
+    _customDirs[k] = v === null ? undefined : path.resolve(String(v).trim())
+    if (k === 'configDir') CONFIG_DIR = _customDirs[k] || DEFAULT_CONFIG_DIR
+    if (k === 'clientModsDir') CLIENT_MODS_DIR = _customDirs[k] || DEFAULT_CLIENT_MODS_DIR
+    if (k === 'dataDir') DATA_DIR = _customDirs[k] || DEFAULT_DATA_DIR
+  }
+  // 引导文件里只记录非默认项（恢复默认后对应键自动消失）
+  const persist = {}
+  for (const k of ['configDir', 'clientModsDir', 'dataDir']) {
+    if (_customDirs[k]) persist[k] = _customDirs[k]
+  }
+  fs.mkdirSync(path.dirname(DIRS_FILE), { recursive: true })
+  fs.writeFileSync(DIRS_FILE, JSON.stringify(persist, null, 2), 'utf8')
+  return getDirs()
+}
+
+export function getDirs() {
+  return {
+    configDir: CONFIG_DIR,
+    clientModsDir: CLIENT_MODS_DIR,
+    dataDir: DATA_DIR,
+    defaults: { configDir: DEFAULT_CONFIG_DIR, clientModsDir: DEFAULT_CLIENT_MODS_DIR, dataDir: DEFAULT_DATA_DIR },
+    dirsFile: DIRS_FILE
+  }
+}
 
 // 内嵌资源 key（与 build.mjs 的 sea-config.json assets 完全一致）
 const ASSET_PUBLIC = 'publicbundle'
@@ -347,10 +404,11 @@ async function migrateLegacyLayout() {
   if (!isSEA) return
   const legacyData = path.join(ROOT, 'data')
   const legacyRuntime = path.join(ROOT, 'runtime')
-  const newData = _seaDataDir()
+  // 迁移目标用「当前生效」目录：用户若已自定义存储目录，旧数据应搬去自定义位置
+  const newData = DATA_DIR
   const newRuntime = _seaRuntimeDir()
-  const newConfig = _seaConfigDir()
-  const newClientModsDir = _seaClientModsDir()
+  const newConfig = CONFIG_DIR
+  const newClientModsDir = CLIENT_MODS_DIR
 
   // 0) 旧版按 USERPROFILE 拼出的文档目录 → 系统真实文档目录（可能被重定向到 D 盘）
   if (process.platform === 'win32') {

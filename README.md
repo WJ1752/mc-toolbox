@@ -174,5 +174,8 @@ GET    /api/saveeditor/world?world=  世界可编辑字段 + 玩家清单
 GET    /api/saveeditor/player        玩家数据详情（level 或 playerdata/*.dat）
 POST   /api/saveeditor/level         写世界属性（每次自动备份）
 POST   /api/saveeditor/player        写玩家数据（每次自动备份）
+GET    /api/dirs                     存储目录（当前/默认/是否自定义）
+POST   /api/dirs/change             更改目录并完整迁移文件
+POST   /api/dirs/reset              恢复默认目录（文件迁回）
 GET    /api/data/export               导出配置
 ```

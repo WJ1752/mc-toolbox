@@ -440,36 +440,47 @@ const SECTIONS = [
           }
         }
       })
-      return section(
-        '备份与恢复',
-        '设置、监测项、仅客户端 mod 库',
-        h('div', { class: 'row wrap' },
-          h('button', {
-            class: 'btn',
-            onclick: async () => {
-              const data = await api.get('/api/data/export')
-              const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-              const a = document.createElement('a')
-              a.href = URL.createObjectURL(blob)
-              a.download = `mc-toolbox-backup-${new Date().toISOString().slice(0, 10)}.json`
-              a.click()
-              URL.revokeObjectURL(a.href)
-              toast('已导出配置', 'ok')
-            }
-          }, '导出配置'),
-          h('button', { class: 'btn', onclick: () => fileInput.click() }, '导入配置'),
-          fileInput,
-          h('button', {
-            class: 'btn btn-danger',
-            onclick: async () => {
-              if (!(await confirmDialog('恢复默认设置会清空所有个性化配置（不含监测项与 mod 库），确定继续？', { danger: true }))) return
-              await api.post('/api/settings/reset')
-              toast('设置已恢复默认，正在刷新…', 'ok')
-              setTimeout(() => location.reload(), 700)
-            }
-          }, '恢复默认设置')
+      const el = h('div')
+      el.appendChild(
+        section(
+          '存储目录',
+          '更改目录会把原目录里的所有文件完整转移到新位置（校验通过后才会清空原目录），立即生效，无需重启。',
+          dirPickerCard()
         )
       )
+      el.appendChild(
+        section(
+          '备份与恢复',
+          '设置、监测项、仅客户端 mod 库',
+          h('div', { class: 'row wrap' },
+            h('button', {
+              class: 'btn',
+              onclick: async () => {
+                const data = await api.get('/api/data/export')
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+                const a = document.createElement('a')
+                a.href = URL.createObjectURL(blob)
+                a.download = `mc-toolbox-backup-${new Date().toISOString().slice(0, 10)}.json`
+                a.click()
+                URL.revokeObjectURL(a.href)
+                toast('已导出配置', 'ok')
+              }
+            }, '导出配置'),
+            h('button', { class: 'btn', onclick: () => fileInput.click() }, '导入配置'),
+            fileInput,
+            h('button', {
+              class: 'btn btn-danger',
+              onclick: async () => {
+                if (!(await confirmDialog('恢复默认设置会清空所有个性化配置（不含监测项与 mod 库），确定继续？', { danger: true }))) return
+                await api.post('/api/settings/reset')
+                toast('设置已恢复默认，正在刷新…', 'ok')
+                setTimeout(() => location.reload(), 700)
+              }
+            }, '恢复默认设置')
+          )
+        )
+      )
+      return el
     }
   },
   {
@@ -505,6 +516,99 @@ const SECTIONS = [
     }
   }
 ]
+
+// ---------- 存储目录卡片（更改目录 + 自动迁移文件） ----------
+function dirPickerCard() {
+  const box = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } })
+  let dirs = null
+
+  const rows = {
+    configDir: { label: '配置目录', desc: 'settings.json / monitors.json 等配置文件' },
+    clientModsDir: { label: 'mod 库目录', desc: '仅客户端 mod 库（clientmods.json）' },
+    dataDir: { label: '运行数据目录', desc: '历史曲线、日志等运行数据' }
+  }
+
+  api.get('/api/dirs').then((r) => {
+    dirs = r
+    render()
+  }).catch((e) => {
+    box.appendChild(h('div', { class: 'muted' }, '读取目录信息失败：' + e.message))
+  })
+
+  function render() {
+    clear(box)
+    for (const which of dirs.movable || ['configDir', 'clientModsDir', 'dataDir']) {
+      box.appendChild(dirRow(which))
+    }
+    box.appendChild(h('p', { class: 'muted', style: { margin: '2px 0 0', lineHeight: '1.7', fontSize: '12.5px' } },
+      `目录记录保存在 ${dirs.dirsFile}（引导文件，始终留在默认位置，请勿删除）。迁移中请勿关闭应用。`))
+  }
+
+  function dirRow(which) {
+    const meta = rows[which] || { label: which, desc: '' }
+    const pathEl = h('span', { class: 'mono', style: { flex: '1', wordBreak: 'break-all' } }, dirs[which])
+    const badge = h('span', { class: 'badge' + (dirs.custom?.[which] ? ' info' : ''), style: { display: dirs.custom?.[which] ? '' : 'none' } }, '自定义')
+
+    const btnChange = h('button', {
+      class: 'btn btn-sm',
+      onclick: async () => {
+        const target = await pickDir(dirs[which], { title: '选择新的' + meta.label })
+        if (!target || target === dirs[which]) return
+        const ok = await confirmDialog(
+          `把「${meta.label}」从：\n  ${dirs[which]}\n迁移到：\n  ${target}\n\n所有文件会先复制并校验，通过后清空原目录。迁移中请勿关闭应用。`,
+          { danger: true, okText: '迁移' })
+        if (!ok) return
+        btnChange.disabled = true
+        try {
+          const r = await api.post('/api/dirs/change', { which, target })
+          if (r.error) throw new Error(r.error)
+          toast(`${meta.label}已迁移：${r.files} 个文件（${fmtSize(r.bytes)}）→ ${r.target}`, 'ok')
+          dirs = await api.get('/api/dirs')
+          render()
+        } catch (e) {
+          toast('迁移失败：' + e.message, 'err')
+        } finally { btnChange.disabled = false }
+      }
+    }, '更改…')
+
+    const btnReset = h('button', {
+      class: 'btn btn-sm',
+      disabled: !dirs.custom?.[which],
+      onclick: async () => {
+        const ok = await confirmDialog(`把「${meta.label}」恢复为默认目录？\n文件会迁移回：\n  ${dirs.defaults[which]}`, { danger: true, okText: '恢复' })
+        if (!ok) return
+        btnReset.disabled = true
+        try {
+          const r = await api.post('/api/dirs/reset', { which })
+          if (r.error) throw new Error(r.error)
+          toast(`${meta.label}已恢复默认（${r.files} 个文件已迁回）`, 'ok')
+          dirs = await api.get('/api/dirs')
+          render()
+        } catch (e) {
+          toast('恢复失败：' + e.message, 'err')
+        } finally { btnReset.disabled = false }
+      }
+    }, '恢复默认')
+
+    return h('div', { class: 'mod-row', style: { display: 'flex', flexDirection: 'column', gap: '6px', padding: '10px 12px', borderRadius: '10px', border: '1px solid var(--line)' } },
+      h('div', { class: 'row', style: { alignItems: 'center', gap: '8px' } },
+        h('strong', {}, meta.label), badge,
+        h('span', { class: 'muted', style: { fontSize: '12px' } }, meta.desc)),
+      h('div', { class: 'row', style: { alignItems: 'center', gap: '8px' } },
+        pathEl,
+        h('button', { class: 'btn btn-sm', onclick: () => api.post('/api/system/open-path', { which }).catch((e) => toast(e.message, 'err')) }, '📂 打开'),
+        btnChange, btnReset))
+  }
+
+  function fmtSize(n) {
+    if (n == null) return '?'
+    if (n < 1024) return n + ' B'
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB'
+    return (n / 1048576).toFixed(1) + ' MB'
+  }
+
+  return box
+}
 
 // ---------- 对外接口 ----------
 export function initSettings(ctx) {
