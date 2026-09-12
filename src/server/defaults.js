@@ -61,6 +61,9 @@ export const DEFAULT_SETTINGS = {
     quicks: [],   // 自定义快捷测试：[{ alias, host, port, type }]
     removed: []   // 已删除的内置快捷 id
   },
+  saveEditor: {
+    mcDir: ''     // .minecraft 目录（留空自动检测 %APPDATA%\.minecraft）
+  },
   features: {},                 // { featureId: { enabled, visible } }
   layout: []                    // [{ id, w, h }]
 }

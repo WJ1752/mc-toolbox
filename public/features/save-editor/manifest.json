@@ -1,0 +1,13 @@
+{
+  "id": "save-editor",
+  "name": "存档编辑器",
+  "desc": "浏览并编辑 MC 存档：世界属性、玩家状态，每次保存自动备份",
+  "icon": "🗃️",
+  "color": "#f472b6",
+  "version": "1.0.0",
+  "author": "builtin",
+  "size": { "w": 2, "h": 2 },
+  "builtin": true,
+  "enabled": true,
+  "entry": "tile.js"
+}

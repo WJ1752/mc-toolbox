@@ -10,6 +10,7 @@ import * as monitor from './monitor.js'
 import { scanModsDir, listDir, moveModsToBackup, deleteMods, disableMods, enableMods, defaultBackupDir, guessModsDirs } from './mods.js'
 import * as community from './community.js'
 import * as servercore from './servercore.js'
+import * as saveeditor from './saveeditor.js'
 import { setProxy } from './http.js'
 
 const MIME = {
@@ -357,6 +358,55 @@ on('POST', '/api/servercore/download', async (req) => {
     }
   })
   return { ...job, note: info.note }
+})
+
+// ---------------- 存档编辑器 ----------------
+on('GET', '/api/saveeditor/presets', async () => ({ items: saveeditor.findMcDirs() }))
+
+on('GET', '/api/saveeditor/worlds', async (_req, _p, q) => {
+  try {
+    return await saveeditor.listWorlds(q.mcDir)
+  } catch (e) {
+    return { error: e.message, worlds: [] }
+  }
+})
+
+on('GET', '/api/saveeditor/world', async (_req, _p, q) => {
+  try {
+    if (!q.world) return { error: '缺少世界路径' }
+    return await saveeditor.readWorld(q.world)
+  } catch (e) {
+    return { error: e.message }
+  }
+})
+
+on('GET', '/api/saveeditor/player', async (_req, _p, q) => {
+  try {
+    if (!q.world || !q.player) return { error: '缺少世界路径或玩家' }
+    return await saveeditor.readPlayer(q.world, q.player)
+  } catch (e) {
+    return { error: e.message }
+  }
+})
+
+on('POST', '/api/saveeditor/level', async (req) => {
+  const body = await readBody(req)
+  if (!body.world) return { error: '缺少世界路径' }
+  try {
+    return await saveeditor.writeLevel(body.world, body.edits || {})
+  } catch (e) {
+    return { error: e.message }
+  }
+})
+
+on('POST', '/api/saveeditor/player', async (req) => {
+  const body = await readBody(req)
+  if (!body.world || !body.player) return { error: '缺少世界路径或玩家' }
+  try {
+    return await saveeditor.writePlayer(body.world, body.player, body.edits || {})
+  } catch (e) {
+    return { error: e.message }
+  }
 })
 
 // ---------------- 文件系统 ----------------
