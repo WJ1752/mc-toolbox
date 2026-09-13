@@ -63,10 +63,12 @@ export function openChunkEditor(ctx, world) {
   body.appendChild(h('div', { class: 'field' }, h('label', {}, '区域文件（region/*.mca）'), regionSel))
   body.appendChild(statusEl)
 
-  // ---- 中部：存在图 + 俯视图 并排 ----
-  const maps = h('div', { class: 'row', style: { alignItems: 'flex-start', gap: '16px', flexWrap: 'wrap' } })
-  const bitWrap = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } })
-  const chunkWrap = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } })
+  // ---- 中部：存在图 + 俯视图 并排（grid 两列 + canvas 钉死 CSS 尺寸，杜绝被布局拉伸） ----
+  const maps = h('div', {
+    style: { display: 'grid', gridTemplateColumns: 'min-content min-content', gap: '16px', alignItems: 'start', justifyContent: 'start' }
+  })
+  const bitWrap = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px', width: 'min-content' } })
+  const chunkWrap = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px', width: 'min-content' } })
   maps.appendChild(bitWrap)
   maps.appendChild(chunkWrap)
   body.appendChild(maps)
@@ -144,7 +146,10 @@ export function openChunkEditor(ctx, world) {
   function drawBitmap() {
     clear(bitWrap)
     bitWrap.appendChild(h('strong', { style: { fontSize: '12.5px' } }, '区域区块分布（32×32）'))
-    const cv = h('canvas', { width: 32 * CELL, height: 32 * CELL, style: { border: '1px solid var(--line)', cursor: 'pointer', imageRendering: 'pixelated' } })
+    const cv = h('canvas', {
+      width: 32 * CELL, height: 32 * CELL,
+      style: { border: '1px solid var(--line)', cursor: 'pointer', imageRendering: 'pixelated', display: 'block', width: 32 * CELL + 'px', height: 32 * CELL + 'px' }
+    })
     bitWrap.appendChild(cv)
     const g = cv.getContext('2d')
     // 背景 + 全网格：让 32×32 的格子结构始终可见
@@ -210,7 +215,10 @@ export function openChunkEditor(ctx, world) {
     const d = st.detail
     chunkWrap.appendChild(h('strong', { style: { fontSize: '12.5px' } }, `区块 (${cx}, ${cz}) 俯视图（顶层方块）`))
 
-    const cv = h('canvas', { width: 16 * PX, height: 16 * PX, style: { border: '1px solid var(--line)', cursor: 'pointer' } })
+    const cv = h('canvas', {
+      width: 16 * PX, height: 16 * PX,
+      style: { border: '1px solid var(--line)', cursor: 'pointer', display: 'block', width: 16 * PX + 'px', height: 16 * PX + 'px' }
+    })
     chunkWrap.appendChild(cv)
     const g = cv.getContext('2d')
     g.fillStyle = '#0c0f14'
