@@ -93,7 +93,7 @@ public/
 | `client2server` | 客户端转服务端：按 modid 筛选仅客户端 mod，GUI 增删 modid 库，支持移入备份 / 直接删除 / 禁用（改后缀名） |
 | `community-download` | 社区资源下载：Modrinth / CurseForge 搜索并下载 mod、整合包、数据包、资源包、光影；支持多线程、限速、自定义命名规则 |
 | `server-core` | 服务端核心下载：选 MC 版本 + 加载器（官方 / Fabric / Forge / NeoForge / Quilt / Paper）。官方/Paper 直接下载核心；Fabric/Forge/NeoForge/Quilt 下载官方安装器并自动运行，把服务端装到指定目录（生成 run.bat/launch.jar） |
-| `save-editor` | 存档编辑器：解析 level.dat / playerdata（纯手写 NBT 编解码，Long 全程 BigInt 保精度），编辑世界名称、游戏模式、难度、出生点、游戏时间、天气、边界，以及玩家的生命/生命上限/饥饿/经验/坐标/朝向/飞行/无敌；每次保存自动备份原文件（保留最近 10 份） |
+| `save-editor` | 存档编辑器：解析 level.dat / playerdata（纯手写 NBT 编解码，Long 全程 BigInt 保精度），编辑世界名称、游戏模式、难度、出生点、游戏时间、天气、边界，以及玩家的生命/生命上限/饥饿/经验/坐标/朝向/飞行/无敌；每次保存自动备份原文件（保留最近 10 份）。并含**图形化区块编辑**：.mca 区域文件浏览、区块 16×16 俯视彩色地图（顶层方块渲染 + 点选拾取）、按调色板批量替换方块（自动处理位压缩重编码与调色板扩容，.mca 自动备份） |
 
 ## 磁贴
 
@@ -172,6 +172,10 @@ GET    /api/saveeditor/presets       默认 .minecraft 候选目录
 GET    /api/saveeditor/worlds?mcDir= 列出 saves 下的世界（解析 level.dat）
 GET    /api/saveeditor/world?world=  世界可编辑字段 + 玩家清单
 GET    /api/saveeditor/player        玩家数据详情（level 或 playerdata/*.dat）
+GET    /api/saveeditor/regions       世界的区域文件（.mca）列表
+GET    /api/saveeditor/region        区块存在位图（32×32）
+GET    /api/saveeditor/chunk         区块俯视图数据（每列顶层方块）
+POST   /api/saveeditor/chunk/replace 区块内批量替换方块（自动备份 .mca）
 POST   /api/saveeditor/level         写世界属性（每次自动备份）
 POST   /api/saveeditor/player        写玩家数据（每次自动备份）
 GET    /api/dirs                     存储目录（当前/默认/是否自定义）

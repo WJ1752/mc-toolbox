@@ -12,6 +12,7 @@ import * as community from './community.js'
 import * as servercore from './servercore.js'
 import * as saveeditor from './saveeditor.js'
 import * as dirsMgmt from './dirs.js'
+import * as region from './region.js'
 import { setProxy } from './http.js'
 
 const MIME = {
@@ -422,6 +423,36 @@ on('POST', '/api/dirs/change', async (req) => {
 on('POST', '/api/dirs/reset', async (req) => {
   const body = await readBody(req)
   return dirsMgmt.resetDir(String(body.which || ''))
+})
+
+// ---------------- 区块编辑（区域文件 / 图形化俯视） ----------------
+on('GET', '/api/saveeditor/regions', async (_req, _p, q) => {
+  try {
+    if (!q.world) return { error: '缺少世界路径' }
+    return await region.listRegions(q.world)
+  } catch (e) { return { error: e.message } }
+})
+
+on('GET', '/api/saveeditor/region', async (_req, _p, q) => {
+  try {
+    if (!q.world || !q.file) return { error: '缺少世界路径或区域文件' }
+    return region.regionBitmap(q.world, q.file)
+  } catch (e) { return { error: e.message } }
+})
+
+on('GET', '/api/saveeditor/chunk', async (_req, _p, q) => {
+  try {
+    if (!q.world || !q.file || q.cx === undefined || q.cz === undefined) return { error: '缺少参数' }
+    return region.readChunkDetail(q.world, q.file, Number(q.cx), Number(q.cz))
+  } catch (e) { return { error: e.message } }
+})
+
+on('POST', '/api/saveeditor/chunk/replace', async (req) => {
+  const body = await readBody(req)
+  if (!body.world || !body.file || !body.from || !body.to) return { error: '缺少参数（world/file/from/to）' }
+  try {
+    return region.replaceInChunk(body.world, body.file, Number(body.cx), Number(body.cz), String(body.from), String(body.to), { backup: body.noBackup !== true })
+  } catch (e) { return { error: e.message } }
 })
 
 // ---------------- 文件系统 ----------------

@@ -2,6 +2,7 @@ import { h, clear, fmtDateTime, fmtAgo } from '/js/core/dom.js'
 import { api } from '/js/core/api.js'
 import { toast } from '/js/core/toast.js'
 import { pickDir } from '/js/core/dirpicker.js'
+import { openChunkEditor } from './chunk-editor.js'
 
 let ctxRef = null
 let rootEl = null
@@ -279,7 +280,8 @@ function renderEditor(ed) {
       } catch (e) { toast('保存失败：' + e.message, 'err') } finally { btnSaveWorld.disabled = false }
     }
   }, '💾 保存世界属性')
-  ed.appendChild(h('div', { class: 'row' }, btnSaveWorld))
+  ed.appendChild(h('div', { class: 'row' }, btnSaveWorld,
+    h('button', { class: 'btn btn-sm', onclick: () => openChunkEditor(ctxRef, state.world) }, '🗺 区块编辑（图形化）')))
 
   // ---- 玩家数据 ----
   ed.appendChild(h('div', { class: 'hr' }))
