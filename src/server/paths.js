@@ -202,8 +202,9 @@ export function getDirs() {
 const ASSET_PUBLIC = 'publicbundle'
 const ASSET_HOST = 'hostbundle'
 
-// 资源版本戳：build.mjs 会同时写入 .asset-version 文件，避免无意义重复解压
-const ASSET_VERSION = '2026-09-07-r24'
+// 资源版本戳：由 build.mjs 构建时根据 public/ 内容指纹自动生成（asset-version.gen.js），
+// public 任何变化都会改变戳值 → exe 首次启动自动重新解压前端资源
+import { ASSET_VERSION } from './asset-version.gen.js'
 
 async function extractAssetIfNeeded(assetKey, target) {
   const stamp = path.join(target, '.asset-version')

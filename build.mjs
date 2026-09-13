@@ -542,11 +542,35 @@ function runShell(cmdline, opts = {}) {
   })
 }
 
+// ---------- 0b. 生成 public/ 内容指纹（ASSET_VERSION） ----------
+// SEA 运行时靠这个戳判断要不要重新解压前端资源：public 任何文件变化都会改变指纹，
+// 下一次构建后 exe 首次启动就会自动重新解压，杜绝「新 exe 带旧前端」的问题。
+async function genAssetVersion() {
+  const { createHash } = await import('node:crypto')
+  const hash = createHash('md5')
+  const walk = (dir, rel) => {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const p = path.join(dir, ent.name)
+      const r = rel ? rel + '/' + ent.name : ent.name
+      if (ent.isDirectory()) walk(p, r)
+      else { hash.update(r); hash.update(fs.readFileSync(p)) }
+    }
+  }
+  walk(path.join(here, 'public'), '')
+  const version = 'pub-' + hash.digest('hex').slice(0, 16)
+  const genPath = path.join(here, 'src', 'server', 'asset-version.gen.js')
+  const content = `// 由 build.mjs 自动生成：public/ 内容指纹（请勿手改；dev 模式不参与资源解压）\nexport const ASSET_VERSION = ${JSON.stringify(version)}\n`
+  const changed = !fs.existsSync(genPath) || fs.readFileSync(genPath, 'utf8') !== content
+  fs.writeFileSync(genPath, content)
+  console.log(`     ASSET_VERSION = ${version}${changed ? '（已变化，exe 首次启动将重新解压 public）' : '（未变化）'}`)
+}
+
 // ---------- main ----------
 (async () => {
   const t0 = Date.now()
   try {
     await step0()
+    await genAssetVersion()
     await step1()
     await step2()
     await step3()
