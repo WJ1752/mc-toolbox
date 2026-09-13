@@ -124,6 +124,11 @@ export function openChunkEditor(ctx, world) {
   async function loadBitmap() {
     clear(bitWrap)
     st.bitmap = null
+    st.selChunk = null
+    st.detail = null
+    st.picked = null
+    clear(chunkWrap)
+    renderPick()
     bitWrap.appendChild(h('strong', { style: { fontSize: '12.5px' } }, '区域区块分布（32×32）'))
     if (!st.file) return
     try {
@@ -142,15 +147,33 @@ export function openChunkEditor(ctx, world) {
     const cv = h('canvas', { width: 32 * CELL, height: 32 * CELL, style: { border: '1px solid var(--line)', cursor: 'pointer', imageRendering: 'pixelated' } })
     bitWrap.appendChild(cv)
     const g = cv.getContext('2d')
-    g.fillStyle = '#11151b'
+    // 背景 + 全网格：让 32×32 的格子结构始终可见
+    g.fillStyle = '#0c0f14'
     g.fillRect(0, 0, cv.width, cv.height)
+    g.fillStyle = '#1a2028'
+    for (let cz = 0; cz < 32; cz++) {
+      for (let cx = 0; cx < 32; cx++) g.fillRect(cx * CELL + 1, cz * CELL + 1, CELL - 2, CELL - 2)
+    }
+    g.strokeStyle = 'rgba(255,255,255,.08)'
+    g.lineWidth = 1
+    for (let i = 0; i <= 32; i++) {
+      g.beginPath(); g.moveTo(i * CELL + 0.5, 0); g.lineTo(i * CELL + 0.5, cv.height); g.stroke()
+      g.beginPath(); g.moveTo(0, i * CELL + 0.5); g.lineTo(cv.width, i * CELL + 0.5); g.stroke()
+    }
+    // 已生成区块：实心绿（Canvas 2D 不支持 color-mix()，必须用纯色）
     for (let cz = 0; cz < 32; cz++) {
       for (let cx = 0; cx < 32; cx++) {
         if (st.bitmap[cz * 32 + cx]) {
-          g.fillStyle = 'color-mix(in srgb, var(--accent) 70%, #2c6e2c)'
-          g.fillRect(cx * CELL + 1, cz * CELL + 1, CELL - 2, CELL - 2)
+          g.fillStyle = '#3f9e52'
+          g.fillRect(cx * CELL + 2, cz * CELL + 2, CELL - 3, CELL - 3)
         }
       }
+    }
+    // 当前打开的区块：高亮描边
+    if (st.selChunk && st.file) {
+      g.strokeStyle = '#e8f5e9'
+      g.lineWidth = 2
+      g.strokeRect(st.selChunk.cx * CELL, st.selChunk.cz * CELL, CELL, CELL)
     }
     cv.onclick = (e) => {
       const rect = cv.getBoundingClientRect()
@@ -166,7 +189,9 @@ export function openChunkEditor(ctx, world) {
     clear(chunkWrap)
     st.detail = null
     st.picked = null
+    st.selChunk = { cx, cz }
     renderPick()
+    drawBitmap() // 刷新左侧高亮
     chunkWrap.appendChild(h('strong', { style: { fontSize: '12.5px' } }, `区块 (${cx}, ${cz}) 俯视图（顶层方块）`))
     chunkWrap.appendChild(h('div', { class: 'muted', style: { fontSize: '12px' } }, '解析中…'))
     try {

@@ -1,2 +1,2 @@
 // 由 build.mjs 自动生成：public/ 内容指纹（请勿手改；dev 模式不参与资源解压）
-export const ASSET_VERSION = "pub-cb5214473e5fc8a8"
+export const ASSET_VERSION = "pub-d040f892edf648fc"
