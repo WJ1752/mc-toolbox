@@ -4,7 +4,7 @@ import path from 'node:path'
 import os from 'node:os'
 import zlib from 'node:zlib'
 import { parse, write, num, NbtNum, TAG } from '../src/server/nbt.js'
-import { regionBitmap, readChunkDetail, replaceInChunk } from '../src/server/region.js'
+import { regionBitmap, readChunkDetail, replaceInChunk, getBlockAt, setBlockAt, planBox, replaceBoxInChunk } from '../src/server/region.js'
 
 const assert = (cond, msg) => { if (!cond) { console.error('✗ ' + msg); process.exit(1) } console.log('✓ ' + msg) }
 
@@ -169,5 +169,38 @@ const pal = sec0.block_states.palette.map((p) => p.Name)
 // palette 里应该同时有 stone 和 diamond_ore（y=14 层仍是 stone，y=15 部分变 diamond_ore）
 assert(pal.includes('minecraft:diamond_ore'), '调色板包含新方块 diamond_ore')
 assert(pal.includes('minecraft:stone'), '调色板保留 stone（y=14 层未动）')
+
+// ---- 按坐标：查询 ----
+const g1 = getBlockAt(WORLD, 0, 15, 0)
+assert(g1.name === 'minecraft:stone', `getBlockAt(0,15,0)=stone（实际 ${g1.name}）`)
+assert(g1.region === 'r.0.0.mca' && g1.chunk[0] === 0 && g1.chunk[1] === 0, 'getBlockAt 返回所在区域/区块')
+const g2 = getBlockAt(WORLD, 1, 15, 0)
+assert(g2.name === 'minecraft:diamond_ore', 'getBlockAt(1,15,0)=diamond_ore')
+const g3 = getBlockAt(WORLD, 0, 14, 0)
+assert(g3.name === 'minecraft:diamond_ore', 'getBlockAt(0,14,0)=diamond_ore（深层已被替换）')
+
+// ---- 按坐标：设置单方块 ----
+const s1 = setBlockAt(WORLD, 0, 15, 0, 'minecraft:gold_block')
+assert(s1.ok && s1.from === 'minecraft:stone' && s1.replaced === 1, 'setBlockAt 单方块替换')
+assert(getBlockAt(WORLD, 0, 15, 0).name === 'minecraft:gold_block', 'setBlockAt 后读取=gold_block')
+const s2 = setBlockAt(WORLD, 0, 200, 0, 'minecraft:air')
+assert(s2.ok, 'Y=200（section 不存在）设 air 为安全 no-op')
+
+// ---- 按坐标：长方体计划（跨区域过滤） ----
+const plan = planBox(WORLD, { x1: 0, y1: 15, z1: 0, x2: 600, y2: 20, z2: 5 })
+assert(plan.totalChunks === 32, 'planBox 跨 r.1.0（不存在）自动过滤 → 32 个区块: ' + plan.totalChunks)
+
+// ---- 按坐标：长方体替换（部分相交 + Y 裁剪） ----
+const b1 = replaceBoxInChunk(WORLD, 'r.0.0.mca', 0, 0,
+  { x1: 0, y1: 15, z1: 0, x2: 80, y2: 20, z2: 5 }, 'minecraft:diamond_ore', 'minecraft:glowstone', { backup: false })
+assert(b1.ok && b1.replaced === 48, '盒内替换 diamond_ore→glowstone 48 个（Y 裁剪到 15 层）: ' + b1.replaced)
+assert(getBlockAt(WORLD, 1, 15, 0).name === 'minecraft:glowstone', '盒内 (1,15,0)=glowstone')
+assert(getBlockAt(WORLD, 1, 14, 0).name === 'minecraft:diamond_ore', '盒外 Y=14 不受影响')
+
+// ---- 按坐标：留空 from = 全部替换（单格 /fill） ----
+const b2 = replaceBoxInChunk(WORLD, 'r.0.0.mca', 5, 7,
+  { x1: 80, y1: 15, z1: 112, x2: 80, y2: 15, z2: 112 }, '', 'minecraft:glowstone', { backup: false })
+assert(b2.ok && b2.replaced === 1, '留空 from = 全部替换（单格）')
+assert(getBlockAt(WORLD, 80, 15, 112).name === 'minecraft:glowstone', 'chunk(5,7) 顶层单格=glowstone')
 
 console.log('\n✓✓ 区块编辑器测试全部通过')

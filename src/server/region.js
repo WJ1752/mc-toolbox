@@ -164,6 +164,20 @@ export function readChunkDetail(worldPath, fileName, cx, cz) {
 
 function numOf(v) { return v instanceof NbtNum ? v.value : (typeof v === 'number' ? v : 0) }
 
+// 方块属性（compound）→ 普通对象（NbtNum→number，BigInt→安全范围 number 否则字符串）
+function plainProps(v, depth = 0) {
+  if (v instanceof NbtNum) return v.value
+  if (typeof v === 'bigint') { const n = Number(v); return Number.isSafeInteger(n) ? n : v.toString() }
+  if (Array.isArray(v)) return depth > 4 ? '[…]' : v.map((x) => plainProps(x, depth + 1))
+  if (v && typeof v === 'object') {
+    if (depth > 4) return '{…}'
+    const out = {}
+    for (const [k, x] of Object.entries(v)) out[k] = plainProps(x, depth + 1)
+    return out
+  }
+  return v
+}
+
 function resolveRegionFile(worldPath, fileName) {
   if (!/^r\.-?\d+\.-?\d+\.mca$/.test(fileName)) throw new Error('非法的区域文件名')
   const file = path.join(worldPath, 'region', fileName)
@@ -263,7 +277,173 @@ export function replaceInChunk(worldPath, fileName, cx, cz, from, to, { backup =
   return { ok: true, replaced, touched }
 }
 
-// ---------------- 写回区域文件（含 .mca 备份） ----------------
+// ---------------- 世界坐标 → 区块/区域文件 ----------------
+
+export function worldToChunk(X, Z) {
+  const cx = Math.floor(X / 16)
+  const cz = Math.floor(Z / 16)
+  const rx = Math.floor(cx / 32)
+  const rz = Math.floor(cz / 32)
+  return { rx, rz, fileName: `r.${rx}.${rz}.mca`, cx, cz, lx: X - cx * 16, lz: Z - cz * 16 }
+}
+
+function findSection(root, modern, sy) {
+  const sections = Array.isArray(root.value.sections) ? root.value.sections : []
+  return sections.find((s) => numOf(s.Y) === sy) || null
+}
+
+// 查询世界坐标处的方块
+export function getBlockAt(worldPath, X, Y, Z) {
+  const p = worldToChunk(X, Z)
+  const file = resolveRegionFile(worldPath, p.fileName)
+  const root = readChunkNbt(file, p.cx, p.cz)
+  const modern = isModern(root)
+  const sy = Math.floor(Y / 16)
+  const sec = findSection(root, modern, sy)
+  const out = { x: X, y: Y, z: Z, name: AIR, properties: null, region: p.fileName, chunk: [p.cx, p.cz] }
+  if (!sec) return out
+  const { palette, data } = sectionKey(sec, modern)
+  if (!Array.isArray(palette) || !palette.length) return out
+  const indices = decodeIndices(data, palette.length, dataVersionOf(root))
+  const entry = palette[indices[(Y - sy * 16) * 256 + p.lz * 16 + p.lx]]
+  if (entry) {
+    out.name = paletteName(entry)
+    if (entry.Properties && typeof entry.Properties === 'object') {
+      out.properties = plainProps(entry.Properties)
+    }
+  }
+  return out
+}
+
+// 设置单个方块（按坐标）
+export function setBlockAt(worldPath, X, Y, Z, to) {
+  const p = worldToChunk(X, Z)
+  const file = resolveRegionFile(worldPath, p.fileName)
+  const root = readChunkNbt(file, p.cx, p.cz)
+  const modern = isModern(root)
+  const dv = dataVersionOf(root)
+  const sy = Math.floor(Y / 16)
+  let sec = findSection(root, modern, sy)
+  const backupPath = backupMca(file)
+
+  if (!sec) {
+    if (to === AIR) return { ok: true, from: AIR, replaced: 0, backup: backupPath, note: '目标位置所在 section 不存在，本来就是空气' }
+    // 创建新 section：调色板 [air, to]，全部索引 0（air），仅目标位指向 to
+    sec = { Y: new NbtNum(TAG.BYTE, sy), block_states: { palette: [{ Name: AIR }, { Name: to }] } }
+    const sections = root.value.sections ||= []
+    sections.push(sec)
+    const modern2 = isModern(root)
+    const indices = new Int32Array(4096)
+    indices[(Y - sy * 16) * 256 + p.lz * 16 + p.lx] = 1
+    writeSectionBack(sec, modern2, sec.block_states.palette, indices)
+    writeChunkBack(file, p.cx, p.cz, root)
+    return { ok: true, from: AIR, replaced: 1, backup: backupPath }
+  }
+
+  const { palette, data } = sectionKey(sec, modern)
+  if (!Array.isArray(palette) || !palette.length) return { error: 'section 调色板异常' }
+  const indices = decodeIndices(data, palette.length, dv)
+  const pos = (Y - sy * 16) * 256 + p.lz * 16 + p.lx
+  const from = paletteName(palette[indices[pos]] || { Name: AIR })
+  if (from === to) return { ok: true, from, replaced: 0, note: '目标方块与当前相同', backup: backupPath }
+  let toIdx = palette.findIndex((e) => paletteName(e) === to)
+  if (toIdx < 0) { toIdx = palette.length; palette.push({ Name: to }) }
+  indices[pos] = toIdx
+  writeSectionBack(sec, modern, palette, indices)
+  writeChunkBack(file, p.cx, p.cz, root)
+  return { ok: true, from, replaced: 1, backup: backupPath }
+}
+
+// ---------------- 按坐标范围（长方体）替换 ----------------
+
+// 计划：把世界坐标长方体拆成受影响的区块列表（只含区域文件已存在的）
+export function planBox(worldPath, box) {
+  const b = normBox(box)
+  const items = []
+  const regions = new Set()
+  const cx1 = Math.floor(b.minX / 16), cx2 = Math.floor(b.maxX / 16)
+  const cz1 = Math.floor(b.minZ / 16), cz2 = Math.floor(b.maxZ / 16)
+  for (let cx = cx1; cx <= cx2; cx++) {
+    for (let cz = cz1; cz <= cz2; cz++) {
+      const rx = Math.floor(cx / 32), rz = Math.floor(cz / 32)
+      const fileName = `r.${rx}.${rz}.mca`
+      const file = path.join(worldPath, 'region', fileName)
+      if (!fs.existsSync(file)) continue // 该区域还没生成地形，跳过
+      regions.add(fileName)
+      items.push({ file: fileName, cx, cz })
+    }
+  }
+  return { box: b, items, regions: [...regions], totalChunks: items.length }
+}
+
+function normBox(box) {
+  const i = (v) => Math.trunc(Number(v))
+  const x1 = i(box.x1), x2 = i(box.x2), y1 = i(box.y1), y2 = i(box.y2), z1 = i(box.z1), z2 = i(box.z2)
+  if ([x1, x2, y1, y2, z1, z2].some((v) => !Number.isFinite(v))) throw new Error('坐标必须是数字')
+  if (y1 < -2032 || y2 > 2031) throw new Error('Y 超出范围（-2032 ~ 2031）')
+  return {
+    minX: Math.min(x1, x2), maxX: Math.max(x1, x2),
+    minY: Math.max(-2032, Math.min(y1, y2)), maxY: Math.max(-2032, Math.max(y1, y2)),
+    minZ: Math.min(z1, z2), maxZ: Math.max(z1, z2)
+  }
+}
+
+// 在单个区块内应用长方体替换（box 为世界坐标；from 为空 = 匹配所有方块，等效 /fill）
+export function replaceBoxInChunk(worldPath, fileName, cx, cz, box, from, to, { backup = true } = {}) {
+  const file = resolveRegionFile(worldPath, fileName)
+  const b = normBox(box)
+  // 区块世界范围
+  const bx1 = cx * 16, bz1 = cz * 16
+  const ox1 = Math.max(b.minX, bx1), ox2 = Math.min(b.maxX, bx1 + 15)
+  const oz1 = Math.max(b.minZ, bz1), oz2 = Math.min(b.maxZ, bz1 + 15)
+  if (ox1 > ox2 || oz1 > oz2) return { ok: true, replaced: 0, note: '范围与该区块不相交' }
+
+  if (backup) backupMca(file)
+  const root = readChunkNbt(file, cx, cz)
+  const modern = isModern(root)
+  const dv = dataVersionOf(root)
+  const sections = Array.isArray(root.value.sections) ? root.value.sections : []
+  const matchAll = !from || from === '*'
+  const fromN = matchAll ? '' : String(from).trim()
+  let replaced = 0
+
+  const sy1 = Math.floor(b.minY / 16), sy2 = Math.floor(b.maxY / 16)
+  for (const sec of sections) {
+    const secY = numOf(sec.Y)
+    if (secY < sy1 || secY > sy2) continue
+    const { palette, data } = sectionKey(sec, modern)
+    if (!Array.isArray(palette) || !palette.length) continue
+    const indices = decodeIndices(data, palette.length, dv)
+    const names = palette.map(paletteName)
+    const toIdx0 = names.indexOf(to)
+
+    let changed = false
+    const ly1 = Math.max(0, b.minY - secY * 16), ly2 = Math.min(15, b.maxY - secY * 16)
+    for (let y = ly1; y <= ly2; y++) {
+      for (let z = oz1 - bz1; z <= oz2 - bz1; z++) {
+        for (let x = ox1 - bx1; x <= ox2 - bx1; x++) {
+          const pos = y * 256 + z * 16 + x
+          const name = names[indices[pos]] || AIR
+          if (!matchAll && name !== fromN) continue
+          if (name === to) continue
+          let tIdx = toIdx0
+          if (tIdx < 0) {
+            tIdx = palette.length
+            palette.push({ Name: to })
+            names.push(to)
+          }
+          indices[pos] = tIdx
+          replaced++
+          changed = true
+        }
+      }
+    }
+    if (changed) writeSectionBack(sec, modern, palette, indices)
+  }
+
+  if (replaced) writeChunkBack(file, cx, cz, root)
+  return { ok: true, replaced }
+}
 
 function backupMca(file) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 23) + '-' + Math.random().toString(36).slice(2, 6)

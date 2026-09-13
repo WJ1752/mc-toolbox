@@ -455,6 +455,41 @@ on('POST', '/api/saveeditor/chunk/replace', async (req) => {
   } catch (e) { return { error: e.message } }
 })
 
+// 按世界坐标操作
+on('POST', '/api/saveeditor/block', async (req) => {
+  const body = await readBody(req)
+  for (const k of ['world', 'x', 'y', 'z']) if (body[k] === undefined) return { error: '缺少参数 ' + k }
+  try {
+    return region.getBlockAt(body.world, Number(body.x), Number(body.y), Number(body.z))
+  } catch (e) { return { error: e.message } }
+})
+
+on('POST', '/api/saveeditor/block/set', async (req) => {
+  const body = await readBody(req)
+  if (!body.to) return { error: '缺少目标方块 to' }
+  try {
+    return region.setBlockAt(body.world, Number(body.x), Number(body.y), Number(body.z), String(body.to).trim())
+  } catch (e) { return { error: e.message } }
+})
+
+on('POST', '/api/saveeditor/box/plan', async (req) => {
+  const body = await readBody(req)
+  if (!body.box) return { error: '缺少 box' }
+  try {
+    return region.planBox(body.world, body.box)
+  } catch (e) { return { error: e.message } }
+})
+
+on('POST', '/api/saveeditor/box/apply', async (req) => {
+  const body = await readBody(req)
+  if (!body.world || !body.file || body.cx === undefined || body.cz === undefined || !body.box || !body.to) {
+    return { error: '缺少参数（world/file/cx/cz/box/to）' }
+  }
+  try {
+    return region.replaceBoxInChunk(body.world, body.file, Number(body.cx), Number(body.cz), body.box, body.from || '', String(body.to).trim(), { backup: body.noBackup !== true })
+  } catch (e) { return { error: e.message } }
+})
+
 // ---------------- 文件系统 ----------------
 on('POST', '/api/fs/open', async (req) => {
   const body = await readBody(req)

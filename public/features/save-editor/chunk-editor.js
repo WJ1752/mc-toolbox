@@ -95,6 +95,128 @@ export function openChunkEditor(ctx, world) {
       allChk, h('span', { style: { fontSize: '12.5px' } }, '同时应用到本区域文件的全部区块（自动备份一次）'),
       progressEl)))
 
+  // ---- 按坐标操作（世界坐标长方体） ----
+  const mkNum = (ph) => h('input', { class: 'input', type: 'number', placeholder: ph, style: { width: '86px' } })
+  const cx1In = mkNum('X1'), cy1In = mkNum('Y1'), cz1In = mkNum('Z1')
+  const cx2In = mkNum('X2'), cy2In = mkNum('Y2'), cz2In = mkNum('Z2')
+  const boxFromIn = h('input', { class: 'input mono', list: 'seBlocks', placeholder: '原方块，留空=全部（等效 /fill）', style: { minWidth: '200px' } })
+  const boxToIn = h('input', { class: 'input mono', list: 'seBlocks', placeholder: '新方块，如 minecraft:air', style: { minWidth: '200px' } })
+  const boxStatusEl = h('div', { class: 'muted', style: { fontSize: '12px' } }, '')
+  const progressEl2 = h('span', { class: 'muted', style: { fontSize: '12px' } }, '')
+  const btnBoxGo = h('button', { class: 'btn btn-sm btn-danger', onclick: doBoxReplace }, '⚡ 按坐标替换')
+  const btnQuery = h('button', { class: 'btn btn-sm', onclick: queryBlock }, '🔍 查询角1方块')
+  const btnPick1 = h('button', { class: 'btn btn-sm', onclick: () => pickToCorner(1) }, '拾取→角1')
+  const btnPick2 = h('button', { class: 'btn btn-sm', onclick: () => pickToCorner(2) }, '拾取→角2')
+  const jcxIn = h('input', { class: 'input', type: 'number', placeholder: '区块X', style: { width: '86px' } })
+  const jczIn = h('input', { class: 'input', type: 'number', placeholder: '区块Z', style: { width: '86px' } })
+  const btnJump = h('button', {
+    class: 'btn btn-sm',
+    onclick: async () => {
+      const cx = Math.trunc(Number(jcxIn.value)), cz = Math.trunc(Number(jczIn.value))
+      if (!Number.isFinite(cx) || !Number.isFinite(cz)) { toast('请输入区块坐标', 'warn'); return }
+      const rx = Math.floor(cx / 32), rz = Math.floor(cz / 32)
+      const fileName = `r.${rx}.${rz}.mca`
+      if (!st.regions.some((r) => r.name === fileName)) { toast(`区域文件 ${fileName} 不存在（区块未生成）`, 'warn'); return }
+      regionSel.value = fileName
+      st.file = fileName
+      await loadBitmap()
+      await loadChunk(cx - rx * 32, cz - rz * 32)
+    }
+  }, '跳转')
+
+  body.appendChild(h('div', { class: 'field' },
+    h('label', {}, '按坐标操作（世界坐标；长方体范围替换，支持跨区块）'),
+    h('div', { class: 'row wrap', style: { alignItems: 'center', gap: '6px' } },
+      h('span', { class: 'muted' }, '角1'), cx1In, cy1In, cz1In,
+      h('span', { class: 'muted' }, '角2'), cx2In, cy2In, cz2In,
+      btnPick1, btnPick2, btnQuery),
+    h('div', { class: 'row wrap', style: { alignItems: 'center', gap: '6px', marginTop: '4px' } },
+      h('span', { class: 'muted' }, '原方块'), boxFromIn,
+      h('span', {}, '→'),
+      h('span', { class: 'muted' }, '新方块'), boxToIn,
+      btnBoxGo),
+    h('div', { class: 'row wrap', style: { alignItems: 'center', gap: '6px', marginTop: '4px' } },
+      h('span', { class: 'muted' }, '跳转到区块'), jcxIn, jczIn, btnJump,
+      progressEl2),
+    boxStatusEl))
+
+  function regionOffset() {
+    const m = /r\.(-?\d+)\.(-?\d+)\.mca$/.exec(st.file || '')
+    return m ? { rx: +m[1], rz: +m[2] } : { rx: 0, rz: 0 }
+  }
+
+  function pickedWorld() {
+    if (!st.picked || !st.selChunk) return null
+    const { rx, rz } = regionOffset()
+    return {
+      x: rx * 512 + st.selChunk.cx * 16 + st.picked.x,
+      y: st.picked.y,
+      z: rz * 512 + st.selChunk.cz * 16 + st.picked.z
+    }
+  }
+
+  function pickToCorner(n) {
+    const w = pickedWorld()
+    if (!w) { toast('请先在俯视图上点击拾取一个方块', 'warn'); return }
+    if (w.y === null) { toast('拾取的列全是空气，没有可用的 Y 坐标', 'warn'); return }
+    if (n === 1) { cx1In.value = w.x; cy1In.value = w.y; cz1In.value = w.z }
+    else { cx2In.value = w.x; cy2In.value = w.y; cz2In.value = w.z }
+    toast(`角${n} 已设为 (${w.x}, ${w.y}, ${w.z})`, 'ok')
+  }
+
+  async function queryBlock() {
+    const x = Number(cx1In.value), y = Number(cy1In.value), z = Number(cz1In.value)
+    if (![x, y, z].every(Number.isFinite)) { toast('请先填写角1坐标', 'warn'); return }
+    try {
+      const r = await api.post('/api/saveeditor/block', { world: st.world.path, x, y, z })
+      if (r.error) throw new Error(r.error)
+      boxStatusEl.textContent = `(${r.x}, ${r.y}, ${r.z}) = ${r.name}` +
+        (r.properties ? ` ${JSON.stringify(r.properties)}` : '') + `  ·  所在 ${r.region} 区块 (${r.chunk[0]}, ${r.chunk[1]})`
+      if (!boxFromIn.value) boxFromIn.value = r.name
+    } catch (e) { boxStatusEl.textContent = '查询失败：' + e.message }
+  }
+
+  async function doBoxReplace() {
+    const norm = (s) => (s.includes(':') ? s.trim() : 'minecraft:' + s.trim())
+    const to = boxToIn.value.trim()
+    if (!to) { toast('请填写新方块', 'warn'); return }
+    const box = {
+      x1: cx1In.value, y1: cy1In.value, z1: cz1In.value,
+      x2: cx2In.value, y2: cy2In.value, z2: cz2In.value
+    }
+    if (Object.values(box).some((v) => v === '')) { toast('请填写完整的角1/角2坐标', 'warn'); return }
+    const from = boxFromIn.value.trim() ? norm(boxFromIn.value) : ''
+    try {
+      const plan = await api.post('/api/saveeditor/box/plan', { world: st.world.path, box })
+      if (plan.error) throw new Error(plan.error)
+      if (!plan.items.length) { toast('范围内没有任何已生成的区块', 'warn'); return }
+      const scope = from ? `把 ${from} 替换为 ${to}` : `把范围内所有方块（含空气）替换为 ${to}`
+      const ok = await ctx.confirm(
+        `范围 (${box.x1}, ${box.y1}, ${box.z1}) → (${box.x2}, ${box.y2}, ${box.z2})\n${scope}\n涉及 ${plan.totalChunks} 个区块。\n首次执行自动备份涉及的区域文件。继续？`,
+        { danger: true, okText: '替换' })
+      if (!ok) return
+      btnBoxGo.disabled = true
+      let total = 0, done = 0, skipped = 0
+      for (const it of plan.items) {
+        progressEl2.textContent = `替换进度 ${done}/${plan.items.length}…`
+        const r = await api.post('/api/saveeditor/box/apply', {
+          world: st.world.path, file: it.file, cx: it.cx, cz: it.cz, box: plan.box, from, to, noBackup: done > 0
+        }).catch((e) => ({ error: e.message }))
+        if (r.error) { skipped++; continue }
+        total += r.replaced || 0
+        done++
+      }
+      progressEl2.textContent = ''
+      toast(`坐标替换完成：${total} 个方块${skipped ? `（跳过 ${skipped} 个区块）` : ''}（.mca 已备份）`, 'ok')
+      if (st.detail && st.selChunk && plan.items.some((i) => i.cx === st.selChunk.cx && i.cz === st.selChunk.cz && i.file === st.file)) {
+        loadChunk(st.selChunk.cx, st.selChunk.cz)
+      }
+    } catch (e) {
+      toast('坐标替换失败：' + e.message, 'err')
+      progressEl2.textContent = ''
+    } finally { btnBoxGo.disabled = false }
+  }
+
   body.appendChild(h('div', { class: 'muted', style: { fontSize: '12px', lineHeight: '1.7' } },
     '⚠️ 编辑前请关闭对应的游戏/服务端。首次替换会自动备份整个 .mca 文件（保留最近 10 份）；替换使用方块默认属性（如台阶朝向等复杂属性暂不支持）。'))
 
@@ -258,9 +380,11 @@ export function openChunkEditor(ctx, world) {
   function renderPick() {
     clear(pickEl)
     if (st.picked) {
+      const w = pickedWorld()
       pickEl.appendChild(h('div', {},
-        h('strong', {}, `已拾取：(${st.picked.x}, ${st.picked.z}) 高度 y=${st.picked.y} `),
-        h('span', { class: 'mono' }, st.picked.name)))
+        h('strong', {}, `已拾取：局部 (${st.picked.x}, ${st.picked.z}) 高度 y=${st.picked.y} `),
+        h('span', { class: 'mono' }, st.picked.name),
+        w && w.y !== null ? h('span', { class: 'muted' }, `　世界坐标 (${w.x}, ${w.y}, ${w.z})`) : null))
     } else {
       pickEl.appendChild(h('span', { class: 'muted' }, '在俯视图上点击格子以拾取方块。'))
     }
