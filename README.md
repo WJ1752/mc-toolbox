@@ -98,7 +98,7 @@ public/
 | --- | --- |
 | `server-status` | 单个服务器在线测试：Java/基岩自动识别，延迟、版本、玩家、MOTD、图标、原始 JSON，可一键加入监测 |
 | `latency-monitor` | 多服务器持续监测：每台服务器是一张可拖动的小磁贴，点击放大看折线图、在线率、丢包、逐次日志 |
-| `client2server` | 客户端转服务端：按 modid 筛选仅客户端 mod，GUI 增删 modid 库，支持移入备份 / 直接删除 / 禁用（改后缀名） |
+| `client2server` | 客户端转服务端：支持扫描深层 mods 目录，也可拖入 ZIP / `.mrpack` 或选择客户端整合包文件夹，自动移除仅客户端 mod 并生成新的服务端 ZIP；原包不改写，可选择输出目录 |
 | `community-download` | 社区资源下载：Modrinth / CurseForge 搜索并下载 mod、整合包、数据包、资源包、光影；支持多线程、限速、自定义命名规则 |
 | `server-core` | 服务端核心下载：选 MC 版本 + 加载器（官方 / Fabric / Forge / NeoForge / Quilt / Paper）。官方/Paper 直接下载核心；Fabric/Forge/NeoForge/Quilt 下载官方安装器并自动运行，把服务端装到指定目录（生成 run.bat/launch.jar） |
 | `i18n` | 整合包翻译：复用 mc-i18n 的语言文件扫描、批量翻译、实时进度、任务书、术语表、校对台、质量检查和汉化资源包打包工作台 |
@@ -170,6 +170,8 @@ POST   /api/monitors/:id/check        立即检测
 GET/POST/PUT/DELETE /api/mods/client-list   仅客户端 modid 库
 POST   /api/mods/scan                 扫描 mods 目录
 POST   /api/mods/apply                移入备份 / 删除 / 禁用 / 启用
+POST   /api/mods/convert              目录或本地 ZIP / .mrpack 转服务端 ZIP
+POST   /api/mods/convert-upload       拖入压缩包上传并转服务端 ZIP
 GET    /api/servercore/loaders       支持的加载器列表
 GET    /api/servercore/gameversions   MC release 版本列表
 GET    /api/servercore/loaderversions 指定加载器+MC版本的可用版本

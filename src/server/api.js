@@ -8,6 +8,7 @@ import { scanFeatures, removeFeature } from './features.js'
 import { pingServer } from './mc-ping.js'
 import * as monitor from './monitor.js'
 import { scanModsDir, listDir, moveModsToBackup, deleteMods, disableMods, enableMods, defaultBackupDir, guessModsDirs } from './mods.js'
+import { convertPack, writeUploadedPack, removeTempPack } from './pack-converter.js'
 import * as community from './community.js'
 import * as servercore from './servercore.js'
 import * as saveeditor from './saveeditor.js'
@@ -64,6 +65,26 @@ function readBody(req) {
       }
     })
     req.on('error', () => resolve({}))
+  })
+}
+
+function readRawBody(req, maxBytes = 2 * 1024 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const length = Number(req.headers['content-length'] || 0)
+    if (length > maxBytes) return reject(new Error('上传文件超过 2 GB'))
+    const chunks = []
+    let total = 0
+    req.on('data', (chunk) => {
+      total += chunk.length
+      if (total > maxBytes) {
+        req.destroy()
+        reject(new Error('上传文件超过 2 GB'))
+        return
+      }
+      chunks.push(chunk)
+    })
+    req.on('end', () => resolve(Buffer.concat(chunks, total)))
+    req.on('error', reject)
   })
 }
 
@@ -254,6 +275,50 @@ on('POST', '/api/mods/apply', async (req) => {
   const backupDir = body.backupDir || s.client2server.backupDir || defaultBackupDir(body.dir || s.client2server.modsDir)
   const r = await moveModsToBackup(files, backupDir)
   return { mode: 'backup', backupDir, ...r }
+})
+
+function clientModIds() {
+  const db = store.get('clientmods', { items: DEFAULT_CLIENT_MODS })
+  return (db.items || []).map((item) => item.modid).filter(Boolean)
+}
+
+on('POST', '/api/mods/convert', async (req) => {
+  const body = await readBody(req)
+  if (!body.source) return { error: '未指定客户端整合包或目录' }
+  try {
+    return await convertPack({
+      source: body.source,
+      outputDir: body.outputDir,
+      outputName: body.outputName,
+      clientModIds: clientModIds(),
+      autoDetectEnv: body.autoDetectEnv !== false
+    })
+  } catch (e) {
+    return { error: e.message }
+  }
+})
+
+on('POST', '/api/mods/convert-upload', async (req, _params, query) => {
+  let uploaded
+  try {
+    const encodedName = String(req.headers['x-file-name'] || 'client-pack.zip')
+    const name = decodeURIComponent(encodedName)
+    uploaded = await writeUploadedPack(await readRawBody(req), name)
+    const ext = path.extname(name) || '.zip'
+    const stem = path.basename(name, ext)
+    return await convertPack({
+      source: uploaded.file,
+      outputDir: query.outputDir || '',
+      outputName: query.outputName || `${stem}-server.zip`,
+      clientModIds: clientModIds(),
+      autoDetectEnv: query.autoDetectEnv !== 'false',
+      uploaded: true
+    })
+  } catch (e) {
+    return { error: e.message }
+  } finally {
+    if (uploaded) await removeTempPack(uploaded.dir)
+  }
 })
 
 // ---------------- 社区资源（Modrinth / CurseForge） ----------------

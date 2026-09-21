@@ -316,6 +316,6 @@ export function pickDir(current, { title = '选择目录', fileMode = false, ext
 }
 
 /** 脚本选择器：在目录里挑 .bat / .cmd / .sh（单击选中、双击确认） */
-export function pickFile(current, { title = '选择脚本' } = {}) {
-  return pickDir(current, { title, fileMode: true, exts: ['.bat', '.cmd', '.sh'] })
+export function pickFile(current, { title = '选择脚本', exts = ['.bat', '.cmd', '.sh'] } = {}) {
+  return pickDir(current, { title, fileMode: true, exts })
 }

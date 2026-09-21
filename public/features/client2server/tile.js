@@ -8,7 +8,7 @@ let ctxRef = null
 let dirInput = null
 let summaryEl = null
 let tableWrap = null
-let state = { dir: '', items: [], library: [], selected: new Set(), mode: null, busy: false, showMatchedOnly: false }
+let state = { dir: '', items: [], library: [], selected: new Set(), mode: null, busy: false, showMatchedOnly: false, convertSource: '', convertFile: null, convertBusy: false }
 let btnFilter = null
 
 export default {
@@ -35,6 +35,53 @@ export default {
 
     const btnScan = h('button', { class: 'btn btn-primary btn-sm', onclick: () => scan() }, '扫描')
     const btnExec = h('button', { class: 'btn btn-sm btn-danger', onclick: () => apply() }, '处理选中项')
+
+    // 整合包转换：目录走本地路径，拖入的压缩包在浏览器无法暴露路径时改为上传到本地服务。
+    const convertInput = h('input', { class: 'input mono', readonly: true, placeholder: '拖入或选择客户端整合包 / 客户端目录' })
+    const outputInput = h('input', { class: 'input mono', readonly: true, placeholder: '输出文件夹（可选）' })
+    const convertStatus = h('div', { class: 'muted', style: { marginTop: '6px', lineHeight: '1.5' } },
+      '未选择输出文件夹时：目录或已选择的压缩包会在客户端原文件夹生成；直接拖入的文件会生成到系统“下载”文件夹。原文件不会被修改。')
+    const drop = h('div', { class: 'drop-zone', tabindex: '0', style: { marginTop: '8px' } }, '将客户端 ZIP / .mrpack 拖到这里，或点击选择文件')
+    const btnPackage = h('button', { class: 'btn btn-sm', onclick: async () => {
+      const p = await pickFile('', { title: '选择客户端整合包', exts: ['.zip', '.mrpack'] })
+      if (p) setConvertSource(p, null)
+    } }, '选择安装包')
+    const btnFolder = h('button', { class: 'btn btn-sm', onclick: async () => {
+      const p = await pickDir('', { title: '选择客户端整合包目录' })
+      if (p) setConvertSource(p, null)
+    } }, '选择文件夹')
+    const btnOutput = h('button', { class: 'btn btn-sm', onclick: async () => {
+      const p = await pickDir(outputInput.value || '', { title: '选择服务端包输出文件夹' })
+      if (p) { outputInput.value = p; convertStatus.textContent = `服务端包将生成到：${p}。原客户端文件不会被修改。` }
+    } }, '选择输出文件夹')
+    const btnConvert = h('button', { class: 'btn btn-sm btn-primary', onclick: convertPack }, '转换为服务端包')
+    drop.onclick = () => btnPackage.click()
+    function setConvertSource(source, file) {
+      state.convertSource = source || ''
+      state.convertFile = file || null
+      convertInput.value = source || file?.name || ''
+      const suffix = file ? '（将上传到本地工具箱处理）' : ''
+      convertStatus.textContent = `已选择：${source || file?.name || '未选择'}${suffix} 原文件不会被修改。`
+    }
+    drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over') })
+    drop.addEventListener('dragleave', () => drop.classList.remove('over'))
+    drop.addEventListener('drop', (e) => {
+      e.preventDefault()
+      drop.classList.remove('over')
+      const file = e.dataTransfer?.files?.[0]
+      if (!file) return
+      if (!/\.(zip|mrpack)$/i.test(file.name)) { toast('请拖入 .zip 或 .mrpack 客户端整合包', 'err'); return }
+      // 某些 WebView 会提供 file.path；标准浏览器没有路径时仍可上传文件内容。
+      setConvertSource(file.path || '', file.path ? null : file)
+    })
+    ctx.body.appendChild(h('div', { class: 'section c2s-convert', style: { marginBottom: '10px' } },
+      h('div', { class: 'row wrap' }, h('b', {}, '整合包转服务端'), h('span', { class: 'muted' }, '保留原包，生成新的服务端 ZIP')),
+      drop,
+      h('div', { class: 'row wrap', style: { marginTop: '8px' } },
+        h('div', { class: 'grow', style: { minWidth: '220px' } }, convertInput), btnPackage, btnFolder),
+      h('div', { class: 'row wrap', style: { marginTop: '6px' } },
+        h('div', { class: 'grow', style: { minWidth: '220px' } }, outputInput), btnOutput, btnConvert),
+      convertStatus))
 
     ctx.body.appendChild(h('div', { class: 'field' }, h('label', {}, 'mods 目录'),
       h('div', { class: 'row' }, h('div', { class: 'grow' }, dirInput),
@@ -114,6 +161,46 @@ export default {
 
     await loadLibrary()
     if (state.dir) scan()
+
+    async function convertPack() {
+      if (state.convertBusy) return
+      if (!state.convertSource && !state.convertFile) { toast('请先拖入或选择客户端整合包 / 目录', 'err'); return }
+      state.convertBusy = true
+      btnConvert.disabled = true
+      try {
+        let result
+        if (state.convertFile) {
+          const q = new URLSearchParams()
+          if (outputInput.value.trim()) q.set('outputDir', outputInput.value.trim())
+          const response = await fetch('/api/mods/convert-upload?' + q, {
+            method: 'POST',
+            headers: { 'Content-Type': state.convertFile.type || 'application/zip', 'X-File-Name': encodeURIComponent(state.convertFile.name) },
+            body: state.convertFile
+          })
+          result = await response.json()
+        } else {
+          result = await api.post('/api/mods/convert', { source: state.convertSource, outputDir: outputInput.value.trim() })
+        }
+        if (result.error) throw new Error(result.error)
+        const warning = (result.warnings || []).map((x) => h('div', { class: 'result-bad' }, x))
+        const detail = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '7px' } },
+          h('div', { class: 'result-ok' }, `转换完成：移除 ${result.removedCount || 0} 个仅客户端 mod`),
+          h('div', { class: 'mono', style: { wordBreak: 'break-all' } }, result.output),
+          h('div', { class: 'muted' }, `扫描 ${result.totalMods || 0} 个 mod · 输出 ${Math.round((result.packed?.bytes || 0) / 1024)} KB`),
+          ...warning)
+        openModal({
+          title: '服务端整合包已生成',
+          body: detail,
+          buttons: [{ label: '打开输出文件夹', onClick: async () => { await api.post('/api/fs/open', { path: result.outputDir }); } }, { label: '关闭', class: 'btn-primary' }]
+        })
+        toast('服务端整合包已生成', 'ok')
+      } catch (e) {
+        toast('转换失败：' + e.message, 'err')
+      } finally {
+        state.convertBusy = false
+        btnConvert.disabled = false
+      }
+    }
   }
 }
 
