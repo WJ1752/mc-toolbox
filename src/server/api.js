@@ -14,6 +14,7 @@ import * as saveeditor from './saveeditor.js'
 import * as dirsMgmt from './dirs.js'
 import * as region from './region.js'
 import { setProxy } from './http.js'
+import * as i18n from './i18n.js'
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -85,6 +86,14 @@ on('POST', '/api/shutdown', async () => {
   clientHeartbeat.shutdown = true
   return { ok: true }
 })
+
+// ---------------- 整合包翻译（mc-i18n） ----------------
+on('GET', '/api/i18n/status', async () => i18n.getStatus())
+on('POST', '/api/i18n/start', async (req) => {
+  const body = await readBody(req)
+  return await i18n.start(body)
+})
+on('POST', '/api/i18n/stop', async () => await i18n.stop())
 
 function match(pattern, url) {
   const p = pattern.split('/').filter(Boolean)

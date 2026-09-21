@@ -105,6 +105,10 @@ export async function readModMeta(filePath) {
 
 export async function scanModsDir(dir, opts = {}) {
   const { recursive = true, includeDisabled = true } = opts
+  // 整合包常把实例、.minecraft、mods 和分类子目录层层嵌套。
+  // 保留上限避免误选用户目录时无限遍历，但默认深度足够覆盖常见启动器结构。
+  const requestedDepth = Number(opts.maxDepth)
+  const maxDepth = Number.isFinite(requestedDepth) ? Math.max(0, Math.min(64, requestedDepth)) : 24
   if (!dir || !fs.existsSync(dir)) throw new Error('目录不存在：' + dir)
   const stat = await fsp.stat(dir)
   if (!stat.isDirectory()) throw new Error('不是目录：' + dir)
@@ -115,7 +119,8 @@ export async function scanModsDir(dir, opts = {}) {
     for (const it of items) {
       const full = path.join(current, it.name)
       if (it.isDirectory()) {
-        if (recursive && depth < 3 && !it.name.startsWith('.')) {
+        const ignoredDir = it.name === '.git' || it.name === '.mc-i18n' || it.name === 'node_modules' || it.name.startsWith('$')
+        if (recursive && depth < maxDepth && !ignoredDir) {
           await walk(full, depth + 1).catch(() => {})
         }
         continue

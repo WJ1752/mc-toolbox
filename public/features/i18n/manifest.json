@@ -1,0 +1,13 @@
+{
+  "id": "i18n",
+  "name": "整合包翻译",
+  "desc": "扫描、翻译、校对并打包 Minecraft 整合包语言文件",
+  "icon": "文",
+  "color": "#38bdf8",
+  "version": "1.0.0",
+  "author": "mc-i18n",
+  "size": { "w": 2, "h": 1 },
+  "builtin": true,
+  "enabled": true,
+  "entry": "tile.js"
+}

@@ -33,6 +33,14 @@ node server.js --port=9000 --no-open
 
 dev 模式同样会在 Edge/Chrome 可用时以无浏览器窗口模式启动。
 
+### 整合包翻译运行环境
+
+工具箱内置 [mc-i18n](https://github.com/WJ1752/mc-i18n) 翻译工作台，并通过「整合包翻译」磁贴统一启动和管理。开发模式需要 **Python 3.10+**，首次启动时工具箱会在本机启动一个临时本地端口，再通过内嵌工作台提供完整功能。关闭工具箱时翻译进程会一起退出。
+
+发布单文件版本时，构建脚本会把 `vendor/mc-i18n` 的源码一并打包。目标电脑如果没有 Python，可先准备 `vendor/mc-i18n/dist/mc-i18n.exe`（或 `vendor/mc-i18n/mc-i18n.exe`）再执行构建；工具箱会优先使用该 EXE。没有 EXE 时，单文件版本仍需要目标电脑安装 Python 3.10+。
+
+翻译项目的扫描结果、译文、日志、术语表和资源包都保存在用户选择的整合包目录下的 `.mc-i18n/`，工具箱不会把项目文件复制到自己的配置目录。
+
 ## 打包成单文件可执行（可选，推荐分发）
 
 ```bash
@@ -93,6 +101,7 @@ public/
 | `client2server` | 客户端转服务端：按 modid 筛选仅客户端 mod，GUI 增删 modid 库，支持移入备份 / 直接删除 / 禁用（改后缀名） |
 | `community-download` | 社区资源下载：Modrinth / CurseForge 搜索并下载 mod、整合包、数据包、资源包、光影；支持多线程、限速、自定义命名规则 |
 | `server-core` | 服务端核心下载：选 MC 版本 + 加载器（官方 / Fabric / Forge / NeoForge / Quilt / Paper）。官方/Paper 直接下载核心；Fabric/Forge/NeoForge/Quilt 下载官方安装器并自动运行，把服务端装到指定目录（生成 run.bat/launch.jar） |
+| `i18n` | 整合包翻译：复用 mc-i18n 的语言文件扫描、批量翻译、实时进度、任务书、术语表、校对台、质量检查和汉化资源包打包工作台 |
 | `save-editor` | 存档编辑器：解析 level.dat / playerdata（纯手写 NBT 编解码，Long 全程 BigInt 保精度），编辑世界名称、游戏模式、难度、出生点、游戏时间、天气、边界，以及玩家的生命/生命上限/饥饿/经验/坐标/朝向/飞行/无敌；每次保存自动备份原文件（保留最近 10 份）。并含**图形化区块编辑**：.mca 区域文件浏览、区块 16×16 俯视彩色地图（顶层方块渲染 + 点选拾取）、按调色板批量替换方块（自动处理位压缩重编码与调色板扩容，.mca 自动备份）；支持**按世界坐标操作**：查询单点方块、单点设置、长方体范围替换（等效 /fill，可留空原方块=全部替换，Y 轴自动裁剪，跨区块自动分组迁移）、按区块坐标跳转 |
 
 ## 磁贴
@@ -165,6 +174,9 @@ GET    /api/servercore/loaders       支持的加载器列表
 GET    /api/servercore/gameversions   MC release 版本列表
 GET    /api/servercore/loaderversions 指定加载器+MC版本的可用版本
 POST   /api/servercore/download       下载服务端核心（安装器类下载后自动安装到目标目录）
+GET    /api/i18n/status                翻译引擎状态
+POST   /api/i18n/start                 启动翻译工作台子进程
+POST   /api/i18n/stop                  停止翻译工作台子进程
 GET    /api/fs/roots                  盘符/根目录 + home + presets + specials(桌面/下载/文档) + cwd
 GET    /api/fs/list?path=             目录浏览（返回 parent、dirs、files、presets）
 POST   /api/fs/mkdir                  新建文件夹

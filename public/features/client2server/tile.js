@@ -28,6 +28,7 @@ export default {
     const modeSel = h('select', { class: 'input', style: { width: '150px' } },
       h('option', { value: 'backup' }, '移入备份目录'),
       h('option', { value: 'disable' }, '禁用（改后缀名）'),
+      h('option', { value: 'enable' }, '启用（恢复 .jar）'),
       h('option', { value: 'delete' }, '直接删除'))
     modeSel.value = state.mode
     modeSel.onchange = () => { state.mode = modeSel.value }

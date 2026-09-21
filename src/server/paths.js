@@ -201,6 +201,7 @@ export function getDirs() {
 // 内嵌资源 key（与 build.mjs 的 sea-config.json assets 完全一致）
 const ASSET_PUBLIC = 'publicbundle'
 const ASSET_HOST = 'hostbundle'
+const ASSET_I18N = 'i18nbundle'
 
 // 资源版本戳：由 build.mjs 构建时根据 public/ 内容指纹自动生成（asset-version.gen.js），
 // public 任何变化都会改变戳值 → exe 首次启动自动重新解压前端资源
@@ -462,6 +463,7 @@ export async function init() {
   await fsp.mkdir(_seaRuntimeDir(), { recursive: true })
   await extractAssetIfNeeded(ASSET_PUBLIC, path.join(_seaRuntimeDir(), 'public'))
   await extractAssetIfNeeded(ASSET_HOST, path.join(_seaRuntimeDir(), 'host'))
+  await extractAssetIfNeeded(ASSET_I18N, path.join(_seaRuntimeDir(), 'mc-i18n'))
 }
 
 export function safeJoin(base, target) {

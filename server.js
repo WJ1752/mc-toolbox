@@ -7,6 +7,7 @@ import { requestHandler, clientHeartbeat } from './src/server/api.js'
 import { startEngine, stopEngine, persistHistory } from './src/server/monitor.js'
 import { store } from './src/server/store.js'
 import { DEFAULT_SETTINGS } from './src/server/defaults.js'
+import { stopSync as stopI18n } from './src/server/i18n.js'
 
 const argPort = (process.argv.find((a) => a.startsWith('--port=')) || '').split('=')[1]
 const START_PORT = Number(process.env.MC_TOOLBOX_PORT || argPort || 8756)
@@ -315,6 +316,7 @@ async function main() {
     shuttingDown = true
     // 注意：不要 kill 浏览器进程 —— 用户可能还有其他 Edge 窗口在跑
     try { stopEngine() } catch {}
+    try { await stopI18n() } catch {}
     try { await store.flushAll() } catch {}
     forceQuit('shutdown-ok')
   }

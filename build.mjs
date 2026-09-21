@@ -18,6 +18,7 @@ const TARGET_EXE = path.join(DIST, process.platform === 'win32' ? 'mc-toolbox.ex
 const SEA_BLOB = path.join(BUNDLE, 'sea-prep.blob')
 const SEA_CONFIG = path.join(BUNDLE, 'sea-config.json')
 const BUNDLE_CJS = path.join(BUNDLE, 'bundle.cjs')
+const I18N_SOURCE = path.join(here, 'vendor', 'mc-i18n')
 
 const gunzip = promisify(zlib.gunzip)
 const gzip = promisify(zlib.gzip)
@@ -78,6 +79,17 @@ async function step2() {
   await runBash(cmd)
   const stat = await fsp.stat(target)
   console.log(`     packed, ${(stat.size / 1024).toFixed(1)} KB`)
+
+  // mc-i18n 运行时源码（纯 Python 标准库，SEA 运行时解压到 runtime/mc-i18n）
+  if (fs.existsSync(path.join(I18N_SOURCE, 'mc_i18n', '__main__.py'))) {
+    const i18nAbs = I18N_SOURCE.replace(/\\/g, '/')
+    const i18nTarget = path.join(BUNDLE, 'mc-i18n.tar.gz').replace(/\\/g, '/')
+    await runBash(`cd "${i18nAbs}" && tar --force-local --exclude=__pycache__ --exclude=*.pyc -czf "${i18nTarget}" .`)
+    const i18nStat = await fsp.stat(i18nTarget)
+    console.log(`     mc-i18n runtime packed, ${(i18nStat.size / 1024).toFixed(1)} KB`)
+  } else {
+    console.log('     (未找到 vendor/mc-i18n：跳过翻译运行时打包)')
+  }
 
   await buildWebView2Host()
 }
@@ -357,6 +369,8 @@ function runBash(cmdline, opts = {}) {
 async function step3() {
   logStep(3, '写 sea-config.json')
   const assets = { 'publicbundle': path.join(BUNDLE, 'public.tar.gz') }
+  const i18nTar = path.join(BUNDLE, 'mc-i18n.tar.gz')
+  if (fs.existsSync(i18nTar)) assets['i18nbundle'] = i18nTar
   const hostTar = path.join(BUNDLE, 'host.tar.gz')
   if (fs.existsSync(hostTar)) assets['hostbundle'] = hostTar
   const cfg = {
@@ -557,6 +571,7 @@ async function genAssetVersion() {
     }
   }
   walk(path.join(here, 'public'), '')
+  if (fs.existsSync(I18N_SOURCE)) walk(I18N_SOURCE, 'vendor/mc-i18n')
   const version = 'pub-' + hash.digest('hex').slice(0, 16)
   const genPath = path.join(here, 'src', 'server', 'asset-version.gen.js')
   const content = `// 由 build.mjs 自动生成：public/ 内容指纹（请勿手改；dev 模式不参与资源解压）\nexport const ASSET_VERSION = ${JSON.stringify(version)}\n`

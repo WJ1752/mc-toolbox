@@ -412,6 +412,12 @@ async function boot() {
 
   await syncTiles()
 
+  // 自动启动不依赖翻译磁贴是否展开（默认折叠时也应生效）。失败交给磁贴
+  // 和设置页在用户需要时再次显示具体错误，避免阻塞工具箱主界面启动。
+  if (state.settings.i18n?.autoStart) {
+    api.post('/api/i18n/start', { i18n: state.settings.i18n }).catch(() => {})
+  }
+
   $('#btnSettings').onclick = () => settingsUI.open()
   $('#btnCloseSettings').onclick = () => settingsUI.close()
   $('#btnAddTile').onclick = openAddTile

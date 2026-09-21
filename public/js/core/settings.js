@@ -354,6 +354,55 @@ const SECTIONS = [
     }
   },
   {
+    id: 'i18n',
+    label: '整合包翻译',
+    render() {
+      const el = h('div')
+      el.appendChild(section(
+        '翻译工作台',
+        'mc-i18n 会作为工具箱管理的本地子进程运行，翻译项目文件仍保存在你选择的整合包目录中。',
+        row('Python 解释器', '开发模式需要 Python 3.10+；留空使用系统 PATH 中的 python', text(() => S.i18n?.pythonPath, (v) => { S.i18n.pythonPath = v }, 'python')),
+        row('启动工具箱时自动启动', '打开工具箱后自动准备翻译工作台', sw(() => S.i18n?.autoStart, (v) => { S.i18n.autoStart = v })),
+        row('运行状态', '检查内置运行时、Python 和 Web 工作台是否可用', h('div', { class: 'row wrap' },
+          h('button', {
+            class: 'btn btn-sm btn-primary',
+            onclick: async (e) => {
+              e.currentTarget.disabled = true
+              try {
+                const s = await api.post('/api/i18n/start', { i18n: S.i18n || {} })
+                toast(`翻译工作台已启动${s.port ? `（端口 ${s.port}）` : ''}`, 'ok')
+              } catch (err) {
+                toast('翻译引擎启动失败：' + err.message, 'err')
+              } finally {
+                e.currentTarget.disabled = false
+              }
+            }
+          }, '测试并启动'),
+          h('button', {
+            class: 'btn btn-sm',
+            onclick: async (e) => {
+              e.currentTarget.disabled = true
+              try {
+                await api.post('/api/i18n/stop')
+                toast('翻译工作台已停止', 'ok')
+              } catch (err) {
+                toast('停止翻译引擎失败：' + err.message, 'err')
+              } finally {
+                e.currentTarget.disabled = false
+              }
+            }
+          }, '停止')
+        ))
+      ))
+      el.appendChild(section(
+        '使用说明',
+        '启动后打开“整合包翻译”磁贴即可进入完整工作台，扫描、批量翻译、术语表、任务书、校对和资源包打包功能均由 mc-i18n 提供。',
+        h('div', { class: 'muted' }, '开发模式需要 Python 3.10+。发布单文件前，可在 vendor/mc-i18n/dist/ 放置 mc-i18n.exe，这样目标电脑无需单独安装 Python。')
+      ))
+      return el
+    }
+  },
+  {
     id: 'features',
     label: '功能与磁贴',
     render() {
@@ -498,7 +547,7 @@ const SECTIONS = [
       api.get('/api/system/info').then((info) => {
         box.appendChild(
           h('dl', { class: 'kv' },
-            h('dt', {}, '工具箱版本'), h('dd', {}, '1.3.0'),
+            h('dt', {}, '工具箱版本'), h('dd', {}, '1.4.0'),
             h('dt', {}, '运行环境'), h('dd', {}, `Node ${info.node} · ${info.platform}`),
             h('dt', {}, '项目目录'), h('dd', { class: 'mono' }, info.root),
             h('dt', {}, '配置目录'), h('dd', {}, rowWithOpen(info.configDir, 'configDir')),

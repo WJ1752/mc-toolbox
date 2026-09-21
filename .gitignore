@@ -3,6 +3,11 @@ dist/
 data/
 runtime/
 node_modules/
+**/__pycache__/
+*.pyc
+
+# 可选的翻译单文件运行时（源码版默认使用 Python）
+vendor/mc-i18n/dist/
 
 # WebView2 SDK 缓存（构建时自动拉取）
 host/lib/

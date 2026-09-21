@@ -1,6 +1,6 @@
 // 全局默认设置（前后端共用，前端通过 /api/bootstrap 拉取）
 export const DEFAULT_SETTINGS = {
-  version: 2,
+  version: 3,
   general: {
     theme: 'dark',              // dark | light
     accent: '#5ec96a',          // 主题强调色
@@ -56,6 +56,10 @@ export const DEFAULT_SETTINGS = {
   },
   servercore: {
     memory: '2G'                // 生成的启动脚本分配的堆内存（-Xms / -Xmx）
+  },
+  i18n: {
+    pythonPath: '',              // 开发模式可指定 Python 解释器；留空使用 PATH 中的 python
+    autoStart: false
   },
   serverstatus: {
     quicks: [],   // 自定义快捷测试：[{ alias, host, port, type }]

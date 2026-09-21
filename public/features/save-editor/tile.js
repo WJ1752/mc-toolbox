@@ -38,9 +38,6 @@ export default {
 function buildInto(container) {
   clear(container)
   rootEl = container
-  container.style.display = 'flex'
-  container.style.flexDirection = 'column'
-  container.style.gap = '8px'
 
   // 目录行
   const dirInput = h('input', { class: 'input mono', placeholder: '.minecraft 目录（例如 C:\\Users\\你\\AppData\\Roaming\\.minecraft）', value: state.mcDir })
