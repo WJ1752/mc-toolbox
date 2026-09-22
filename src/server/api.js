@@ -16,6 +16,7 @@ import * as dirsMgmt from './dirs.js'
 import * as region from './region.js'
 import { setProxy } from './http.js'
 import * as i18n from './i18n.js'
+import { AUTHOR, PRODUCT_VERSION } from './build-meta.js'
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -727,6 +728,8 @@ on('POST', '/api/data/import', async (req) => {
 
 // ---------------- 系统 ----------------
 on('GET', '/api/system/info', async () => ({
+  author: AUTHOR,
+  version: PRODUCT_VERSION,
   node: process.version,
   platform: process.platform,
   root: ROOT,

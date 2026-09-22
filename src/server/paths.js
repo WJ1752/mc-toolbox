@@ -206,6 +206,9 @@ const ASSET_I18N = 'i18nbundle'
 // 资源版本戳：由 build.mjs 构建时根据 public/ 内容指纹自动生成（asset-version.gen.js），
 // public 任何变化都会改变戳值 → exe 首次启动自动重新解压前端资源
 import { ASSET_VERSION } from './asset-version.gen.js'
+import { AUTHOR } from './build-meta.js'
+import { SHELL_INTEGRITY } from './integrity.gen.js'
+import { verifyShellIntegrity } from './integrity.js'
 
 async function extractAssetIfNeeded(assetKey, target) {
   const stamp = path.join(target, '.asset-version')
@@ -462,6 +465,7 @@ export async function init() {
   if (!isSEA) return
   await fsp.mkdir(_seaRuntimeDir(), { recursive: true })
   await extractAssetIfNeeded(ASSET_PUBLIC, path.join(_seaRuntimeDir(), 'public'))
+  await verifyShellIntegrity(PUBLIC_DIR, SHELL_INTEGRITY, AUTHOR)
   await extractAssetIfNeeded(ASSET_HOST, path.join(_seaRuntimeDir(), 'host'))
   await extractAssetIfNeeded(ASSET_I18N, path.join(_seaRuntimeDir(), 'mc-i18n'))
 }
