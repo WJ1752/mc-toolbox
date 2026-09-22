@@ -24,6 +24,7 @@ function applySettings() {
   document.documentElement.style.setProperty('--accent', s.general.accent)
   document.documentElement.style.setProperty('--tile-cols', String(Math.max(1, Number(s.general.tileColumns) || 1)))
   grid?.setAnimations(s.general.animations)
+  grid?.relayout?.()
 }
 
 const persistLayout = debounce(async () => {
@@ -389,7 +390,8 @@ async function boot() {
 
   grid = new TileGrid(document.getElementById('grid'), {
     onChange: () => persistLayout(),
-    animations: state.settings.general.animations
+    animations: state.settings.general.animations,
+    masonry: true
   })
 
   settingsUI = initSettings({

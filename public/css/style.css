@@ -261,6 +261,17 @@ body.nv .topbar-actions .btn { cursor: default; }
   /* 不让短的折叠磁贴被同一行较高的展开磁贴强行拉伸，避免多列布局出现大块空白。 */
   align-items: start;
 }
+/* 主工作区使用 JS 计算的瀑布流位置，避免 CSS Grid 让整行被最高磁贴撑开。 */
+.grid.masonry-grid {
+  display: block;
+  position: relative;
+  min-height: 0;
+}
+.grid.masonry-grid > .tile,
+.grid.masonry-grid > .tile-placeholder {
+  position: absolute;
+  box-sizing: border-box;
+}
 .tile {
   position: relative;
   background: var(--surface);
@@ -602,6 +613,6 @@ table.tbl td.num { text-align: right; font-family: var(--mono); }
 @media (max-width: 720px) {
   .settings-body { grid-template-columns: 1fr; }
   .settings-nav { flex-direction: row; overflow: auto; position: static; }
-  .grid { grid-template-columns: 1fr; }
+  .grid { grid-template-columns: 1fr; --tile-cols: 1; }
   .tile.span-2, .tile.span-3 { grid-column: span 1; }
 }

@@ -2,15 +2,25 @@
 const DRAG_THRESHOLD = 4
 
 export class TileGrid {
-  constructor(container, { onChange, animations = true, itemSelector = '.tile', handleSelector = '.tile-head', placeholderClass = 'tile-placeholder' } = {}) {
+  constructor(container, { onChange, animations = true, itemSelector = '.tile', handleSelector = '.tile-head', placeholderClass = 'tile-placeholder', masonry = false } = {}) {
     this.container = container
     this.onChange = onChange || (() => {})
     this.animations = animations
     this.itemSelector = itemSelector
     this.handleSelector = handleSelector
     this.placeholderClass = placeholderClass
+    this.masonry = !!masonry
+    this.layoutRaf = null
+    this.resizeObserver = null
     this.dragging = null
     this.lastDragEnd = 0
+    if (this.masonry) {
+      container.classList.add('masonry-grid')
+      this.resizeObserver = typeof ResizeObserver === 'function'
+        ? new ResizeObserver(() => this._scheduleLayout())
+        : null
+      window.addEventListener('resize', () => this._scheduleLayout())
+    }
     container.addEventListener('pointerdown', (e) => this._down(e))
   }
 
@@ -24,15 +34,23 @@ export class TileGrid {
       const ref = this.container.querySelector(`[data-id="${beforeId}"]`)
       if (ref) {
         this.container.insertBefore(el, ref)
+        this._observe(el)
+        this._scheduleLayout()
         return
       }
     }
     this.container.appendChild(el)
+    this._observe(el)
+    this._scheduleLayout()
   }
 
   remove(id) {
     const el = this.container.querySelector(`[data-id="${id}"]`)
-    if (el) el.remove()
+    if (el) {
+      this.resizeObserver?.unobserve(el)
+      el.remove()
+      this._scheduleLayout()
+    }
   }
 
   get(id) {
@@ -51,6 +69,65 @@ export class TileGrid {
       const el = map.get(id)
       if (el) this.container.appendChild(el)
     }
+    this._scheduleLayout()
+  }
+
+  /** 重新按当前窗口宽度和磁贴高度计算瀑布流位置。 */
+  relayout() {
+    this._scheduleLayout()
+  }
+
+  _observe(el) {
+    if (this.masonry) this.resizeObserver?.observe(el)
+  }
+
+  _scheduleLayout() {
+    if (!this.masonry || this.layoutRaf !== null) return
+    this.layoutRaf = requestAnimationFrame(() => {
+      this.layoutRaf = null
+      this._layoutMasonry()
+    })
+  }
+
+  _layoutMasonry() {
+    if (!this.masonry) return
+    const children = Array.from(this.container.children).filter((el) => {
+      // 拖动中的磁贴由指针位置以 fixed 定位控制，瀑布流只重新排布其余磁贴
+      // 和占位元素，避免布局计算把正在拖动的元素瞬移回列中。
+      if (el === this.dragging?.el) return false
+      return el.matches?.(this.itemSelector) || el.classList?.contains(this.placeholderClass)
+    })
+    if (!children.length) {
+      this.container.style.height = ''
+      return
+    }
+
+    const styles = getComputedStyle(this.container)
+    const columns = Math.max(1, Number.parseInt(styles.getPropertyValue('--tile-cols'), 10) || 1)
+    const gap = Number.parseFloat(styles.columnGap || styles.gap) || 0
+    const width = this.container.clientWidth
+    if (!width) return
+    const colWidth = Math.max(0, (width - gap * (columns - 1)) / columns)
+    const heights = Array.from({ length: columns }, () => 0)
+
+    // 先固定宽度并清掉旧位置，才能得到当前内容真实高度。
+    for (const el of children) {
+      el.style.width = colWidth + 'px'
+      el.style.left = '0px'
+      el.style.top = '0px'
+    }
+    for (const el of children) {
+      let column = 0
+      for (let i = 1; i < heights.length; i++) {
+        if (heights[i] < heights[column]) column = i
+      }
+      const top = heights[column]
+      const height = el.getBoundingClientRect().height
+      el.style.left = `${column * (colWidth + gap)}px`
+      el.style.top = `${top}px`
+      heights[column] = top + height + gap
+    }
+    this.container.style.height = Math.max(0, ...heights) - gap + 'px'
   }
 
   _down(e) {
@@ -182,6 +259,7 @@ export class TileGrid {
     } else {
       this.container.insertBefore(d.ph, ref)
     }
+    this._scheduleLayout()
   }
 
   _end() {
@@ -194,6 +272,7 @@ export class TileGrid {
     document.body.style.userSelect = ''
     this.dragging = null
     this.lastDragEnd = Date.now()
+    this._scheduleLayout()
     this.onChange(this.order())
   }
 }

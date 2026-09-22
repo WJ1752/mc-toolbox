@@ -3,18 +3,18 @@ export const SHELL_INTEGRITY = {
   "authorHash": "8db64220fca20d23cb44970ad85bc8ca211713664db8b51f4c10c185659975e2",
   "files": {
     "index.html": "c192936faeddc5c7cf4e7ebbb7ce8af4719610f60fd03c2f271801c3230a7b0e",
-    "css/style.css": "411783e48c9866451dfc1123698d6ce869e69ab9522f8af34ad7c5b517077c58",
-    "js/app.js": "b230d6e57a0d4139328e928f630f2b8951f14c05e543e61629fa1c675ee7577c",
+    "css/style.css": "ebfae1eb875b326248f230bd623bd4bbf0a6646b8dcde9c3255d4a09e64540e2",
+    "js/app.js": "a789d1c8bb652278b36609db8046062efaaf99610b382dd2bc994f03833dacd2",
     "js/core/api.js": "dfb172f3c2ef75a42073a657790bdec24c5035d7c6e84ef82b0eff8e8f9bc04e",
     "js/core/bus.js": "64e0701ab153020c251b8b1e27bd4a1b78fb0a50dc491b5dcfa88ccb8bc20a98",
     "js/core/chart.js": "d36d1174a008ee5c00d2ed12b0f3d3319c5ac23e77b33af50bc011a4d923761c",
     "js/core/dirpicker.js": "fb64f280a3ebda82cf32ae63904c4686924bfb7f7ccaa1e5d6395d7d4dd7741e",
     "js/core/dom.js": "b6c8c2085617ff6b2737bd9f9dad793ab3d25b9f93a1faddd7e78c6f128851ea",
-    "js/core/grid.js": "71412bd17984b6306250c2d878583b868db5b23c130529f0cbea8da070326d68",
+    "js/core/grid.js": "c768a5506511ee9d36d645a265aaab029be5816c7551022c0a846d020a21d3ef",
     "js/core/heartbeat.js": "71a08e33c31de9163527294815a9127e918664248230e18b73d573fc0c740b27",
     "js/core/modal.js": "3cdc238403df3a5531accba820ede8494c44bcc590af04aefcd492009f6772f9",
     "js/core/pack-preview.js": "12aca8f331c1973c4845aff553cc75d2561f3aca17fcbc8a8cd43d3a5f18cd69",
-    "js/core/settings.js": "45807c1cc4fd928b6e50e0fb8cb1ec0d90d5ee66c7a7715f73d06d472d11fa0a",
+    "js/core/settings.js": "cfdd144644adfd67cb0616219ef709974b9e93083540ed7681faaa066e738f4c",
     "js/core/toast.js": "1a78aa9cfb94515de64af48922afa1905a70ba91e68714a92c1ec7a25a3cdf57"
   }
 }
