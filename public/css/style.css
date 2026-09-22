@@ -140,6 +140,7 @@ body.nv .brand { display: flex; align-items: center; gap: 10px; cursor: default;
 }
 .brand-text { display: flex; flex-direction: column; line-height: 1.15; }
 .brand-text strong { font-size: 14px; letter-spacing: .3px; }
+.brand-version { margin-left: 6px; color: var(--text-mute); font-size: 10px; font-weight: 500; letter-spacing: 0; vertical-align: middle; }
 .brand-text small { font-size: 11px; color: var(--text-mute); }
 .topbar-actions { display: flex; gap: 8px; }
 

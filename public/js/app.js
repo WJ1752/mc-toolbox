@@ -378,6 +378,8 @@ function initNativeChrome() {
 // ---------------- 初始化 ----------------
 async function boot() {
   const boot = await api.get('/api/bootstrap')
+  const version = document.getElementById('brandVersion')
+  if (version && boot.version) version.textContent = `v${boot.version}`
   state.settings = boot.settings
   state.features = boot.features
   applySettings()

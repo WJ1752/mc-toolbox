@@ -137,7 +137,7 @@ function match(pattern, url) {
 on('GET', '/api/bootstrap', async () => {
   const settings = deepMerge(DEFAULT_SETTINGS, store.get('settings', DEFAULT_SETTINGS))
   const features = await scanFeatures()
-  return { settings, features }
+  return { settings, features, version: PRODUCT_VERSION, author: AUTHOR }
 })
 
 // ---------------- 设置 ----------------

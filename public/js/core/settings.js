@@ -547,7 +547,7 @@ const SECTIONS = [
       api.get('/api/system/info').then((info) => {
         box.appendChild(
           h('dl', { class: 'kv' },
-            h('dt', {}, '工具箱版本'), h('dd', {}, info.version || '1.5.4'),
+            h('dt', {}, '工具箱版本'), h('dd', {}, info.version || '1.5.5'),
             h('dt', {}, '作者'), h('dd', {}, info.author || 'Rinkore28'),
             h('dt', {}, '运行环境'), h('dd', {}, `Node ${info.node} · ${info.platform}`),
             h('dt', {}, '项目目录'), h('dd', { class: 'mono' }, info.root),

@@ -2,9 +2,9 @@
 export const SHELL_INTEGRITY = {
   "authorHash": "8db64220fca20d23cb44970ad85bc8ca211713664db8b51f4c10c185659975e2",
   "files": {
-    "index.html": "bb9c1a22890721d15cdf2945d64e7ff096475a6367b534d3a082ef9cf4a49fc7",
-    "css/style.css": "bc1f8c04e8d3f29c68d802ecdcf055f289454165d6655ac0412275c4acfa9fa6",
-    "js/app.js": "2355235fb8f41ad317c7e4bdd7c65d0b0e2ce49eea769d3a10bede6772f53531",
+    "index.html": "c192936faeddc5c7cf4e7ebbb7ce8af4719610f60fd03c2f271801c3230a7b0e",
+    "css/style.css": "3a4d198edd4ad2ac30e8ab154e0c18d6cb2d1de84869415d17802630f17113d3",
+    "js/app.js": "7e15854761defcf1bac753341f7449f0e80ea050f56c049b8e28a53f3309b9f7",
     "js/core/api.js": "dfb172f3c2ef75a42073a657790bdec24c5035d7c6e84ef82b0eff8e8f9bc04e",
     "js/core/bus.js": "64e0701ab153020c251b8b1e27bd4a1b78fb0a50dc491b5dcfa88ccb8bc20a98",
     "js/core/chart.js": "d36d1174a008ee5c00d2ed12b0f3d3319c5ac23e77b33af50bc011a4d923761c",
@@ -14,7 +14,7 @@ export const SHELL_INTEGRITY = {
     "js/core/heartbeat.js": "71a08e33c31de9163527294815a9127e918664248230e18b73d573fc0c740b27",
     "js/core/modal.js": "3cdc238403df3a5531accba820ede8494c44bcc590af04aefcd492009f6772f9",
     "js/core/pack-preview.js": "12aca8f331c1973c4845aff553cc75d2561f3aca17fcbc8a8cd43d3a5f18cd69",
-    "js/core/settings.js": "3c66435e1d05afda2300726711534e001335acc16b7b390cb69603d569c30d6a",
+    "js/core/settings.js": "c7f61b27a35b8214611f939c441608ffa579cde933cc6ae4338a0a5dcf5218e8",
     "js/core/toast.js": "1a78aa9cfb94515de64af48922afa1905a70ba91e68714a92c1ec7a25a3cdf57"
   }
 }
