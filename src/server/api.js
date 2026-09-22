@@ -9,6 +9,10 @@ import { pingServer } from './mc-ping.js'
 import * as monitor from './monitor.js'
 import { scanModsDir, listDir, moveModsToBackup, deleteMods, disableMods, enableMods, defaultBackupDir, guessModsDirs } from './mods.js'
 import { startConvertJob, getConvertJob, cancelConvertJob, receiveUploadedPack, removeTempPack } from './pack-converter.js'
+import { inspectPack, inspectMetadata } from './pack-preview.js'
+import * as serverManager from './server-manager.js'
+import { resolveServerJava, inspectServer } from './server-inspection.js'
+import { resolveJava, requiredJava } from './server-launch.js'
 import * as community from './community.js'
 import * as servercore from './servercore.js'
 import * as saveeditor from './saveeditor.js'
@@ -295,13 +299,24 @@ on('POST', '/api/mods/convert', async (req) => {
       autoDetectEnv: body.autoDetectEnv !== false,
       installServerCore: true,
       runtime: body.runtime || null,
-      memory: body.memory || '2G'
+      memory: body.memory || '4G',
+      minMemory: body.minMemory || '1G',
+      javaPath: body.javaPath || '',
+      bundleJava: body.bundleJava === true
     })
   } catch (e) {
     return { error: e.message }
   }
 })
 
+on('POST', '/api/mods/inspect', async (req) => {
+  const body = await readBody(req)
+  return { runtime: body.records ? await inspectMetadata(body.records, body.summary) : await inspectPack(body.source) }
+})
+on('POST', '/api/mods/java', async (req) => {
+  const body = await readBody(req)
+  return { ...(await resolveJava(body.runtime, body.javaPath)), required: requiredJava(body.runtime) }
+})
 on('GET', '/api/mods/convert/jobs/:id', async (_req, params) => getConvertJob(params.id) || { error: '转换任务不存在' })
 on('POST', '/api/mods/convert/jobs/:id/cancel', async (_req, params) => ({ ok: cancelConvertJob(params.id) }))
 
@@ -331,7 +346,10 @@ on('POST', '/api/mods/convert-upload', async (req, _params, query, res) => {
       uploaded: true,
       installServerCore: true,
       runtime: { mc: query.mc || '', loader: query.loader || '', loaderVersion: query.loaderVersion || '' },
-      memory: query.memory || '2G',
+      memory: query.memory || '4G',
+      minMemory: query.minMemory || '1G',
+      javaPath: query.javaPath || '',
+      bundleJava: query.bundleJava === 'true',
       cleanup: () => removeTempPack(uploaded.dir)
     })
     return job
@@ -340,6 +358,32 @@ on('POST', '/api/mods/convert-upload', async (req, _params, query, res) => {
     return { error: e.message }
   }
 })
+
+// ---------------- 独立开服管理磁贴 ----------------
+on('POST', '/api/server-manager/inspect', async req => { const body = await readBody(req); return inspectServer(body.source, body.corePath) })
+on('POST', '/api/server-manager/prepare', async req => serverManager.prepareServer(await readBody(req)))
+on('GET', '/api/server-manager/prepare/:id', async (_req, p) => serverManager.getPreparation(p.id) || { error: '导入任务不存在' })
+on('POST', '/api/server-manager/prepare/:id/cancel', async (_req, p) => ({ ok: serverManager.cancelPreparation(p.id) }))
+on('POST', '/api/server-manager/upload', async (req, _p, query, res) => {
+  let uploaded, job, disconnected = false
+  res.once('close', () => { if (!res.writableFinished) { disconnected = true; if (job) serverManager.cancelPreparation(job.id) } })
+  try {
+    const name = decodeURIComponent(String(req.headers['x-file-name'] || 'server.zip'))
+    uploaded = await receiveUploadedPack(req, name, { allowJar: true })
+    if (disconnected) throw new Error('上传已中止')
+    job = serverManager.prepareServer({ source: uploaded.file, destination: query.destination || '', name, uploaded: true, cleanup: () => removeTempPack(uploaded.dir) })
+    return job
+  } catch (e) { if (uploaded) await removeTempPack(uploaded.dir); return { error: e.message } }
+})
+on('POST', '/api/server-manager/java', async req => {
+  const body = await readBody(req)
+  return resolveServerJava(body.root, body.runtime, body.javaPath)
+})
+on('POST', '/api/server-manager/start', async req => serverManager.startServer(await readBody(req)))
+on('GET', '/api/server-manager/sessions', async () => ({ items: serverManager.listServers() }))
+on('GET', '/api/server-manager/sessions/:id', async (_req, p, q) => serverManager.getServer(p.id, q.after) || { error: '服务端会话不存在' })
+on('POST', '/api/server-manager/sessions/:id/stop', async (req, p) => serverManager.stopServer(p.id, (await readBody(req)).force === true))
+on('POST', '/api/server-manager/sessions/:id/command', async (req, p) => serverManager.sendServerCommand(p.id, (await readBody(req)).command))
 
 // ---------------- 社区资源（Modrinth / CurseForge） ----------------
 const cfKey = () => (deepMerge(DEFAULT_SETTINGS, store.get('settings', DEFAULT_SETTINGS)).community || {}).cfApiKey || ''

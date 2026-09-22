@@ -1,0 +1,13 @@
+{
+  "id": "server-manager",
+  "name": "开服管理",
+  "desc": "拖入服务端包，选择核心、Java 与内存，查看日志并管理开关服",
+  "icon": "▶️",
+  "color": "#38bdf8",
+  "version": "1.0.0",
+  "author": "Rinkore28",
+  "size": { "w": 2, "h": 2 },
+  "builtin": true,
+  "enabled": true,
+  "entry": "tile.js"
+}

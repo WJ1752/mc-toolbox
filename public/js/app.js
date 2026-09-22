@@ -133,7 +133,7 @@ function createTile(feature) {
   icon.style.background = feature.color
   el.addEventListener('click', (e) => {
     // 控件点击保持自身行为；标题栏拖动结束产生的 click 也不能折叠磁贴。
-    if (e.target.closest('button, input, select, textarea, a, label, [data-nocollapse]')) return
+    if (e.target.closest('button, input, select, textarea, a, label, summary, pre, .drop-zone, [role=button], [data-nocollapse]')) return
     if (grid?.lastDragEnd && Date.now() - grid.lastDragEnd < 280) return
     toggleCollapse(feature.id)
   })

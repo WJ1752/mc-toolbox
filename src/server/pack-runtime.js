@@ -14,66 +14,74 @@ export function mergeRuntime(detected, manual = {}) {
 }
 
 export async function detectPackRuntime(root, { signal } = {}) {
+  const records = []
+  async function walk(dir, depth) {
+    signal?.throwIfAborted()
+    if (depth > 10) return
+    for (const ent of await fs.readdir(dir, { withFileTypes: true })) {
+      const file = path.join(dir, ent.name)
+      if (ent.isDirectory()) {
+        if (!ignored.has(ent.name.toLowerCase())) await walk(file, depth + 1)
+      } else if (ent.isFile()) {
+        const name = path.relative(root, file)
+        if (/^forge-.*\.jar$/i.test(ent.name)) records.push({ name, text: '' })
+        if (/\.(json|bat|cmd|sh)$/i.test(ent.name) && (await fs.stat(file)).size <= 2 * 1024 * 1024) {
+          records.push({ name, text: await fs.readFile(file, { encoding: 'utf8', signal }) })
+        }
+      }
+    }
+  }
+  await walk(root, 0)
+  return detectRuntimeRecords(records)
+}
+
+export function detectRuntimeRecords(records) {
   const candidates = []
   const add = (value, file, priority) => {
     if (!mcPattern.test(value.mc || '') || !value.loaderVersion) return
-    candidates.push({ ...value, source: path.relative(root, file), priority })
+    candidates.push({ ...value, source: file, priority })
   }
   const forge = (value, file, priority) => {
     const m = /(?:^|[^a-z])forge[-:](1\.\d+(?:\.\d+)?)-(\d+(?:\.\d+){2,}(?:-1\.\d+(?:\.\d+)?)?)(?=$|[^\d])/i.exec(value)
     if (m) add({ mc: m[1], loader: 'forge', loaderVersion: m[2] }, file, priority)
   }
-  async function walk(dir, depth) {
-    signal?.throwIfAborted()
-    if (depth > 10) return
-    const entries = await fs.readdir(dir, { withFileTypes: true })
-    for (const ent of entries) {
-      const file = path.join(dir, ent.name)
-      if (ent.isDirectory()) {
-        if (!ignored.has(ent.name.toLowerCase())) await walk(file, depth + 1)
-        continue
-      }
-      if (!ent.isFile()) continue
-      if (/^forge-.*\.jar$/i.test(ent.name)) forge(ent.name, file, 30)
-      if (!/\.(json|bat|cmd|sh)$/i.test(ent.name) || (await fs.stat(file)).size > 2 * 1024 * 1024) continue
-      signal?.throwIfAborted()
-      const text = await fs.readFile(file, 'utf8')
-      if (!/\.json$/i.test(ent.name)) { forge(text, file, 40); continue }
-      let d
-      try { d = JSON.parse(text.replace(/^\uFEFF/, '')) } catch { continue }
-      // HMCL exports use addons, despite sharing the manifest.json filename.
-      const addons = Array.isArray(d.addons) ? d.addons : []
-      const game = addons.find(x => x.id === 'game')?.version
-      for (const [id, loader] of Object.entries({ ...loaders, fabric: 'fabric', quilt: 'quilt' })) {
-        const version = addons.find(x => x.id === id)?.version
-        if (version) add({ mc: game, loader, loaderVersion: version }, file, 100)
-      }
-      if (d.minecraft?.version && Array.isArray(d.minecraft.modLoaders)) {
-        const l = d.minecraft.modLoaders.find(x => x.primary) || d.minecraft.modLoaders[0]
-        const m = /^(forge|neoforge|fabric(?:-loader)?|quilt(?:-loader)?)-(.+)$/.exec(l?.id || '')
-        if (m) add({ mc: d.minecraft.version, loader: m[1].replace('-loader', ''), loaderVersion: m[2] }, file, 100)
-      }
-      for (const [id, loader] of Object.entries(loaders)) {
-        if (d.dependencies?.[id]) add({ mc: d.dependencies.minecraft, loader, loaderVersion: d.dependencies[id] }, file, 100)
-      }
-      const components = d.components || []
-      const mc = components.find(x => x.uid === 'net.minecraft')?.version
-      for (const [uid, loader] of [['net.minecraftforge', 'forge'], ['net.neoforged', 'neoforge'], ['net.fabricmc.fabric-loader', 'fabric'], ['org.quiltmc.quilt-loader', 'quilt']]) {
-        const version = components.find(x => x.uid === uid)?.version
-        if (version) add({ mc, loader, loaderVersion: version }, file, 100)
-      }
-      // HMCL/PCL/official launcher version JSON: inheritsFrom + Maven coordinates.
-      for (const lib of d.libraries || []) {
-        const name = lib.name || ''
-        forge(name, file, 80)
-        const m = /^(net\.fabricmc:fabric-loader|org\.quiltmc:quilt-loader|net\.neoforged:neoforge):([^:]+)/.exec(name)
-        if (m) add({ mc: d.inheritsFrom, loader: m[1].includes('fabric') ? 'fabric' : m[1].includes('quilt') ? 'quilt' : 'neoforge', loaderVersion: m[2] }, file, 80)
-        const modernForge = /^net\.minecraftforge:forge:([^:]+)$/.exec(name)
-        if (modernForge && !modernForge[1].startsWith('1.')) add({ mc: d.inheritsFrom, loader: 'forge', loaderVersion: modernForge[1] }, file, 80)
-      }
+  for (const { name: file, text = '' } of records) {
+    if (/^forge-.*\.jar$/i.test(path.basename(file))) forge(path.basename(file), file, 30)
+    if (!/\.json$/i.test(file)) { forge(text, file, 40); continue }
+    let d
+    try { d = JSON.parse(text.replace(/^\uFEFF/, '')) } catch { continue }
+    if (!d || typeof d !== 'object') continue
+    // HMCL exports use addons, despite sharing the manifest.json filename.
+    const addons = Array.isArray(d.addons) ? d.addons : []
+    const game = addons.find(x => x?.id === 'game')?.version
+    for (const [id, loader] of Object.entries({ ...loaders, fabric: 'fabric', quilt: 'quilt' })) {
+      const version = addons.find(x => x?.id === id)?.version
+      if (version) add({ mc: game, loader, loaderVersion: version }, file, 100)
+    }
+    if (d.minecraft?.version && Array.isArray(d.minecraft.modLoaders)) {
+      const l = d.minecraft.modLoaders.find(x => x?.primary) || d.minecraft.modLoaders[0]
+      const m = /^(forge|neoforge|fabric(?:-loader)?|quilt(?:-loader)?)-(.+)$/.exec(l?.id || '')
+      if (m) add({ mc: d.minecraft.version, loader: m[1].replace('-loader', ''), loaderVersion: m[2] }, file, 100)
+    }
+    for (const [id, loader] of Object.entries(loaders)) {
+      if (d.dependencies?.[id]) add({ mc: d.dependencies.minecraft, loader, loaderVersion: d.dependencies[id] }, file, 100)
+    }
+    const components = Array.isArray(d.components) ? d.components : []
+    const mc = components.find(x => x?.uid === 'net.minecraft')?.version
+    for (const [uid, loader] of [['net.minecraftforge', 'forge'], ['net.neoforged', 'neoforge'], ['net.fabricmc.fabric-loader', 'fabric'], ['org.quiltmc.quilt-loader', 'quilt']]) {
+      const version = components.find(x => x?.uid === uid)?.version
+      if (version) add({ mc, loader, loaderVersion: version }, file, 100)
+    }
+    // HMCL/PCL/official launcher version JSON: inheritsFrom + Maven coordinates.
+    for (const lib of Array.isArray(d.libraries) ? d.libraries : []) {
+      const name = lib?.name || ''
+      forge(name, file, 80)
+      const m = /^(net\.fabricmc:fabric-loader|org\.quiltmc:quilt-loader|net\.neoforged:neoforge):([^:]+)/.exec(name)
+      if (m) add({ mc: d.inheritsFrom, loader: m[1].includes('fabric') ? 'fabric' : m[1].includes('quilt') ? 'quilt' : 'neoforge', loaderVersion: m[2] }, file, 80)
+      const modernForge = /^net\.minecraftforge:forge:([^:]+)$/.exec(name)
+      if (modernForge && !modernForge[1].startsWith('1.')) add({ mc: d.inheritsFrom, loader: 'forge', loaderVersion: modernForge[1] }, file, 80)
     }
   }
-  await walk(root, 0)
   if (!candidates.length) return null
   const top = candidates.filter(x => x.priority === Math.max(...candidates.map(x => x.priority)))
   const unique = new Map(top.map(x => [`${x.mc}/${x.loader}/${x.loaderVersion}`, x]))

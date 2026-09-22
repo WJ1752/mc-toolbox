@@ -11,6 +11,7 @@ import { httpFetch } from './http.js'
 import { detectPackRuntime, mergeRuntime, findPackRoot } from './pack-runtime.js'
 export { detectPackRuntime } from './pack-runtime.js'
 import { promisify } from 'node:util'
+import { resolveJava, validateMemory, writeLaunchFiles, bundleJavaRuntime } from './server-launch.js'
 const inflateRaw = promisify(zlib.inflateRaw)
 const deflateRaw = promisify(zlib.deflateRaw)
 
@@ -49,7 +50,7 @@ function findEndOfCentralDirectory(buf) {
   return -1
 }
 
-async function readZipIndex(filePath) {
+export async function readZipIndex(filePath) {
   const stat = await fsp.stat(filePath)
   if (!stat.isFile()) throw new Error('整合包不是文件：' + filePath)
   if (stat.size > MAX_ARCHIVE_BYTES) throw new Error('整合包超过 2 GB，拒绝处理')
@@ -96,7 +97,7 @@ async function readZipIndex(filePath) {
   }
 }
 
-async function extractZip(filePath, targetDir, onProgress, signal) {
+export async function extractZip(filePath, targetDir, onProgress, signal) {
   const index = await readZipIndex(filePath)
   const fh = await fsp.open(filePath, 'r')
   let unpacked = 0
@@ -296,24 +297,20 @@ async function findFile(root, predicate, depth = 0) {
   return null
 }
 
-async function writeServerScripts(root, runtime, info, memory = '2G') {
-  const mem = String(memory || '2G').trim()
+export async function writeServerScripts(root, runtime, info, options = {}) {
   let jar = info.launchJar ? await findFile(root, (name) => name === info.launchJar) : null
-  if (!jar && (runtime.loader === 'forge' || runtime.loader === 'neoforge')) {
+  const installerScript = (runtime.loader === 'forge' || runtime.loader === 'neoforge') && fs.existsSync(path.join(root, 'run.bat'))
+  if (!jar && !installerScript && (runtime.loader === 'forge' || runtime.loader === 'neoforge')) {
     jar = await findFile(root, (name) => /^(?:forge|neoforge)-.*(?:-server)?\.jar$/i.test(name) && !/-installer\.jar$/i.test(name))
   }
   if (jar) {
     const rel = path.relative(root, jar).replace(/\\/g, '/')
-    const cmd = `java -Xms${mem} -Xmx${mem} -jar "${rel}" nogui`
-    await fsp.writeFile(path.join(root, 'start.bat'), `@echo off\r\nchcp 65001 >nul\r\ntitle Minecraft Server\r\n${cmd}\r\npause\r\n`)
-    await fsp.writeFile(path.join(root, 'start.sh'), `#!/bin/sh\n${cmd}\n`)
-    await fsp.chmod(path.join(root, 'start.sh'), 0o755).catch(() => {})
-    return { jar: rel, mode: 'jar' }
+    const launch = await writeLaunchFiles(root, runtime, ['-jar', rel, 'nogui'], options)
+    return { jar: rel, mode: 'jar', ...launch }
   }
 
   // 新版 Forge/NeoForge 安装器生成 run.bat/run.sh，使用 libraries 中的参数文件。
   const runBat = path.join(root, 'run.bat')
-  const runSh = path.join(root, 'run.sh')
   if ((runtime.loader === 'forge' || runtime.loader === 'neoforge') && fs.existsSync(runBat)) {
     const bat = await fsp.readFile(runBat, 'utf8')
     const jarRef = /-jar\s+["']?([^\s"']+\.jar)/i.exec(bat)?.[1]
@@ -322,16 +319,27 @@ async function writeServerScripts(root, runtime, info, memory = '2G') {
     for (const ref of argsFiles) {
       if (!fs.existsSync(path.resolve(root, ref))) throw new Error(`安装器生成的启动脚本缺少参数文件：${ref}`)
     }
-    await fsp.copyFile(runBat, path.join(root, 'start.bat'))
-    if (fs.existsSync(runSh)) await fsp.copyFile(runSh, path.join(root, 'start.sh'))
-    else await fsp.writeFile(path.join(root, 'start.sh'), '#!/bin/sh\nsh "$(dirname "$0")/start.bat"\n')
-    await fsp.chmod(path.join(root, 'start.sh'), 0o755).catch(() => {})
-    return { mode: 'installer-script' }
+    const winArgs = argsFiles.find(ref => /win_args\.txt$/i.test(ref))
+    if (!winArgs) throw new Error('安装器启动脚本缺少 win_args.txt，无法安全生成启动参数')
+    const unixArgs = winArgs.replace(/win_args\.txt$/i, 'unix_args.txt')
+    // Remove installer defaults that could override the user's requested heap.
+    const userArgs = path.join(root, 'user_jvm_args.txt')
+    if (fs.existsSync(userArgs)) {
+      const existing = await fsp.readFile(userArgs, 'utf8')
+      await fsp.writeFile(userArgs, existing.replace(/^[ \t]*-Xm[sx]\S+[^\r\n]*$/gm, ''))
+    }
+    const extra = fs.existsSync(userArgs) ? ['@user_jvm_args.txt'] : []
+    const launch = await writeLaunchFiles(root, runtime, [...extra, '@' + winArgs, 'nogui'], options)
+    if (fs.existsSync(path.join(root, unixArgs))) {
+      const sh = await fsp.readFile(path.join(root, 'start.sh'), 'utf8')
+      await fsp.writeFile(path.join(root, 'start.sh'), sh.replace('@' + winArgs, '@' + unixArgs))
+    } else throw new Error('安装器缺少 unix_args.txt，无法生成跨平台启动脚本')
+    return { mode: 'installer-script', ...launch }
   }
   throw new Error(`服务端核心安装完成但未找到可启动文件（${runtime.loader} ${runtime.mc} ${runtime.loaderVersion}）`)
 }
 
-async function installCoreForPack(root, runtime, onProgress, memory, signal) {
+async function installCoreForPack(root, runtime, onProgress, options, signal) {
   report(onProgress, 'core-resolve', 50, `正在解析 ${runtime.loader} ${runtime.mc}`)
   const info = await resolveDownload({ ...runtime, signal })
   signal?.throwIfAborted()
@@ -340,7 +348,7 @@ async function installCoreForPack(root, runtime, onProgress, memory, signal) {
     filename: info.filename,
     dir: root,
     title: `${runtime.loader} ${runtime.mc}`,
-    postCommand: info.postCommand,
+    postCommand: info.postCommand ? [options.javaPath, ...info.postCommand.slice(1)] : undefined,
     extraFiles: info.extraFiles,
     preserveName: true,
     exactDir: true,
@@ -369,7 +377,13 @@ async function installCoreForPack(root, runtime, onProgress, memory, signal) {
     for (const ent of await fsp.readdir(root, { withFileTypes: true })) {
       if (ent.isFile() && /(?:fabric|quilt|forge|neoforge)-installer(?:[-_.].*)?\.jar$/i.test(ent.name)) await fsp.rm(path.join(root, ent.name), { force: true })
     }
-    return await writeServerScripts(root, runtime, info, memory)
+    let bundledJava = null
+    if (options.bundleJava) {
+      report(onProgress, 'java-bundle', 88, '正在将兼容 Java 复制到服务端包…')
+      bundledJava = await bundleJavaRuntime(root, options.javaPath, signal, ({ copied, total, file }) => report(onProgress, 'java-bundle', 88 + (total ? copied / total : 1), `复制 Java：${Math.round(copied / 1024 / 1024)} / ${Math.round(total / 1024 / 1024)} MB · ${file}`))
+    }
+    const launch = await writeServerScripts(root, runtime, info, { ...options, javaPath: bundledJava?.path || options.javaPath })
+    return { ...launch, bundledJava }
   } finally {
     if (signal?.aborted) await community.cancelJobAndWait(job.id)
   }
@@ -411,8 +425,9 @@ function defaultDownloadsDir() {
     : path.join(os.homedir(), 'Downloads')
 }
 
-export async function convertPack({ source, outputDir = '', outputName = '', clientModIds = [], autoDetectEnv = true, uploaded = false, installServerCore = false, runtime = null, memory = '2G', onProgress, signal }) {
+export async function convertPack({ source, outputDir = '', outputName = '', clientModIds = [], autoDetectEnv = true, uploaded = false, installServerCore = false, runtime = null, memory = '4G', minMemory = '1G', javaPath = '', bundleJava = false, onProgress, signal }) {
   signal?.throwIfAborted()
+  const launchOptions = { ...validateMemory(memory, minMemory), bundleJava }
   const input = path.resolve(String(source || ''))
   if (!input || !fs.existsSync(input)) throw new Error('客户端整合包或目录不存在')
   const sourceStat = await fsp.stat(input)
@@ -440,6 +455,11 @@ export async function convertPack({ source, outputDir = '', outputName = '', cli
       throw new Error('无法确定：' + missing.join('、') + '。请选择包含版本文件的完整实例目录，或手动补全；仅选择 Forge 还不足以确定版本。')
     }
     report(onProgress, 'scan', 28, selectedRuntime.mc ? `已识别 ${selectedRuntime.mc} / ${selectedRuntime.loader} ${selectedRuntime.loaderVersion || ''}（${detectedRuntime?.source || '手动填写'}）` : '正在扫描 mod')
+    if (installServerCore) {
+      const java = await resolveJava(selectedRuntime, javaPath)
+      launchOptions.javaPath = java.path
+      report(onProgress, 'scan', 28, `Java ${java.major}（64 位）· 初始 ${launchOptions.minMemory} / 最大 ${launchOptions.memory}`)
+    }
     const indexed = await hydrateModrinthFiles(staging, onProgress, signal)
     await normalizePackLayout(staging, signal)
     const modsDirs = await findModsDirs(staging, signal)
@@ -462,7 +482,7 @@ export async function convertPack({ source, outputDir = '', outputName = '', cli
     report(onProgress, 'mods', 45, `已扫描 ${total} 个 mod，移除 ${matched.length} 个客户端 mod`)
 
     let core = null
-    if (installServerCore) core = await installCoreForPack(staging, selectedRuntime, onProgress, memory, signal)
+    if (installServerCore) core = await installCoreForPack(staging, selectedRuntime, onProgress, launchOptions, signal)
 
     const dir = String(outputDir || '').trim()
       ? path.resolve(outputDir)
@@ -566,9 +586,9 @@ export async function writeUploadedPack(buffer, name) {
 }
 
 // Stream browser uploads to disk; aborting the HTTP request removes the partial file.
-export async function receiveUploadedPack(req, name) {
+export async function receiveUploadedPack(req, name, { allowJar = false } = {}) {
   if (Number(req.headers['content-length']) > MAX_ARCHIVE_BYTES) throw new Error('整合包超过 2 GB；请解压后使用“选择文件夹”')
-  const ext = /\.(mrpack|zip)$/i.exec(name)?.[1]
+  const ext = (allowJar ? /\.(mrpack|zip|jar)$/i : /\.(mrpack|zip)$/i).exec(name)?.[1]
   if (!ext) throw new Error('仅支持 ZIP 或 .mrpack')
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'mc-toolbox-upload-'))
   const file = path.join(dir, 'client-pack.' + ext.toLowerCase())
