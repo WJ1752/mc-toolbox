@@ -8,6 +8,7 @@ let ctxRef = null
 let dirInput = null
 let summaryEl = null
 let tableWrap = null
+let convertProgress = null
 let state = { dir: '', items: [], library: [], selected: new Set(), mode: null, busy: false, showMatchedOnly: false, convertSource: '', convertFile: null, convertBusy: false }
 let btnFilter = null
 
@@ -39,8 +40,23 @@ export default {
     // 整合包转换：目录走本地路径，拖入的压缩包在浏览器无法暴露路径时改为上传到本地服务。
     const convertInput = h('input', { class: 'input mono', readonly: true, placeholder: '拖入或选择客户端整合包 / 客户端目录' })
     const outputInput = h('input', { class: 'input mono', readonly: true, placeholder: '输出文件夹（可选）' })
+    const runtimeMcInput = h('input', { class: 'input mono', placeholder: 'MC 版本（清单无法识别时填写）', style: { width: '150px' } })
+    const runtimeLoaderSel = h('select', { class: 'input', style: { width: '130px' } },
+      h('option', { value: '' }, '自动识别加载器'),
+      h('option', { value: 'vanilla' }, '原版 Vanilla'),
+      h('option', { value: 'fabric' }, 'Fabric'),
+      h('option', { value: 'forge' }, 'Forge'),
+      h('option', { value: 'neoforge' }, 'NeoForge'),
+      h('option', { value: 'quilt' }, 'Quilt'),
+      h('option', { value: 'paper' }, 'Paper'))
+    const runtimeLoaderVersionInput = h('input', { class: 'input mono', placeholder: '加载器版本（可选）', style: { width: '170px' } })
     const convertStatus = h('div', { class: 'muted', style: { marginTop: '6px', lineHeight: '1.5' } },
       '未选择输出文件夹时：目录或已选择的压缩包会在客户端原文件夹生成；直接拖入的文件会生成到系统“下载”文件夹。原文件不会被修改。')
+    convertProgress = h('div', { style: { display: 'none', marginTop: '8px' } },
+      h('div', { class: 'row', style: { justifyContent: 'space-between', marginBottom: '4px' } },
+        h('span', { class: 'muted', 'data-role': 'convert-detail' }, ''),
+        h('span', { class: 'muted mono', 'data-role': 'convert-percent' }, '0%')),
+      h('div', { class: 'bar' }, h('i', { 'data-role': 'convert-bar', style: { width: '0%' } })))
     const drop = h('div', { class: 'drop-zone', tabindex: '0', style: { marginTop: '8px' } }, '将客户端 ZIP / .mrpack 拖到这里，或点击选择文件')
     const btnPackage = h('button', { class: 'btn btn-sm', onclick: async () => {
       const p = await pickFile('', { title: '选择客户端整合包', exts: ['.zip', '.mrpack'] })
@@ -81,7 +97,10 @@ export default {
         h('div', { class: 'grow', style: { minWidth: '220px' } }, convertInput), btnPackage, btnFolder),
       h('div', { class: 'row wrap', style: { marginTop: '6px' } },
         h('div', { class: 'grow', style: { minWidth: '220px' } }, outputInput), btnOutput, btnConvert),
-      convertStatus))
+      h('div', { class: 'row wrap', style: { marginTop: '6px' } },
+        h('span', { class: 'muted' }, '核心识别：'), runtimeMcInput, runtimeLoaderSel, runtimeLoaderVersionInput,
+        h('span', { class: 'muted' }, '留空则从 manifest.json / modrinth.index.json 自动识别')),
+      convertStatus, convertProgress))
 
     ctx.body.appendChild(h('div', { class: 'field' }, h('label', {}, 'mods 目录'),
       h('div', { class: 'row' }, h('div', { class: 'grow' }, dirInput),
@@ -167,21 +186,38 @@ export default {
       if (!state.convertSource && !state.convertFile) { toast('请先拖入或选择客户端整合包 / 目录', 'err'); return }
       state.convertBusy = true
       btnConvert.disabled = true
+      setConvertProgress({ stage: 'queued', progress: 0, detail: '正在提交转换任务…' })
       try {
-        let result
+        let job
         if (state.convertFile) {
           const q = new URLSearchParams()
           if (outputInput.value.trim()) q.set('outputDir', outputInput.value.trim())
+          if (runtimeMcInput.value.trim()) q.set('mc', runtimeMcInput.value.trim())
+          if (runtimeLoaderSel.value) q.set('loader', runtimeLoaderSel.value)
+          if (runtimeLoaderVersionInput.value.trim()) q.set('loaderVersion', runtimeLoaderVersionInput.value.trim())
           const response = await fetch('/api/mods/convert-upload?' + q, {
             method: 'POST',
             headers: { 'Content-Type': state.convertFile.type || 'application/zip', 'X-File-Name': encodeURIComponent(state.convertFile.name) },
             body: state.convertFile
           })
-          result = await response.json()
+          job = await response.json()
         } else {
-          result = await api.post('/api/mods/convert', { source: state.convertSource, outputDir: outputInput.value.trim() })
+          const runtime = runtimeMcInput.value.trim() && runtimeLoaderSel.value
+            ? { mc: runtimeMcInput.value.trim(), loader: runtimeLoaderSel.value, loaderVersion: runtimeLoaderVersionInput.value.trim() }
+            : null
+          job = await api.post('/api/mods/convert', { source: state.convertSource, outputDir: outputInput.value.trim(), runtime })
         }
-        if (result.error) throw new Error(result.error)
+        if (job.error) throw new Error(job.error)
+        if (!job.id) throw new Error('转换任务创建失败')
+        let result
+        for (;;) {
+          await new Promise((resolve) => setTimeout(resolve, 350))
+          const current = await api.get('/api/mods/convert/jobs/' + encodeURIComponent(job.id))
+          if (current.error) throw new Error(current.error)
+          setConvertProgress(current)
+          if (current.status === 'done') { result = current.result; break }
+          if (current.status === 'failed' || current.status === 'cancelled') throw new Error(current.error || current.detail || '转换失败')
+        }
         const warning = (result.warnings || []).map((x) => h('div', { class: 'result-bad' }, x))
         const detail = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '7px' } },
           h('div', { class: 'result-ok' }, `转换完成：移除 ${result.removedCount || 0} 个仅客户端 mod`),
@@ -196,10 +232,25 @@ export default {
         toast('服务端整合包已生成', 'ok')
       } catch (e) {
         toast('转换失败：' + e.message, 'err')
+        setConvertProgress({ stage: 'failed', progress: 0, detail: e.message })
       } finally {
         state.convertBusy = false
         btnConvert.disabled = false
       }
+    }
+
+    function setConvertProgress(job) {
+      if (!convertProgress) return
+      convertProgress.style.display = 'block'
+      const detail = convertProgress.querySelector('[data-role="convert-detail"]')
+      const percent = convertProgress.querySelector('[data-role="convert-percent"]')
+      const bar = convertProgress.querySelector('[data-role="convert-bar"]')
+      const p = Number.isFinite(Number(job.progress)) ? Math.max(0, Math.min(100, Number(job.progress))) : 0
+      if (detail) detail.textContent = job.detail || job.stage || '处理中…'
+      if (percent) percent.textContent = `${Math.round(p)}%`
+      if (bar) bar.style.width = `${p}%`
+      if (job.status === 'done') convertStatus.textContent = '转换完成。已校验服务端核心和启动文件，原客户端文件未修改。'
+      else if (job.status === 'failed') convertStatus.textContent = `转换失败：${job.error || job.detail || '未知错误'}`
     }
   }
 }

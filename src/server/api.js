@@ -8,7 +8,7 @@ import { scanFeatures, removeFeature } from './features.js'
 import { pingServer } from './mc-ping.js'
 import * as monitor from './monitor.js'
 import { scanModsDir, listDir, moveModsToBackup, deleteMods, disableMods, enableMods, defaultBackupDir, guessModsDirs } from './mods.js'
-import { convertPack, writeUploadedPack, removeTempPack } from './pack-converter.js'
+import { startConvertJob, getConvertJob, writeUploadedPack, removeTempPack } from './pack-converter.js'
 import * as community from './community.js'
 import * as servercore from './servercore.js'
 import * as saveeditor from './saveeditor.js'
@@ -286,17 +286,22 @@ on('POST', '/api/mods/convert', async (req) => {
   const body = await readBody(req)
   if (!body.source) return { error: '未指定客户端整合包或目录' }
   try {
-    return await convertPack({
+    return startConvertJob({
       source: body.source,
       outputDir: body.outputDir,
       outputName: body.outputName,
       clientModIds: clientModIds(),
-      autoDetectEnv: body.autoDetectEnv !== false
+      autoDetectEnv: body.autoDetectEnv !== false,
+      installServerCore: true,
+      runtime: body.runtime || null,
+      memory: body.memory || '2G'
     })
   } catch (e) {
     return { error: e.message }
   }
 })
+
+on('GET', '/api/mods/convert/jobs/:id', async (_req, params) => getConvertJob(params.id) || { error: '转换任务不存在' })
 
 on('POST', '/api/mods/convert-upload', async (req, _params, query) => {
   let uploaded
@@ -306,18 +311,21 @@ on('POST', '/api/mods/convert-upload', async (req, _params, query) => {
     uploaded = await writeUploadedPack(await readRawBody(req), name)
     const ext = path.extname(name) || '.zip'
     const stem = path.basename(name, ext)
-    return await convertPack({
+    return startConvertJob({
       source: uploaded.file,
       outputDir: query.outputDir || '',
       outputName: query.outputName || `${stem}-server.zip`,
       clientModIds: clientModIds(),
       autoDetectEnv: query.autoDetectEnv !== 'false',
-      uploaded: true
+      uploaded: true,
+      installServerCore: true,
+      runtime: query.mc && query.loader ? { mc: query.mc, loader: query.loader, loaderVersion: query.loaderVersion || '' } : null,
+      memory: query.memory || '2G',
+      cleanup: () => removeTempPack(uploaded.dir)
     })
   } catch (e) {
-    return { error: e.message }
-  } finally {
     if (uploaded) await removeTempPack(uploaded.dir)
+    return { error: e.message }
   }
 })
 

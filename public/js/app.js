@@ -119,8 +119,8 @@ function createTile(feature) {
   const badge = h('span', { class: 'badge', style: { display: 'none' } })
   const body = h('div', { class: 'tile-body' })
 
-  const chev = h('button', { class: 'chev', title: '折叠为仅标题', onclick: () => toggleCollapse(feature.id) }, '▾')
-  const btnExpand = h('button', { title: '放大查看', onclick: () => expandTile(feature.id) }, '⤢')
+  const chev = h('button', { class: 'chev', title: '展开/折叠内容', 'aria-label': '展开或折叠内容', onclick: (e) => { e.stopPropagation(); toggleCollapse(feature.id) } }, '▾')
+  const btnExpand = h('button', { class: 'tile-expand', title: '放大查看', 'aria-label': '放大查看', onclick: (e) => { e.stopPropagation(); expandTile(feature.id) } }, '⤢')
   const btnMore = h('button', { title: '更多', onclick: (e) => tileMenu(e, feature.id) }, '⋯')
 
   const el = h(
@@ -131,6 +131,12 @@ function createTile(feature) {
   )
   el.style.setProperty('--tile-color', feature.color)
   icon.style.background = feature.color
+  el.addEventListener('click', (e) => {
+    // 控件点击保持自身行为；标题栏拖动结束产生的 click 也不能折叠磁贴。
+    if (e.target.closest('button, input, select, textarea, a, label, [data-nocollapse]')) return
+    if (grid?.lastDragEnd && Date.now() - grid.lastDragEnd < 280) return
+    toggleCollapse(feature.id)
+  })
   // 单列（一行一个）时不跨列；多列时跨列数不超过总列数
   const cols = Math.max(1, Number(state.settings.general?.tileColumns) || 1)
   if (size.w > 1 && cols > 1) el.classList.add('span-' + Math.min(size.w, cols))

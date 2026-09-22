@@ -1,6 +1,6 @@
 {
   "name": "mc-toolbox",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "private": true,
   "type": "module",
   "description": "Minecraft 工具箱 - 磁贴式可扩展工具集",

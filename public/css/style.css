@@ -273,12 +273,12 @@ body.nv .topbar-actions .btn { cursor: default; }
 .tile.collapsed { min-height: 0; }
 .tile.collapsed .tile-body { display: none !important; }
 .tile-head .chev {
-  background: none; border: none; padding: 0;
-  width: 14px; height: 22px; flex: none;
-  color: var(--text-mute); cursor: pointer; font-size: 11px; line-height: 1;
-  transition: transform var(--t), color var(--t);
+  background: var(--surface-3); border: 1px solid transparent; padding: 0;
+  width: 28px; height: 28px; flex: none; display: grid; place-items: center;
+  color: var(--text); cursor: pointer; font-size: 17px; line-height: 1;
+  border-radius: 6px; transition: transform var(--t), color var(--t), background var(--t), border-color var(--t);
 }
-.tile-head .chev:hover { color: var(--text); }
+.tile-head .chev:hover, .tile-head .chev:focus-visible { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--surface-3)); border-color: color-mix(in srgb, var(--accent) 55%, transparent); outline: none; }
 .tile.collapsed .tile-head .chev { transform: rotate(-90deg); }
 .tile.collapsed .tile-head { border-bottom: none; padding-bottom: 8px; }
 .badge { white-space: nowrap; }
@@ -306,9 +306,11 @@ body.nv .topbar-actions .btn { cursor: default; }
 .tile:hover .tile-actions { opacity: 1; }
 .tile-actions button {
   background: none; border: none; cursor: pointer; color: var(--text-dim);
-  width: 24px; height: 24px; border-radius: 5px; font-size: 13px; line-height: 1;
+  width: 30px; height: 30px; border-radius: 6px; font-size: 16px; line-height: 1;
 }
-.tile-actions button:hover { background: var(--surface-3); color: var(--text); }
+.tile-actions button:hover, .tile-actions button:focus-visible { background: var(--surface-3); color: var(--text); outline: 2px solid color-mix(in srgb, var(--accent) 65%, transparent); outline-offset: 1px; }
+.tile-actions .tile-expand { width: 36px; height: 32px; font-size: 20px; color: var(--text); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.tile-actions .tile-expand:hover, .tile-actions .tile-expand:focus-visible { background: color-mix(in srgb, var(--accent) 25%, var(--surface-3)); color: var(--accent); }
 .tile-body { padding: 10px 12px 12px; flex: 1; display: flex; flex-direction: column; gap: 8px; overflow: auto; }
 .tile.dragging { position: fixed; z-index: 9999; pointer-events: none; box-shadow: 0 18px 40px rgba(0,0,0,.5); transform: rotate(.6deg); opacity: .96; }
 .tile.ghost { opacity: .35; }

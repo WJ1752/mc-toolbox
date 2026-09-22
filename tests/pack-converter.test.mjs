@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { convertPack } from '../src/server/pack-converter.js'
+import { convertPack, detectPackRuntime } from '../src/server/pack-converter.js'
 
 const assert = (cond, msg) => { if (!cond) { console.error('✗ ' + msg); process.exit(1) } console.log('✓ ' + msg) }
 
@@ -72,6 +72,19 @@ try {
   assert(fs.existsSync(archive), 'ZIP 原始客户端安装包保持不变')
   const outputBytes = await fsp.readFile(archiveResult.output)
   assert(outputBytes.includes(Buffer.from('servermod.jar')) && !outputBytes.includes(Buffer.from('sodium.jar')), '服务端 ZIP 保留服务端 mod 并移除客户端 mod')
+
+  const manifestRoot = path.join(base, 'manifest-pack')
+  await fsp.mkdir(path.join(manifestRoot, 'overrides', 'mods'), { recursive: true })
+  await fsp.writeFile(path.join(manifestRoot, 'manifest.json'), JSON.stringify({
+    minecraft: { version: '1.20.1', modLoaders: [{ id: 'fabric-loader-0.15.11', primary: true }] }
+  }))
+  await fsp.writeFile(path.join(manifestRoot, 'start.bat'), 'java -jar forge-1.12.2.jar')
+  await fsp.writeFile(path.join(manifestRoot, 'overrides', 'mods', 'servermod.jar'), serverJar)
+  const runtime = await detectPackRuntime(manifestRoot)
+  assert(runtime?.loader === 'fabric' && runtime?.mc === '1.20.1' && runtime?.loaderVersion === '0.15.11', '从整合包清单识别 MC 与加载器版本')
+  const normalizedResult = await convertPack({ source: manifestRoot, outputDir: base, clientModIds: [] })
+  const normalizedBytes = await fsp.readFile(normalizedResult.output)
+  assert(!normalizedBytes.includes(Buffer.from('start.bat')), '服务端包不携带客户端启动脚本')
   console.log('✓ 整合包转服务端测试全部通过')
 } finally {
   await fsp.rm(base, { recursive: true, force: true })
