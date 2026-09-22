@@ -257,6 +257,8 @@ body.nv .topbar-actions .btn { cursor: default; }
   grid-template-columns: repeat(var(--tile-cols, 1), minmax(0, 1fr));
   gap: 14px;
   align-content: start;
+  /* 不让短的折叠磁贴被同一行较高的展开磁贴强行拉伸，避免多列布局出现大块空白。 */
+  align-items: start;
 }
 .tile {
   position: relative;

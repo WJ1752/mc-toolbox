@@ -3,7 +3,7 @@ export const SHELL_INTEGRITY = {
   "authorHash": "8db64220fca20d23cb44970ad85bc8ca211713664db8b51f4c10c185659975e2",
   "files": {
     "index.html": "bb9c1a22890721d15cdf2945d64e7ff096475a6367b534d3a082ef9cf4a49fc7",
-    "css/style.css": "ec50d34827f0a68c702a1b02ca5667bf9209fddad4752a4d6a792c6bb9db91ae",
+    "css/style.css": "bc1f8c04e8d3f29c68d802ecdcf055f289454165d6655ac0412275c4acfa9fa6",
     "js/app.js": "99177e1aa02f7615e131a1c2fb81b1671eb4d7ada3bbbba4943a7d4b09aa702a",
     "js/core/api.js": "dfb172f3c2ef75a42073a657790bdec24c5035d7c6e84ef82b0eff8e8f9bc04e",
     "js/core/bus.js": "64e0701ab153020c251b8b1e27bd4a1b78fb0a50dc491b5dcfa88ccb8bc20a98",
@@ -14,7 +14,7 @@ export const SHELL_INTEGRITY = {
     "js/core/heartbeat.js": "71a08e33c31de9163527294815a9127e918664248230e18b73d573fc0c740b27",
     "js/core/modal.js": "3cdc238403df3a5531accba820ede8494c44bcc590af04aefcd492009f6772f9",
     "js/core/pack-preview.js": "12aca8f331c1973c4845aff553cc75d2561f3aca17fcbc8a8cd43d3a5f18cd69",
-    "js/core/settings.js": "4652eadce3f9db51274ef4d2ae566aa36c46436e5ee93534b5186b681fe18cf2",
+    "js/core/settings.js": "831edec8f65e98ac0e9a00159da3f35e7cee6ae51d1e37b003150f0f6194d6cc",
     "js/core/toast.js": "1a78aa9cfb94515de64af48922afa1905a70ba91e68714a92c1ec7a25a3cdf57"
   }
 }
