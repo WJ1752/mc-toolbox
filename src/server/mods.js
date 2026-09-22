@@ -30,15 +30,84 @@ function jsonParseLoose(text) {
   }
 }
 
+const RUNTIME_DEPENDENCIES = new Set([
+  'minecraft', 'forge', 'neoforge', 'fabricloader', 'quilt_loader', 'quilt-loader', 'java',
+  'minecraftforge', 'mod_minecraftforge', 'forge_loader'
+])
+
+function dependency(id, range = '', optional = false) {
+  const modid = String(id || '').trim()
+  if (!modid || RUNTIME_DEPENDENCIES.has(modid.toLowerCase())) return null
+  return { id: modid, range: String(range || '').trim(), required: !optional, optional: !!optional }
+}
+
+function addDependency(out, value, defaults = {}) {
+  if (typeof value === 'string') {
+    let text = value.trim()
+    const relation = /^(?:required|required-after|after-required|before-required)\s*:\s*(.+)$/i.exec(text)
+    if (relation) text = relation[1]
+    // Legacy metadata often stores a comma-separated dependency list in one
+    // string. Do not split commas inside Maven ranges such as [1.0,).
+    const parts = text.split(/,(?=[A-Za-z0-9_.-]+(?:@|$))/)
+    for (const part of parts) {
+      const raw = part.trim()
+      const at = raw.indexOf('@')
+      const id = at >= 0 ? raw.slice(0, at) : raw
+      const range = at >= 0 ? raw.slice(at + 1) : defaults.range
+      const item = dependency(id, range, defaults.optional)
+      if (item) out.push(item)
+    }
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) addDependency(out, entry, defaults)
+    return
+  }
+  if (!value || typeof value !== 'object') return
+  const id = value.modId || value.modid || value.id || value.name
+  if (!id) return
+  let range = value.versionRange || value.version || value.range || value.version_constraint || defaults.range || ''
+  if (typeof range === 'object') range = range.any || range.required || range || ''
+  const optional = value.optional === true || value.mandatory === false || defaults.optional === true
+  const item = dependency(id, typeof range === 'string' ? range : '', optional)
+  if (item) out.push(item)
+}
+
+function uniqueDependencies(items) {
+  const map = new Map()
+  for (const item of items) {
+    const key = item.id.toLowerCase()
+    const old = map.get(key)
+    if (!old || (old.optional && !item.optional)) map.set(key, item)
+  }
+  return [...map.values()]
+}
+
+function parseDependencyMap(value, out, defaults = {}) {
+  if (!value || typeof value !== 'object') return
+  for (const [id, spec] of Object.entries(value)) {
+    if (Array.isArray(spec)) {
+      for (const entry of spec) addDependency(out, { id, ...(typeof entry === 'object' ? entry : { version: entry }) }, defaults)
+    } else if (typeof spec === 'object') {
+      addDependency(out, { id, ...spec }, defaults)
+    } else addDependency(out, { id, version: spec }, defaults)
+  }
+}
+
 function parseFabricMeta(buf) {
   const obj = jsonParseLoose(buf.toString('utf8'))
   if (!obj) return null
+  const dependencies = []
+  parseDependencyMap(obj.depends, dependencies)
+  parseDependencyMap(obj.recommends, dependencies, { optional: true })
+  parseDependencyMap(obj.suggests, dependencies, { optional: true })
   return {
     modid: obj.id || null,
     name: obj.name || obj.id || null,
     version: obj.version || null,
     loader: 'fabric',
-    environment: obj.environment || (obj.entrypoints && obj.entrypoints.client ? 'client' : '*')
+    environment: obj.environment || (obj.entrypoints && obj.entrypoints.client ? 'client' : '*'),
+    dependencies: uniqueDependencies(dependencies)
   }
 }
 
@@ -48,12 +117,25 @@ function parseQuiltMeta(buf) {
   const ql = obj.quilt_loader || {}
   const id = typeof ql.id === 'string' ? ql.id : ql.id?.id || null
   const meta = ql.metadata || {}
+  const dependencies = []
+  const qdeps = ql.depends || ql.dependencies || []
+  if (Array.isArray(qdeps)) {
+    for (const item of qdeps) {
+      if (typeof item === 'string') addDependency(dependencies, item)
+      else if (item && typeof item === 'object') {
+        const id = item.id || item.modId || item.name
+        const version = item.version || item.versionRange || item.range
+        addDependency(dependencies, { id, version, optional: item.optional === true })
+      }
+    }
+  } else parseDependencyMap(qdeps, dependencies)
   return {
     modid: id,
     name: meta.name || id,
     version: ql.version || null,
     loader: 'quilt',
-    environment: obj.minecraft?.environment || '*'
+    environment: obj.minecraft?.environment || '*',
+    dependencies: uniqueDependencies(dependencies)
   }
 }
 
@@ -64,27 +146,78 @@ function parseModsToml(buf) {
   const version = /^\s*version\s*=\s*["']([^"']+)["']/m.exec(text)
   if (!modId) return null
   const isNeo = /neoforge/i.test(text) || / NeoForge/i.test(text)
+  const dependencies = []
+  // Forge/NeoForge use repeated [[dependencies.<modid>]] blocks. Parsing the
+  // blocks instead of the whole file also handles multiple mods in one jar.
+  const blocks = [...text.matchAll(/\[\[dependencies\.[^\]]+\]\]([\s\S]*?)(?=\n\s*\[\[|$)/gi)]
+  for (const match of blocks) {
+    const block = match[1]
+    const id = /^\s*modId\s*=\s*["']([^"']+)["']/im.exec(block)?.[1]
+    if (!id) continue
+    const range = /^\s*versionRange\s*=\s*["']([^"']*)["']/im.exec(block)?.[1] || ''
+    const mandatory = /^\s*mandatory\s*=\s*(true|false)/im.exec(block)?.[1]
+    addDependency(dependencies, { id, versionRange: range, mandatory: mandatory !== 'false' })
+  }
   return {
     modid: modId[1],
     name: displayName ? displayName[1] : modId[1],
     version: version ? version[1].replace(/\$\{[^}]+\}/g, '') : null,
     loader: isNeo ? 'neoforge' : 'forge',
-    environment: '*'
+    environment: '*',
+    dependencies: uniqueDependencies(dependencies)
   }
 }
 
 function parseMcmodInfo(buf) {
   const obj = jsonParseLoose(buf.toString('utf8'))
   if (!obj) return null
-  const first = Array.isArray(obj) ? obj[0] : obj.modList ? obj.modList[0] : obj
+  const entries = Array.isArray(obj) ? obj : obj.modList ? obj.modList : [obj]
+  const first = entries.find((item) => item && (item.modid || item.modId))
   if (!first) return null
+  const dependencies = []
+  // In legacy mcmod.info, `dependencies` is primarily an ordering list
+  // (Forge calls it After). `requiredMods` is the hard requirement list;
+  // annotation metadata is merged below for mods that declare required-after.
+  for (const item of entries) {
+    addDependency(dependencies, item?.dependencies, { optional: true })
+    addDependency(dependencies, item?.requiredMods)
+    addDependency(dependencies, item?.requiredmods)
+  }
+  // A few 1.7–1.12 mods put dependency declarations in a keyed object.
+  for (const item of entries) {
+    if (!Array.isArray(item?.dependencies)) parseDependencyMap(item?.dependencies, dependencies, { optional: true })
+    if (!Array.isArray(item?.requiredMods)) parseDependencyMap(item?.requiredMods, dependencies)
+  }
   return {
     modid: first.modid || null,
     name: first.name || first.modid || null,
     version: first.version || null,
     loader: 'legacy-forge',
-    environment: '*'
+    environment: '*',
+    modids: entries.map((item) => item?.modid || item?.modId).filter(Boolean),
+    dependencies: uniqueDependencies(dependencies)
   }
+}
+
+export async function readForgeAnnotationInfo(filePath) {
+  const entries = await readJarEntries(filePath, ['*.class'], { maxBytes: 8 * 1024 * 1024, maxEntries: 256 })
+  const dependencies = []
+  let modid = null
+  let version = null
+  for (const buf of Object.values(entries)) {
+    if (!buf) continue
+    // Forge 1.7–1.12 stores @Mod(dependencies = "required-after:foo")
+    // in the class constant pool rather than mcmod.info. Class bytes are
+    // safe to inspect as latin1 because annotation values are ASCII IDs.
+    const text = buf.toString('latin1')
+    const isForgeModClass = /net\/minecraftforge\/fml\/common\/Mod;/.test(text)
+    if (!isForgeModClass) continue
+    if (!modid) modid = /modid[\u0000-\u001f]{1,4}([A-Za-z][A-Za-z0-9_.-]{1,63})/i.exec(text)?.[1] || null
+    if (!version) version = /version[\u0000-\u001f]{1,4}([A-Za-z0-9][A-Za-z0-9_.+\-]{1,63})/i.exec(text)?.[1] || null
+    const re = /(?:^|[\u0000;,)])[-_\s]*(required|required-after|after-required|before-required)\s*:\s*([A-Za-z0-9_.-]+)(?:@([^;\u0000\x01]+))?/gi
+    for (const match of text.matchAll(re)) addDependency(dependencies, { id: match[2], versionRange: match[3] || '' })
+  }
+  return { modid, version, dependencies: uniqueDependencies(dependencies) }
 }
 
 export async function readModMeta(filePath) {
@@ -95,12 +228,27 @@ export async function readModMeta(filePath) {
       if (file === 'fabric.mod.json') return parseFabricMeta(buf)
       if (file === 'quilt.mod.json') return parseQuiltMeta(buf)
       if (file.endsWith('mods.toml')) return parseModsToml(buf)
-      if (file === 'mcmod.info') return parseMcmodInfo(buf)
+      if (file === 'mcmod.info') {
+        const meta = parseMcmodInfo(buf)
+        if (meta) {
+          const info = await readForgeAnnotationInfo(filePath)
+          meta.dependencies = uniqueDependencies([...(meta.dependencies || []), ...info.dependencies])
+          if (info.modid) {
+            meta.modid = info.modid
+            meta.modids = [...new Set([...(meta.modids || []), info.modid])]
+          }
+          if (info.version && (!meta.version || meta.version === '0.0.1' || meta.modid === info.modid)) meta.version = info.version
+          return meta
+        }
+      }
     } catch {
       /* 继续尝试下一个 */
     }
   }
-  return null
+  const info = await readForgeAnnotationInfo(filePath).catch(() => ({ modid: null, version: null, dependencies: [] }))
+  return info.dependencies.length || info.modid
+    ? { modid: info.modid, modids: info.modid ? [info.modid] : [], name: path.basename(filePath).replace(/\.jar(?:\.disabled)?$/i, ''), version: info.version, loader: 'legacy-forge', environment: '*', dependencies: info.dependencies }
+    : null
 }
 
 export async function scanModsDir(dir, opts = {}) {
@@ -133,6 +281,11 @@ export async function scanModsDir(dir, opts = {}) {
 
       const st = await fsp.stat(full).catch(() => null)
       const meta = await readModMeta(full).catch(() => null)
+      const stem = it.name.replace(/\.jar(?:\.disabled)?$/i, '')
+      const filenameModIds = [...new Set([
+        stem,
+        stem.split(/[-_ ](?=\d|mc\d|v?\d)/i)[0]
+      ].filter((value) => /^[A-Za-z][A-Za-z0-9_.-]{1,63}$/.test(value)).map((value) => value.toLowerCase()))]
       results.push({
         file: it.name,
         path: full,
@@ -141,10 +294,12 @@ export async function scanModsDir(dir, opts = {}) {
         mtime: st ? st.mtimeMs : 0,
         disabled: isDisabled,
         modid: meta?.modid || null,
+        modids: [...new Set([...(meta?.modids || (meta?.modid ? [meta.modid] : [])), ...filenameModIds])],
         name: meta?.name || it.name.replace(/\.jar(\.disabled)?$/i, ''),
         version: meta?.version || null,
         loader: meta?.loader || null,
         environment: meta?.environment || '*',
+        dependencies: meta?.dependencies || [],
         hasMeta: !!meta
       })
     }

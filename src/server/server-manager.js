@@ -78,6 +78,12 @@ function appendLog(session, text, channel = 'info') {
   for (const fragment of safe.match(/.{1,8000}(?:\r?\n|$)/g) || []) {
     const line = fragment.replace(/[\r\n]+$/, '')
     session.logs.push({ seq: ++session.seq, text: line, channel })
+    const missing = /MissingModsException:\s+Mod\s+([^\s(]+).*?requires\s+\[([^\]]+)\]/i.exec(line)
+    if (missing) {
+      session.missingDependencies ||= []
+      const value = `${missing[1]} → ${missing[2]}`
+      if (!session.missingDependencies.includes(value)) session.missingDependencies.push(value)
+    }
     if (session.logs.length > 1500) session.logs.shift()
     if (session.status === 'starting' && /Done \([\d.,]+s\)!|For help, type ["']?help/i.test(line)) session.status = 'running'
   }
@@ -158,7 +164,7 @@ export async function startServer(options) {
     const settings = { planId: plan.id, corePath: options.corePath || '', mc: runtime.mc, javaPath: options.javaPath || '', memory: options.memory, minMemory: options.minMemory, optimization: options.optimization || 'original', jvmArgs: options.jvmArgs || '', serverArgs: options.serverArgs || '', port, host, maxPlayers, onlineMode: options.onlineMode }
     await fs.writeFile(path.join(root, '.mc-toolbox-server.json'), JSON.stringify(settings, null, 2))
     const id = crypto.randomUUID()
-    const session = { id, root, port, status: 'starting', startedAt: Date.now(), endedAt: null, java, settings, logs: [], seq: 0, exitCode: null, child: null, stopRequested: false }
+    const session = { id, root, port, status: 'starting', startedAt: Date.now(), endedAt: null, java, settings, logs: [], seq: 0, exitCode: null, child: null, stopRequested: false, missingDependencies: [] }
     session.completion = new Promise(resolve => { session.finish = resolve })
     sessions.set(id, session)
     appendLog(session, `Java ${java.major}：${java.path}\n初始 ${options.minMemory} / 最大 ${options.memory}；端口 ${port}\n正在启动，百分比不可预知，请查看实际日志。`)
@@ -180,7 +186,10 @@ export async function startServer(options) {
     child.on('error', error => { appendLog(session, error.message, 'error'); session.error = error.message })
     child.on('close', code => {
       session.exitCode = code; session.endedAt = Date.now()
-      session.status = session.stopRequested || code === 0 ? 'stopped' : 'failed'
+      if (session.missingDependencies.length && !session.stopRequested) {
+        session.status = 'failed'
+        session.error = `启动失败：模组依赖缺失：${session.missingDependencies.join('；')}`
+      } else session.status = session.stopRequested || code === 0 ? 'stopped' : 'failed'
       appendLog(session, session.stopRequested ? '服务端进程已停止。' : `服务端已退出，退出码 ${code}。`)
       session.finish()
     })

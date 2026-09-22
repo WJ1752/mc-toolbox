@@ -245,7 +245,8 @@ export default {
       try {
         const result = await api.get(`/api/server-manager/sessions/${sessionId}?after=${after}`)
         currentStatus = result.status
-        status.textContent = `${labels[result.status] || result.status} · ${Math.floor(result.elapsed / 1000)} 秒 · 端口 ${result.port}`
+        const failure = result.error ? ` · ${result.error}` : ''
+        status.textContent = `${labels[result.status] || result.status} · ${Math.floor(result.elapsed / 1000)} 秒 · 端口 ${result.port}${failure}`
         if (result.status === 'starting' || result.status === 'stopping') setProgress(null)
         else progress.style.display = 'none'
         if (result.logs.length) {

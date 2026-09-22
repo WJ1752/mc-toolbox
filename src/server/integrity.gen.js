@@ -14,7 +14,7 @@ export const SHELL_INTEGRITY = {
     "js/core/heartbeat.js": "71a08e33c31de9163527294815a9127e918664248230e18b73d573fc0c740b27",
     "js/core/modal.js": "3cdc238403df3a5531accba820ede8494c44bcc590af04aefcd492009f6772f9",
     "js/core/pack-preview.js": "12aca8f331c1973c4845aff553cc75d2561f3aca17fcbc8a8cd43d3a5f18cd69",
-    "js/core/settings.js": "709f23bb94200aac5eafa3ff13690a7e62e6655b3664ab25e241190f523554fb",
+    "js/core/settings.js": "4652eadce3f9db51274ef4d2ae566aa36c46436e5ee93534b5186b681fe18cf2",
     "js/core/toast.js": "1a78aa9cfb94515de64af48922afa1905a70ba91e68714a92c1ec7a25a3cdf57"
   }
 }

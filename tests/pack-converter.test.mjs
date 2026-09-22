@@ -5,6 +5,9 @@ import path from 'node:path'
 import { convertPack, detectPackRuntime } from '../src/server/pack-converter.js'
 
 const assert = (cond, msg) => { if (!cond) { console.error('✗ ' + msg); process.exit(1) } console.log('✓ ' + msg) }
+const assertRejects = async (promise, msg) => {
+  try { await promise; console.error('✗ ' + msg); process.exit(1) } catch { console.log('✓ ' + msg) }
+}
 
 const CRC_TABLE = (() => {
   const t = new Uint32Array(256)
@@ -85,6 +88,24 @@ try {
   const normalizedResult = await convertPack({ source: manifestRoot, outputDir: base, clientModIds: [] })
   const normalizedBytes = await fsp.readFile(normalizedResult.output)
   assert(!normalizedBytes.includes(Buffer.from('start.bat')), '服务端包不携带客户端启动脚本')
+
+  // 客户端库被列为可移除项时，仍被服务端模组依赖的库必须保留。
+  const dependencyRoot = path.join(base, 'dependency-pack')
+  await fsp.mkdir(path.join(dependencyRoot, 'mods'), { recursive: true })
+  const jeiJar = makeZip([['mcmod.info', JSON.stringify([{ modid: 'jei', name: 'JEI', version: '4.15.0' }])]])
+  const jeiAddonJar = makeZip([['mcmod.info', JSON.stringify([{ modid: 'jeiaddon', name: 'JEI Addon', version: '1.0', requiredMods: ['jei'] }])]])
+  await fsp.writeFile(path.join(dependencyRoot, 'mods', 'jei.jar'), jeiJar)
+  await fsp.writeFile(path.join(dependencyRoot, 'mods', 'jei-addon.jar'), jeiAddonJar)
+  const dependencyResult = await convertPack({ source: dependencyRoot, outputDir: base, clientModIds: ['jei'] })
+  assert(dependencyResult.removedCount === 0, '被服务端模组依赖的客户端库不会被误删')
+  const dependencyBytes = await fsp.readFile(dependencyResult.output)
+  assert(dependencyBytes.includes(Buffer.from('jei.jar')) && dependencyBytes.includes(Buffer.from('jei-addon.jar')), '服务端 ZIP 保留依赖库和依赖方')
+
+  const brokenRoot = path.join(base, 'broken-dependency-pack')
+  await fsp.mkdir(path.join(brokenRoot, 'mods'), { recursive: true })
+  const brokenJar = makeZip([['mcmod.info', JSON.stringify([{ modid: 'brokenmod', name: 'Broken Mod', version: '1.0', requiredMods: ['not-installed'] }])]])
+  await fsp.writeFile(path.join(brokenRoot, 'mods', 'broken.jar'), brokenJar)
+  await assertRejects(convertPack({ source: brokenRoot, outputDir: base }), '生成前阻止缺少必需依赖的服务端包')
   console.log('✓ 整合包转服务端测试全部通过')
 } finally {
   await fsp.rm(base, { recursive: true, force: true })

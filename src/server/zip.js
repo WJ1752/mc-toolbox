@@ -81,7 +81,7 @@ function parseCentralDirectory(buf, baseOffset) {
  * 从 jar 中读取若干条目的文本内容
  * @returns {Object.<string, Buffer|null>}
  */
-export async function readJarEntries(filePath, wanted) {
+export async function readJarEntries(filePath, wanted, options = {}) {
   const out = {}
   for (const w of wanted) out[w] = null
   let fh
@@ -96,10 +96,24 @@ export async function readJarEntries(filePath, wanted) {
     const map = parseCentralDirectory(tail, base)
     if (!map) return out
 
-    for (const name of wanted) {
+    const wildcard = wanted.filter((name) => name.includes('*'))
+    const names = [...new Set([
+      ...wanted.filter((name) => !name.includes('*')),
+      ...[...map.keys()].filter((name) => wildcard.some((pattern) => {
+        const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')
+        return new RegExp(`^${escaped}$`, 'i').test(name)
+      }))
+    ])]
+    let readBytes = 0
+    let readEntries = 0
+    const maxBytes = Number(options.maxBytes) > 0 ? Number(options.maxBytes) : Infinity
+    const maxEntries = Number(options.maxEntries) > 0 ? Number(options.maxEntries) : Infinity
+    for (const name of names) {
+      if (readEntries >= maxEntries || readBytes >= maxBytes) break
       const entry = map.get(name)
       if (!entry || entry.compSize === 0) continue
       if (entry.compSize > 32 * 1024 * 1024) continue
+      if (readBytes + entry.compSize > maxBytes) break
       try {
         const head = Buffer.alloc(30)
         await fh.read(head, 0, 30, entry.offset)
@@ -110,6 +124,10 @@ export async function readJarEntries(filePath, wanted) {
         const raw = Buffer.alloc(entry.compSize)
         await fh.read(raw, 0, entry.compSize, start)
         out[name] = entry.method === 0 ? raw : entry.method === 8 ? zlib.inflateRawSync(raw) : null
+        if (out[name]) {
+          readBytes += entry.compSize
+          readEntries++
+        }
       } catch {
         out[name] = null
       }

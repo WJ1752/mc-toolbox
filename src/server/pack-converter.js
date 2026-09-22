@@ -425,6 +425,139 @@ function defaultDownloadsDir() {
     : path.join(os.homedir(), 'Downloads')
 }
 
+function compareModVersions(a, b) {
+  const left = String(a || '').trim().toLowerCase().replace(/^v/, '')
+  const right = String(b || '').trim().toLowerCase().replace(/^v/, '')
+  if (!left || !right) return null
+  const parse = (value) => value.split(/[.+\-]/).map((part) => {
+    const match = /^(\d+)/.exec(part)
+    return match ? Number(match[1]) : part
+  })
+  const av = parse(left)
+  const bv = parse(right)
+  const length = Math.max(av.length, bv.length)
+  for (let i = 0; i < length; i++) {
+    const x = av[i] ?? 0
+    const y = bv[i] ?? 0
+    if (typeof x === 'number' && typeof y === 'number') {
+      if (x !== y) return x < y ? -1 : 1
+    } else if (String(x) !== String(y)) return String(x).localeCompare(String(y))
+  }
+  return 0
+}
+
+function satisfiesVersionRange(version, range) {
+  const rule = String(range || '').trim()
+  if (!rule || /^any$/i.test(rule) || !version) return true
+  // Forge's common Maven-style ranges: [min,), (,max], [min,max).
+  const bracket = /^([[(])\s*([^,\]]*)\s*(?:,\s*([^\])]*))?\s*([)\]])$/.exec(rule)
+  if (bracket) {
+    const [, left, min, max, right] = bracket
+    if (min) {
+      const cmp = compareModVersions(version, min)
+      if (cmp !== null && (cmp < 0 || (cmp === 0 && left === '('))) return false
+    }
+    if (max) {
+      const cmp = compareModVersions(version, max)
+      if (cmp !== null && (cmp > 0 || (cmp === 0 && right === ')'))) return false
+    }
+    return true
+  }
+  if (/^(?:[<>=!]=?|~\s*)/.test(rule)) {
+    const m = /^(>=|<=|>|<|=|==|!=|~)\s*(.+)$/.exec(rule)
+    if (!m) return true
+    const cmp = compareModVersions(version, m[2])
+    if (cmp === null) return true
+    if (m[1] === '>' || m[1] === '>=') return cmp > 0 || (m[1] === '>=' && cmp === 0)
+    if (m[1] === '<' || m[1] === '<=') return cmp < 0 || (m[1] === '<=' && cmp === 0)
+    if (m[1] === '!=' ) return cmp !== 0
+    return cmp === 0
+  }
+  // A bare version is treated as an exact requirement when it is clearly
+  // numeric. Unknown loader-specific expressions remain permissive.
+  if (/^\d[\w.+\-]*$/.test(rule)) return compareModVersions(version, rule) === 0
+  return true
+}
+
+function dependencyProvider(index, id) {
+  const list = index.get(String(id || '').toLowerCase()) || []
+  return list.find((item) => !item.disabled) || null
+}
+
+function planModRemoval(modsDirs, clientModIds, autoDetectEnv) {
+  const all = modsDirs.flatMap((group) => group.items)
+  const ids = new Set(clientModIds.map((id) => String(id).trim().toLowerCase()).filter(Boolean))
+  const remove = new Set()
+  const matched = []
+  for (const mod of all) {
+    const byLibrary = mod.modid && ids.has(String(mod.modid).toLowerCase())
+    const byEnvironment = autoDetectEnv && mod.environment === 'client'
+    if (byLibrary || byEnvironment) {
+      remove.add(mod.path)
+      matched.push({ ...mod, rule: byLibrary ? 'modid 库' : 'environment=client' })
+    }
+  }
+
+  const providers = new Map()
+  for (const mod of all) {
+    const modids = Array.isArray(mod.modids) && mod.modids.length ? mod.modids : (mod.modid ? [mod.modid] : [])
+    for (const modid of modids) {
+      const key = String(modid).toLowerCase()
+      const list = providers.get(key) || []
+      list.push(mod)
+      providers.set(key, list)
+    }
+  }
+
+  // A server-side mod may depend on a library that the client-only list would
+  // otherwise remove (JEI and The One Probe are common 1.12 examples). Walk
+  // the retained graph and protect those providers before deleting anything.
+  const retained = all.filter((mod) => !remove.has(mod.path) && !mod.disabled)
+  const queued = [...retained]
+  const visited = new Set()
+  const missing = []
+  while (queued.length) {
+    const mod = queued.shift()
+    if (visited.has(mod.path)) continue
+    visited.add(mod.path)
+    for (const dep of (mod.dependencies || [])) {
+      if (dep.optional === true || dep.required === false) continue
+      const provider = dependencyProvider(providers, dep.id)
+      if (!provider) {
+        missing.push({ mod, dep, reason: 'missing' })
+        continue
+      }
+      if (!satisfiesVersionRange(provider.version, dep.range)) {
+        missing.push({ mod, dep, provider, reason: 'version' })
+        continue
+      }
+      if (remove.has(provider.path)) {
+        remove.delete(provider.path)
+        const record = matched.find((item) => item.path === provider.path)
+        if (record) record.protectedBy = mod.modid || mod.name
+        queued.push(provider)
+      }
+    }
+  }
+  const dedupedMissing = []
+  const seenMissing = new Set()
+  for (const item of missing) {
+    const key = `${item.mod.path}|${item.dep.id}|${item.dep.range}|${item.reason}`
+    if (!seenMissing.has(key)) { seenMissing.add(key); dedupedMissing.push(item) }
+  }
+  if (dedupedMissing.length) {
+    const lines = dedupedMissing.slice(0, 30).map(({ mod, dep, provider, reason }) => {
+      const source = mod.modid || mod.name || path.basename(mod.path)
+      const requirement = dep.range || '任意版本'
+      if (reason === 'version') return `- ${source} 需要 ${dep.id} ${requirement}，当前为 ${provider?.version || '未知版本'}`
+      return `- ${source} 需要 ${dep.id} ${requirement}`
+    })
+    if (dedupedMissing.length > lines.length) lines.push(`- 还有 ${dedupedMissing.length - lines.length} 项依赖未列出`)
+    throw new Error(`无法生成可启动服务端：检测到 ${dedupedMissing.length} 项必需模组依赖缺失或版本不符合。\n${lines.join('\n')}\n\n可能是客户端模组被误删、整合包本身缺文件，或该整合包需要官方服务端专用文件。请补齐依赖后重试。`)
+  }
+  return { remove, matched, total: all.length }
+}
+
 export async function convertPack({ source, outputDir = '', outputName = '', clientModIds = [], autoDetectEnv = true, uploaded = false, installServerCore = false, runtime = null, memory = '4G', minMemory = '1G', javaPath = '', bundleJava = false, onProgress, signal }) {
   signal?.throwIfAborted()
   const launchOptions = { ...validateMemory(memory, minMemory), bundleJava }
@@ -463,23 +596,10 @@ export async function convertPack({ source, outputDir = '', outputName = '', cli
     const indexed = await hydrateModrinthFiles(staging, onProgress, signal)
     await normalizePackLayout(staging, signal)
     const modsDirs = await findModsDirs(staging, signal)
-    const ids = new Set(clientModIds.map((id) => String(id).trim().toLowerCase()).filter(Boolean))
-    const remove = new Set()
-    const matched = []
-    let total = 0
-    for (const group of modsDirs) {
-      total += group.items.length
-      for (const mod of group.items) {
-        const byLibrary = mod.modid && ids.has(String(mod.modid).toLowerCase())
-        const byEnvironment = autoDetectEnv && mod.environment === 'client'
-        if (byLibrary || byEnvironment) {
-          remove.add(mod.path)
-          matched.push({ ...mod, rule: byLibrary ? 'modid 库' : 'environment=client' })
-        }
-      }
-    }
+    const { remove, matched, total } = planModRemoval(modsDirs, clientModIds, autoDetectEnv)
     for (const file of remove) { signal?.throwIfAborted(); await fsp.unlink(file) }
-    report(onProgress, 'mods', 45, `已扫描 ${total} 个 mod，移除 ${matched.length} 个客户端 mod`)
+    const protectedCount = matched.filter((item) => item.protectedBy).length
+    report(onProgress, 'mods', 45, `已扫描 ${total} 个 mod，移除 ${matched.length - protectedCount} 个客户端 mod，保留 ${protectedCount} 个依赖库`)
 
     let core = null
     if (installServerCore) core = await installCoreForPack(staging, selectedRuntime, onProgress, launchOptions, signal)
@@ -513,7 +633,7 @@ export async function convertPack({ source, outputDir = '', outputName = '', cli
       modsDirs: modsDirs.map((x) => x.dir),
       totalMods: total,
       removed: matched,
-      removedCount: matched.length,
+      removedCount: matched.filter((item) => !item.protectedBy).length,
       packed,
       runtime: selectedRuntime || null,
       core,
