@@ -21,10 +21,10 @@ export const LOADERS = [
   ['paper', 'Paper']
 ]
 
-async function request(url, { json = true } = {}) {
+async function request(url, { json = true, signal } = {}) {
   const res = await httpFetch(url, {
     headers: { 'User-Agent': UA, Accept: json ? 'application/json' : '*/*' },
-    signal: AbortSignal.timeout(TIMEOUT),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT)]) : AbortSignal.timeout(TIMEOUT),
     redirect: 'follow'
   })
   if (!res.ok) {
@@ -47,8 +47,8 @@ export async function listGameVersions() {
   return releases
 }
 
-async function findManifestEntry(mc) {
-  const data = await request(MC_MANIFEST)
+async function findManifestEntry(mc, signal) {
+  const data = await request(MC_MANIFEST, { signal })
   const v = (data.versions || []).find((x) => x.id === mc)
   if (!v) throw new Error('未找到 MC 版本：' + mc)
   return v
@@ -177,12 +177,12 @@ function javaCmd(args) {
   return ['java', ...jvm, '-jar', '{jar}', ...args]
 }
 
-export async function resolveDownload({ loader, mc, loaderVersion }) {
+export async function resolveDownload({ loader, mc, loaderVersion, signal }) {
   if (!loader || !mc) throw new Error('缺少加载器或 MC 版本')
 
   if (loader === 'vanilla') {
-    const entry = await findManifestEntry(mc)
-    const meta = await request(entry.url)
+    const entry = await findManifestEntry(mc, signal)
+    const meta = await request(entry.url, { signal })
     const url = meta?.downloads?.server?.url
     if (!url) throw new Error('该版本没有官方服务端核心')
     const name = `minecraft_server.${mc}.jar`
@@ -192,7 +192,7 @@ export async function resolveDownload({ loader, mc, loaderVersion }) {
   if (loader === 'fabric') {
     if (!loaderVersion) throw new Error('缺少 Fabric 加载器版本')
     // 下载官方安装器（installer），下载后自动执行：server -dir <dir> -mcversion ... -downloadMinecraft
-    const installers = await request(`${FABRIC_META}/versions/installer`)
+    const installers = await request(`${FABRIC_META}/versions/installer`, { signal })
     const it = Array.isArray(installers) ? installers[0] : null
     if (!it?.version) throw new Error('获取 Fabric 安装器失败')
     const url = it.url || `https://maven.fabricmc.net/net/fabricmc/fabric-installer/${it.version}/fabric-installer-${it.version}.jar`
@@ -208,11 +208,11 @@ export async function resolveDownload({ loader, mc, loaderVersion }) {
   if (loader === 'quilt') {
     // 官方安装器；原版 server.jar 改由工具箱引擎下载（可走代理/多线程/带超时），
     // 安装器不再用 --download-server（其 Java 网络栈直连 piston-data 易卡死）
-    const installers = await request(`${QUILT_META}/versions/installer`)
+    const installers = await request(`${QUILT_META}/versions/installer`, { signal })
     const it = Array.isArray(installers) ? installers[0] : null
     if (!it?.url) throw new Error('获取 Quilt 安装器失败')
-    const entry = await findManifestEntry(mc)
-    const meta = await request(entry.url)
+    const entry = await findManifestEntry(mc, signal)
+    const meta = await request(entry.url, { signal })
     const serverUrl = meta?.downloads?.server?.url
     if (!serverUrl) throw new Error('该版本没有官方服务端核心')
     return {
@@ -250,7 +250,7 @@ export async function resolveDownload({ loader, mc, loaderVersion }) {
     if (!loaderVersion) throw new Error('缺少 Paper 构建号')
     const emc = encodeURIComponent(mc)
     const ebuild = encodeURIComponent(loaderVersion)
-    const detail = await request(`${PAPER_API}/versions/${emc}/builds/${ebuild}`)
+    const detail = await request(`${PAPER_API}/versions/${emc}/builds/${ebuild}`, { signal })
     // v3 的真实下载地址在 downloads 里，约定式 URL 会 404
     const dl = detail?.downloads?.['server:default'] || detail?.downloads?.application
     if (!dl?.url) throw new Error('该构建没有可下载的服务端核心')

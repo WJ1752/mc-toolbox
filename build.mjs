@@ -471,63 +471,51 @@ async function step8() {
     return
   }
   logStep(8, '冒烟测试生成的 exe')
-  await runCmd(TARGET_EXE, ['--no-open'], { silent: true, timeout: 6000 }).catch(() => {})
-  // 上面超时是预期：服务在 listen 后会一直跑。我们用 curl 单独测一次：
   await startAndProbe()
 }
 
 async function startAndProbe() {
-  // 启动产物到一个临时目录，避免污染项目
+  // Use isolated runtime/config paths so a running user window cannot lock the smoke host.
   const smokeDir = path.join(DIST, '_smoke')
   await rmrf(smokeDir)
   await fsp.mkdir(smokeDir, { recursive: true })
-  // copy exe
   const exe = path.join(smokeDir, 'mc-toolbox.exe')
   await fsp.copyFile(TARGET_EXE, exe)
-  const child = spawn(exe, ['--no-open'], { cwd: smokeDir, stdio: ['ignore', 'pipe', 'pipe'] })
-  let log = ''
-  child.stdout.on('data', (d) => { log += d.toString() })
-  child.stderr.on('data', (d) => { log += d.toString() })
-  // 等至多 8 秒
-  await new Promise((resolve) => {
-    let waited = 0
-    const t = setInterval(() => {
-      waited += 200
-      if (log.includes('本地地址:') || waited >= 8000) { clearInterval(t); resolve() }
-    }, 200)
+  const localAppData = path.join(smokeDir, 'local')
+  const data = path.join(localAppData, 'MC Toolbox', 'data')
+  await fsp.mkdir(data, { recursive: true })
+  await fsp.writeFile(path.join(data, 'dirs.json'), JSON.stringify({ configDir: path.join(smokeDir, 'config'), clientModsDir: path.join(smokeDir, 'client-mods') }))
+  const net = await import('node:net')
+  const reservation = net.createServer()
+  await new Promise(r => reservation.listen(0, '127.0.0.1', r))
+  const port = reservation.address().port
+  await new Promise(r => reservation.close(r))
+  const child = spawn(exe, ['--no-open', '--port=' + port], {
+    cwd: smokeDir, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, LOCALAPPDATA: localAppData, MC_TOOLBOX_PORT: String(port) }
   })
-  const m = log.match(/127\.0\.0\.1:(\d+)/)
-  if (!m) {
-    console.error('     ✗ exe 启动失败，日志：\n' + log)
-    child.kill()
-    process.exit(1)
+  let log = ''
+  let exited = false
+  const closed = new Promise(resolve => child.once('close', () => { exited = true; resolve() }))
+  child.stdout.on('data', d => { log += d })
+  child.stderr.on('data', d => { log += d })
+  child.on('error', e => { log += e.message })
+  try {
+    const deadline = Date.now() + 20000
+    while (!log.includes('本地地址:') && !exited && Date.now() < deadline) await new Promise(r => setTimeout(r, 200))
+    if (!log.includes('本地地址:')) throw new Error('exe 启动失败：' + log)
+    const base = `http://127.0.0.1:${port}`
+    const res = await fetch(base + '/api/bootstrap').then(r => r.json())
+    if (!res.features?.length) throw new Error('bootstrap 未返回功能')
+    const html = await fetch(base + '/').then(r => r.text())
+    const info = await fetch(base + '/api/system/info').then(r => r.json())
+    if (info.author !== AUTHOR || !html.includes('class="author-watermark" aria-hidden="true">' + AUTHOR)) throw new Error('作者信息或角落水印验证失败')
+    console.log('     ✓ 隔离环境：启动、首页、功能列表、作者信息及完整性校验全部通过')
+  } finally {
+    if (!exited) child.kill()
+    await closed
+    await rmrf(smokeDir)
   }
-  const port = m[1]
-  console.log(`     listening on 127.0.0.1:${port}`)
-  // 探活
-  const res = await fetch(`http://127.0.0.1:${port}/api/bootstrap`).then((r) => r.json()).catch((e) => ({ err: e.message }))
-  console.log(`     /api/bootstrap features:`, (res.features || []).map((f) => f.id).join(', '))
-  if (!res.features || res.features.length === 0) {
-    console.error('     ✗ bootstrap 没拉到 features，public 解压可能失败')
-    child.kill()
-    process.exit(1)
-  }
-  // 探活 public 静态
-  const html = await fetch(`http://127.0.0.1:${port}/`).then((r) => r.text()).catch(() => '')
-  if (!html.includes('<title>') && !html.includes('mc-toolbox')) {
-    console.error('     ✗ 静态首页未正确响应')
-    child.kill()
-    process.exit(1)
-  }
-  console.log(`     ✓ 静态首页 + bootstrap + features 全部 OK`)
-  const info = await fetch(`http://127.0.0.1:${port}/api/system/info`).then((r) => r.json())
-  if (info.author !== AUTHOR || !html.includes('class="author-watermark" aria-hidden="true">' + AUTHOR)) {
-    child.kill()
-    throw new Error('作者信息或角落水印验证失败')
-  }
-  console.log('     ✓ 作者信息 + 角落水印 + 发布版启动完整性校验 OK')
-  child.kill()
-  await rmrf(smokeDir)
 }
 
 function spawn(cmd, args, opts) {

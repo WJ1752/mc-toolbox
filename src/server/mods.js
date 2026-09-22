@@ -117,11 +117,12 @@ export async function scanModsDir(dir, opts = {}) {
   const walk = async (current, depth) => {
     const items = await fsp.readdir(current, { withFileTypes: true })
     for (const it of items) {
+      opts.signal?.throwIfAborted()
       const full = path.join(current, it.name)
       if (it.isDirectory()) {
         const ignoredDir = it.name === '.git' || it.name === '.mc-i18n' || it.name === 'node_modules' || it.name.startsWith('$')
         if (recursive && depth < maxDepth && !ignoredDir) {
-          await walk(full, depth + 1).catch(() => {})
+          await walk(full, depth + 1).catch(e => { if (opts.signal?.aborted) throw e })
         }
         continue
       }

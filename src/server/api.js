@@ -8,7 +8,7 @@ import { scanFeatures, removeFeature } from './features.js'
 import { pingServer } from './mc-ping.js'
 import * as monitor from './monitor.js'
 import { scanModsDir, listDir, moveModsToBackup, deleteMods, disableMods, enableMods, defaultBackupDir, guessModsDirs } from './mods.js'
-import { startConvertJob, getConvertJob, writeUploadedPack, removeTempPack } from './pack-converter.js'
+import { startConvertJob, getConvertJob, cancelConvertJob, receiveUploadedPack, removeTempPack } from './pack-converter.js'
 import * as community from './community.js'
 import * as servercore from './servercore.js'
 import * as saveeditor from './saveeditor.js'
@@ -303,16 +303,26 @@ on('POST', '/api/mods/convert', async (req) => {
 })
 
 on('GET', '/api/mods/convert/jobs/:id', async (_req, params) => getConvertJob(params.id) || { error: '转换任务不存在' })
+on('POST', '/api/mods/convert/jobs/:id/cancel', async (_req, params) => ({ ok: cancelConvertJob(params.id) }))
 
-on('POST', '/api/mods/convert-upload', async (req, _params, query) => {
+on('POST', '/api/mods/convert-upload', async (req, _params, query, res) => {
   let uploaded
+  let job
+  let disconnected = false
+  res.once('close', () => {
+    if (!res.writableFinished) {
+      disconnected = true
+      if (job) cancelConvertJob(job.id)
+    }
+  })
   try {
     const encodedName = String(req.headers['x-file-name'] || 'client-pack.zip')
     const name = decodeURIComponent(encodedName)
-    uploaded = await writeUploadedPack(await readRawBody(req), name)
+    uploaded = await receiveUploadedPack(req, name)
+    if (disconnected) throw new Error('上传已中止')
     const ext = path.extname(name) || '.zip'
     const stem = path.basename(name, ext)
-    return startConvertJob({
+    job = startConvertJob({
       source: uploaded.file,
       outputDir: query.outputDir || '',
       outputName: query.outputName || `${stem}-server.zip`,
@@ -320,10 +330,11 @@ on('POST', '/api/mods/convert-upload', async (req, _params, query) => {
       autoDetectEnv: query.autoDetectEnv !== 'false',
       uploaded: true,
       installServerCore: true,
-      runtime: query.mc && query.loader ? { mc: query.mc, loader: query.loader, loaderVersion: query.loaderVersion || '' } : null,
+      runtime: { mc: query.mc || '', loader: query.loader || '', loaderVersion: query.loaderVersion || '' },
       memory: query.memory || '2G',
       cleanup: () => removeTempPack(uploaded.dir)
     })
+    return job
   } catch (e) {
     if (uploaded) await removeTempPack(uploaded.dir)
     return { error: e.message }
@@ -897,7 +908,7 @@ export async function requestHandler(req, res) {
         if (r.method !== req.method) continue
         const params = match(r.pattern, pathname)
         if (!params) continue
-        const data = await r.handler(req, params, query)
+        const data = await r.handler(req, params, query, res)
         sendJson(res, 200, data)
         return
       }

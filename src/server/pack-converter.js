@@ -8,6 +8,11 @@ import { scanModsDir } from './mods.js'
 import { resolveDownload } from './servercore.js'
 import * as community from './community.js'
 import { httpFetch } from './http.js'
+import { detectPackRuntime, mergeRuntime, findPackRoot } from './pack-runtime.js'
+export { detectPackRuntime } from './pack-runtime.js'
+import { promisify } from 'node:util'
+const inflateRaw = promisify(zlib.inflateRaw)
+const deflateRaw = promisify(zlib.deflateRaw)
 
 const MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 const MAX_UNPACK_BYTES = 8 * 1024 * 1024 * 1024
@@ -91,13 +96,14 @@ async function readZipIndex(filePath) {
   }
 }
 
-async function extractZip(filePath, targetDir, onProgress) {
+async function extractZip(filePath, targetDir, onProgress, signal) {
   const index = await readZipIndex(filePath)
   const fh = await fsp.open(filePath, 'r')
   let unpacked = 0
   try {
     let done = 0
     for (const entry of index.entries) {
+      signal?.throwIfAborted()
       if (entry.directory) {
         await fsp.mkdir(path.join(targetDir, ...entry.name.split('/')), { recursive: true })
         continue
@@ -112,12 +118,12 @@ async function extractZip(filePath, targetDir, onProgress) {
       await fh.read(data, 0, entry.compressedSize, entry.offset + 30 + nameLen + extraLen)
       let out
       if (entry.method === 0) out = data
-      else if (entry.method === 8) out = zlib.inflateRawSync(data)
+      else if (entry.method === 8) out = await inflateRaw(data, { maxOutputLength: Math.max(1, entry.size) })
       else throw new Error(`不支持的压缩方式（${entry.method}）：${entry.name}`)
       if (out.length !== entry.size) throw new Error('ZIP 条目大小校验失败：' + entry.name)
       const target = path.join(targetDir, ...entry.name.split('/'))
       await fsp.mkdir(path.dirname(target), { recursive: true })
-      await fsp.writeFile(target, out)
+      await fsp.writeFile(target, out, { signal })
       unpacked += out.length
       done++
       onProgress?.(done / Math.max(1, index.entries.length), entry.name)
@@ -139,16 +145,17 @@ async function listFiles(dir, rel = '') {
   return out
 }
 
-async function packDirectory(sourceDir, outputFile, onProgress) {
+async function packDirectory(sourceDir, outputFile, onProgress, signal) {
   const files = await listFiles(sourceDir)
   const locals = []
   const centrals = []
   let offset = 0
   for (let index = 0; index < files.length; index++) {
+    signal?.throwIfAborted()
     const file = files[index]
     const name = Buffer.from(file.rel, 'utf8')
     const input = await fsp.readFile(file.full)
-    const compressed = input.length ? zlib.deflateRawSync(input, { level: 6 }) : input
+    const compressed = input.length ? await deflateRaw(input, { level: 6 }) : input
     const method = input.length ? 8 : 0
     const crc = crc32(input)
     const local = Buffer.alloc(30 + name.length)
@@ -187,7 +194,7 @@ async function packDirectory(sourceDir, outputFile, onProgress) {
   eocd.writeUInt32LE(centralDir.length, 12)
   eocd.writeUInt32LE(offset, 16)
   await fsp.mkdir(path.dirname(outputFile), { recursive: true })
-  await fsp.writeFile(outputFile, Buffer.concat([...locals, centralDir, eocd]))
+  await fsp.writeFile(outputFile, Buffer.concat([...locals, centralDir, eocd]), { signal })
   return { files: files.length, bytes: (await fsp.stat(outputFile)).size }
 }
 
@@ -199,52 +206,27 @@ async function readJson(file) {
   try { return JSON.parse(await fsp.readFile(file, 'utf8')) } catch { return null }
 }
 
-function loaderFromId(id) {
-  const value = String(id || '').toLowerCase()
-  const m = /^(fabric-loader|quilt-loader|neoforge|forge)[-_](.+)$/.exec(value)
-  if (!m) return null
-  return { loader: m[1].replace('-loader', ''), loaderVersion: m[2] }
-}
-
-/** 从 CurseForge/Modrinth 清单推断服务端安装所需的版本。 */
-export async function detectPackRuntime(root) {
-  const candidates = [path.join(root, 'manifest.json'), path.join(root, 'modrinth.index.json')]
-  for (const file of candidates) {
-    const data = await readJson(file)
-    if (!data) continue
-    if (data.minecraft?.version && Array.isArray(data.minecraft.modLoaders)) {
-      const loader = data.minecraft.modLoaders.map((x) => loaderFromId(x.id)).find(Boolean)
-      if (loader) return { mc: data.minecraft.version, ...loader, source: path.basename(file) }
-    }
-    const deps = data.dependencies || {}
-    const mc = deps.minecraft || data.minecraft?.version
-    if (mc) {
-      for (const key of ['fabric-loader', 'forge', 'neoforge', 'quilt-loader']) {
-        if (deps[key]) return { mc, loader: key.replace('-loader', ''), loaderVersion: String(deps[key]), source: path.basename(file) }
-      }
-    }
-  }
-  return null
-}
-
-async function copyTreeContents(source, target) {
+async function copyTreeContents(source, target, signal) {
   for (const ent of await fsp.readdir(source, { withFileTypes: true })) {
+    signal?.throwIfAborted()
     const from = path.join(source, ent.name)
     const to = path.join(target, ent.name)
     await fsp.mkdir(path.dirname(to), { recursive: true })
-    if (ent.isDirectory()) await fsp.cp(from, to, { recursive: true, force: true })
+    if (ent.isDirectory()) await fsp.cp(from, to, { recursive: true, force: true, filter: () => { signal?.throwIfAborted(); return true } })
     else await fsp.copyFile(from, to)
   }
 }
 
-async function normalizePackLayout(root) {
-  for (const name of ['overrides', 'client-overrides']) {
+async function normalizePackLayout(root, signal) {
+  for (const name of ['overrides', 'server-overrides']) {
+    signal?.throwIfAborted()
     const dir = path.join(root, name)
     if (fs.existsSync(dir) && (await fsp.stat(dir)).isDirectory()) {
-      await copyTreeContents(dir, root)
+      await copyTreeContents(dir, root, signal)
       await fsp.rm(dir, { recursive: true, force: true })
     }
   }
+  await fsp.rm(path.join(root, 'client-overrides'), { recursive: true, force: true })
   const entries = await fsp.readdir(root, { withFileTypes: true })
   for (const ent of entries) {
     if (!ent.isFile()) continue
@@ -257,14 +239,16 @@ async function normalizePackLayout(root) {
   }
 }
 
-async function hydrateModrinthFiles(root, onProgress) {
+async function hydrateModrinthFiles(root, onProgress, signal) {
   const indexPath = path.join(root, 'modrinth.index.json')
   const index = await readJson(indexPath)
   if (!index || !Array.isArray(index.files) || !index.files.length) return { downloaded: 0, skipped: 0 }
   let downloaded = 0
   let skipped = 0
   for (let i = 0; i < index.files.length; i++) {
+    signal?.throwIfAborted()
     const item = index.files[i]
+    if (item.env?.server === 'unsupported') { skipped++; continue }
     const rel = safeRelativeName(item.path)
     if (!rel) throw new Error(`Modrinth 索引包含非法文件路径：${item.path}`)
     const target = path.join(root, ...rel.split('/'))
@@ -275,7 +259,8 @@ async function hydrateModrinthFiles(root, onProgress) {
     let lastError = null
     for (const url of urls) {
       try {
-        const res = await httpFetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30000), headers: { 'User-Agent': 'mc-toolbox/1.0' } })
+        const timeout = AbortSignal.timeout(30000)
+        const res = await httpFetch(url, { redirect: 'follow', signal: signal ? AbortSignal.any([signal, timeout]) : timeout, headers: { 'User-Agent': 'mc-toolbox/1.0' } })
         if (res.ok) { response = res; break }
         lastError = new Error(`HTTP ${res.status}`)
       } catch (e) { lastError = e }
@@ -346,10 +331,10 @@ async function writeServerScripts(root, runtime, info, memory = '2G') {
   throw new Error(`服务端核心安装完成但未找到可启动文件（${runtime.loader} ${runtime.mc} ${runtime.loaderVersion}）`)
 }
 
-async function installCoreForPack(root, runtime, onProgress, memory) {
+async function installCoreForPack(root, runtime, onProgress, memory, signal) {
   report(onProgress, 'core-resolve', 50, `正在解析 ${runtime.loader} ${runtime.mc}`)
-  const info = await resolveDownload(runtime)
-  community.configure({ subdirByType: false })
+  const info = await resolveDownload({ ...runtime, signal })
+  signal?.throwIfAborted()
   const job = await community.startDownload({
     url: info.url,
     filename: info.filename,
@@ -358,26 +343,36 @@ async function installCoreForPack(root, runtime, onProgress, memory) {
     postCommand: info.postCommand,
     extraFiles: info.extraFiles,
     preserveName: true,
+    exactDir: true,
     meta: { type: 'servercore', source: 'pack-converter' }
   })
-  let current = job
-  while (current && !['done', 'failed', 'cancelled'].includes(current.status)) {
-    if (current.status === 'installing') {
-      const p = typeof current.installProgress === 'number' ? current.installProgress : 0
-      report(onProgress, 'core-install', 70 + p * 0.16, current.installLog || '正在执行服务端安装器')
-    } else {
-      const p = current.total ? current.received / current.total : 0
-      report(onProgress, 'core-download', 50 + p * 20, `正在下载服务端核心 ${Math.round(p * 100)}%`)
+  try {
+    let current = job
+    while (current && !['done', 'failed', 'cancelled'].includes(current.status)) {
+      if (signal?.aborted) {
+        await community.cancelJobAndWait(job.id)
+        throw new Error('转换已中止')
+      }
+      if (current.status === 'installing') {
+        const p = typeof current.installProgress === 'number' ? current.installProgress : 0
+        report(onProgress, 'core-install', 70 + p * 0.16, current.installLog || '正在执行服务端安装器')
+      } else {
+        const p = current.total ? current.received / current.total : 0
+        report(onProgress, 'core-download', 50 + p * 20, `正在下载服务端核心 ${Math.round(p * 100)}%`)
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      current = community.getJob(job.id)
     }
-    await new Promise((resolve) => setTimeout(resolve, 250))
-    current = community.getJob(job.id)
+    if (!current || current.status !== 'done') throw new Error(current?.error || '服务端核心安装失败')
+    signal?.throwIfAborted()
+    report(onProgress, 'core-verify', 88, '正在校验服务端核心和启动文件')
+    for (const ent of await fsp.readdir(root, { withFileTypes: true })) {
+      if (ent.isFile() && /(?:fabric|quilt|forge|neoforge)-installer(?:[-_.].*)?\.jar$/i.test(ent.name)) await fsp.rm(path.join(root, ent.name), { force: true })
+    }
+    return await writeServerScripts(root, runtime, info, memory)
+  } finally {
+    if (signal?.aborted) await community.cancelJobAndWait(job.id)
   }
-  if (!current || current.status !== 'done') throw new Error(current?.error || '服务端核心安装失败')
-  report(onProgress, 'core-verify', 88, '正在校验服务端核心和启动文件')
-  for (const ent of await fsp.readdir(root, { withFileTypes: true })) {
-    if (ent.isFile() && /(?:fabric|quilt|forge|neoforge)-installer(?:[-_.].*)?\.jar$/i.test(ent.name)) await fsp.rm(path.join(root, ent.name), { force: true })
-  }
-  return await writeServerScripts(root, runtime, info, memory)
 }
 
 async function uniqueOutput(dir, name) {
@@ -390,16 +385,18 @@ async function uniqueOutput(dir, name) {
   return candidate
 }
 
-async function findModsDirs(root) {
+async function findModsDirs(root, signal) {
   const found = []
   const walk = async (dir, depth) => {
+    signal?.throwIfAborted()
     if (depth > 8) return
     for (const ent of await fsp.readdir(dir, { withFileTypes: true })) {
       if (!ent.isDirectory() || ['.git', '.mc-i18n', 'node_modules'].includes(ent.name)) continue
       const full = path.join(dir, ent.name)
       if (ent.name.toLowerCase() === 'mods') {
-        const jars = await scanModsDir(full, { recursive: false, includeDisabled: true }).catch(() => [])
+        const jars = await scanModsDir(full, { recursive: true, includeDisabled: true, signal })
         if (jars.length) found.push({ dir: full, items: jars })
+        continue
       }
       await walk(full, depth + 1)
     }
@@ -414,7 +411,8 @@ function defaultDownloadsDir() {
     : path.join(os.homedir(), 'Downloads')
 }
 
-export async function convertPack({ source, outputDir = '', outputName = '', clientModIds = [], autoDetectEnv = true, uploaded = false, installServerCore = false, runtime = null, memory = '2G', onProgress }) {
+export async function convertPack({ source, outputDir = '', outputName = '', clientModIds = [], autoDetectEnv = true, uploaded = false, installServerCore = false, runtime = null, memory = '2G', onProgress, signal }) {
+  signal?.throwIfAborted()
   const input = path.resolve(String(source || ''))
   if (!input || !fs.existsSync(input)) throw new Error('客户端整合包或目录不存在')
   const sourceStat = await fsp.stat(input)
@@ -422,27 +420,29 @@ export async function convertPack({ source, outputDir = '', outputName = '', cli
   if (!isDir && !/\.(zip|mrpack)$/i.test(input)) throw new Error('只支持整合包目录、.zip 或 .mrpack 文件')
 
   const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'mc-toolbox-convert-'))
-  const staging = path.join(tempRoot, 'pack')
+  let staging = path.join(tempRoot, 'pack')
   await fsp.mkdir(staging)
   let sourceInfo = { unpacked: false, entries: 0 }
   try {
     report(onProgress, 'extract', 2, isDir ? '正在复制整合包目录' : '正在解压整合包')
-    if (isDir) await fsp.cp(input, staging, { recursive: true, force: true })
+    if (isDir) await fsp.cp(input, staging, { recursive: true, force: true, filter: () => { signal?.throwIfAborted(); return true } })
     else {
-      const result = await extractZip(input, staging, (p, name) => report(onProgress, 'extract', 2 + p * 23, name))
+      const result = await extractZip(input, staging, (p, name) => report(onProgress, 'extract', 2 + p * 23, name), signal)
       sourceInfo = { unpacked: true, entries: result.index.entries.length, bytes: result.unpacked }
     }
     report(onProgress, 'scan', 28, '正在识别整合包版本和加载器')
-    const detectedRuntime = await detectPackRuntime(staging)
-    const indexed = await hydrateModrinthFiles(staging, onProgress)
-    await normalizePackLayout(staging)
-    const selectedRuntime = runtime?.mc && runtime?.loader
-      ? { mc: String(runtime.mc), loader: String(runtime.loader), loaderVersion: String(runtime.loaderVersion || '') }
-      : detectedRuntime
+    const completeManual = runtime?.mc && runtime?.loader && (runtime.loader === 'vanilla' || runtime.loaderVersion)
+    const detectedRuntime = await detectPackRuntime(staging, { signal }).catch(e => { if (completeManual && !signal?.aborted) return null; throw e })
+    const selectedRuntime = mergeRuntime(detectedRuntime, runtime || {})
+    staging = await findPackRoot(staging, detectedRuntime, signal)
     if (installServerCore && (!selectedRuntime?.mc || !selectedRuntime?.loader || (selectedRuntime.loader !== 'vanilla' && !selectedRuntime.loaderVersion))) {
-      throw new Error('无法从整合包识别 MC 版本或加载器版本，请在转换设置中手动指定')
+      const missing = [!selectedRuntime.mc && 'MC 版本', !selectedRuntime.loader && '加载器', selectedRuntime.loader !== 'vanilla' && !selectedRuntime.loaderVersion && '加载器版本'].filter(Boolean)
+      throw new Error('无法确定：' + missing.join('、') + '。请选择包含版本文件的完整实例目录，或手动补全；仅选择 Forge 还不足以确定版本。')
     }
-    const modsDirs = await findModsDirs(staging)
+    report(onProgress, 'scan', 28, selectedRuntime.mc ? `已识别 ${selectedRuntime.mc} / ${selectedRuntime.loader} ${selectedRuntime.loaderVersion || ''}（${detectedRuntime?.source || '手动填写'}）` : '正在扫描 mod')
+    const indexed = await hydrateModrinthFiles(staging, onProgress, signal)
+    await normalizePackLayout(staging, signal)
+    const modsDirs = await findModsDirs(staging, signal)
     const ids = new Set(clientModIds.map((id) => String(id).trim().toLowerCase()).filter(Boolean))
     const remove = new Set()
     const matched = []
@@ -458,11 +458,11 @@ export async function convertPack({ source, outputDir = '', outputName = '', cli
         }
       }
     }
-    for (const file of remove) await fsp.unlink(file).catch(() => {})
+    for (const file of remove) { signal?.throwIfAborted(); await fsp.unlink(file) }
     report(onProgress, 'mods', 45, `已扫描 ${total} 个 mod，移除 ${matched.length} 个客户端 mod`)
 
     let core = null
-    if (installServerCore) core = await installCoreForPack(staging, selectedRuntime, onProgress, memory)
+    if (installServerCore) core = await installCoreForPack(staging, selectedRuntime, onProgress, memory, signal)
 
     const dir = String(outputDir || '').trim()
       ? path.resolve(outputDir)
@@ -471,10 +471,18 @@ export async function convertPack({ source, outputDir = '', outputName = '', cli
     const base = outputName || `${path.basename(input, path.extname(input))}-server.zip`
     const output = await uniqueOutput(dir, base.toLowerCase().endsWith('.zip') ? base : base + '.zip')
     report(onProgress, 'pack', 90, '正在生成服务端压缩包')
-    const packed = await packDirectory(staging, output, (p, name) => report(onProgress, 'pack', 90 + p * 9, name))
+    const partial = path.join(tempRoot, 'output.zip')
+    const packed = await packDirectory(staging, partial, (p, name) => report(onProgress, 'pack', 90 + p * 9, name), signal)
+    signal?.throwIfAborted()
+    const pendingOutput = output + '.part-' + crypto.randomUUID()
+    try {
+      await fsp.copyFile(partial, pendingOutput)
+      signal?.throwIfAborted()
+      report(onProgress, 'publishing', 99, '正在保存最终压缩包…')
+      await fsp.rename(pendingOutput, output)
+    } finally { await fsp.rm(pendingOutput, { force: true }) }
     const warnings = []
     if (!outputDir) warnings.push(uploaded ? '未选择输出目录，拖入的文件已输出到系统下载目录。' : '未选择输出目录，已输出到客户端原文件所在目录。')
-    if (/\.mrpack$/i.test(input)) warnings.push('.mrpack 只包含索引和 overrides；未下载索引中缺失的 mod。')
     report(onProgress, 'done', 100, '服务端包已生成')
     return {
       source: input,
@@ -500,7 +508,7 @@ const convertJobs = new Map()
 let convertJobSeq = 1
 
 function publicConvertJob(job) {
-  const { cleanup, ...rest } = job
+  const { cleanup, controller, ...rest } = job
   return rest
 }
 
@@ -509,29 +517,39 @@ export function getConvertJob(id) {
   return job ? publicConvertJob(job) : null
 }
 
+export function cancelConvertJob(id) {
+  const job = convertJobs.get(id)
+  if (!job || job.stage === 'publishing' || ['done', 'failed', 'cancelled'].includes(job.status)) return false
+  job.status = 'cancelling'
+  job.detail = '正在中止转换并清理临时文件…'
+  job.controller.abort()
+  return true
+}
+
 export function startConvertJob(options) {
   const id = 'convert_' + convertJobSeq++
-  const job = { id, status: 'queued', progress: 0, stage: 'queued', detail: '等待转换任务', result: null, error: null, startedAt: Date.now(), finishedAt: null, cleanup: options.cleanup }
+  const job = { id, status: 'queued', progress: 0, stage: 'queued', detail: '等待转换任务', result: null, error: null, startedAt: Date.now(), finishedAt: null, cleanup: options.cleanup, controller: new AbortController() }
   convertJobs.set(id, job)
-  queueMicrotask(async () => {
+  setImmediate(async () => {
+    let terminal = 'done'
     job.status = 'running'
     job.startedAt = Date.now()
     try {
-      job.result = await convertPack({ ...options, onProgress: (p) => Object.assign(job, p) })
+      job.result = await convertPack({ ...options, signal: job.controller.signal, onProgress: (p) => { if (job.controller.signal.aborted) throw new Error('转换已中止'); Object.assign(job, p) } })
       job.progress = 100
       job.stage = 'done'
       job.detail = '服务端包已生成'
-      job.status = 'done'
-      job.finishedAt = Date.now()
     } catch (e) {
-      job.status = 'failed'
-      job.stage = 'failed'
-      job.error = e.message
-      job.detail = e.message
-      job.finishedAt = Date.now()
+      const cancelled = job.controller.signal.aborted || e.message === '转换已中止'
+      terminal = cancelled ? 'cancelled' : 'failed'
+      job.stage = cancelled ? 'cancelled' : 'failed'
+      job.error = cancelled ? null : e.message
+      job.detail = cancelled ? '转换已中止，临时文件已清理' : e.message
     } finally {
       if (typeof job.cleanup === 'function') await Promise.resolve(job.cleanup()).catch(() => {})
       job.cleanup = null
+      job.status = terminal
+      job.finishedAt = Date.now()
     }
   })
   return publicConvertJob(job)
@@ -545,6 +563,32 @@ export async function writeUploadedPack(buffer, name) {
   const file = path.join(dir, `client-pack.${ext.toLowerCase()}`)
   await fsp.writeFile(file, buffer)
   return { dir, file }
+}
+
+// Stream browser uploads to disk; aborting the HTTP request removes the partial file.
+export async function receiveUploadedPack(req, name) {
+  if (Number(req.headers['content-length']) > MAX_ARCHIVE_BYTES) throw new Error('整合包超过 2 GB；请解压后使用“选择文件夹”')
+  const ext = /\.(mrpack|zip)$/i.exec(name)?.[1]
+  if (!ext) throw new Error('仅支持 ZIP 或 .mrpack')
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'mc-toolbox-upload-'))
+  const file = path.join(dir, 'client-pack.' + ext.toLowerCase())
+  let handle
+  try {
+    handle = await fsp.open(file, 'w')
+    let total = 0
+    for await (const chunk of req) {
+      total += chunk.length
+      if (total > MAX_ARCHIVE_BYTES) throw new Error('整合包超过 2 GB；请解压后使用“选择文件夹”')
+      await handle.writeFile(chunk)
+    }
+    if (!total || req.aborted) throw new Error('上传中止或文件为空')
+    await handle.close()
+    return { dir, file }
+  } catch (e) {
+    await handle?.close().catch(() => {})
+    await removeTempPack(dir)
+    throw e
+  }
 }
 
 export async function removeTempPack(dir) {

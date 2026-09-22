@@ -71,6 +71,11 @@ export default {
       if (p) { outputInput.value = p; convertStatus.textContent = `服务端包将生成到：${p}。原客户端文件不会被修改。` }
     } }, '选择输出文件夹')
     const btnConvert = h('button', { class: 'btn btn-sm btn-primary', onclick: convertPack }, '转换为服务端包')
+    let activeConvertJobId = ''
+    let activeUploadXhr = null
+    let cancelRequested = false
+    let lastProgress = 0
+    const btnCancelConvert = h('button', { class: 'btn btn-sm btn-danger', style: { display: 'none' }, onclick: cancelConvert }, '中止转换')
     drop.onclick = () => btnPackage.click()
     function setConvertSource(source, file) {
       state.convertSource = source || ''
@@ -96,10 +101,10 @@ export default {
       h('div', { class: 'row wrap', style: { marginTop: '8px' } },
         h('div', { class: 'grow', style: { minWidth: '220px' } }, convertInput), btnPackage, btnFolder),
       h('div', { class: 'row wrap', style: { marginTop: '6px' } },
-        h('div', { class: 'grow', style: { minWidth: '220px' } }, outputInput), btnOutput, btnConvert),
+        h('div', { class: 'grow', style: { minWidth: '220px' } }, outputInput), btnOutput, btnConvert, btnCancelConvert),
       h('div', { class: 'row wrap', style: { marginTop: '6px' } },
         h('span', { class: 'muted' }, '核心识别：'), runtimeMcInput, runtimeLoaderSel, runtimeLoaderVersionInput,
-        h('span', { class: 'muted' }, '留空则从 manifest.json / modrinth.index.json 自动识别')),
+        h('span', { class: 'muted' }, '留空自动识别清单、启动器版本文件、Forge 核心或脚本；手动填写项优先')),
       convertStatus, convertProgress))
 
     ctx.body.appendChild(h('div', { class: 'field' }, h('label', {}, 'mods 目录'),
@@ -184,9 +189,14 @@ export default {
     async function convertPack() {
       if (state.convertBusy) return
       if (!state.convertSource && !state.convertFile) { toast('请先拖入或选择客户端整合包 / 目录', 'err'); return }
+      if (state.convertFile?.size > 2 * 1024 * 1024 * 1024) { toast('整合包超过 2 GB，请先解压并使用“选择文件夹”', 'err'); return }
+      cancelRequested = false
+      lastProgress = 0
       state.convertBusy = true
       btnConvert.disabled = true
-      setConvertProgress({ stage: 'queued', progress: 0, detail: '正在提交转换任务…' })
+      btnCancelConvert.style.display = ''
+      btnCancelConvert.disabled = false
+      setConvertProgress({ stage: 'queued', progress: null, detail: '正在提交转换任务…' })
       try {
         let job
         if (state.convertFile) {
@@ -195,28 +205,23 @@ export default {
           if (runtimeMcInput.value.trim()) q.set('mc', runtimeMcInput.value.trim())
           if (runtimeLoaderSel.value) q.set('loader', runtimeLoaderSel.value)
           if (runtimeLoaderVersionInput.value.trim()) q.set('loaderVersion', runtimeLoaderVersionInput.value.trim())
-          const response = await fetch('/api/mods/convert-upload?' + q, {
-            method: 'POST',
-            headers: { 'Content-Type': state.convertFile.type || 'application/zip', 'X-File-Name': encodeURIComponent(state.convertFile.name) },
-            body: state.convertFile
-          })
-          job = await response.json()
+          job = await uploadConvertFile('/api/mods/convert-upload?' + q, state.convertFile)
         } else {
-          const runtime = runtimeMcInput.value.trim() && runtimeLoaderSel.value
-            ? { mc: runtimeMcInput.value.trim(), loader: runtimeLoaderSel.value, loaderVersion: runtimeLoaderVersionInput.value.trim() }
-            : null
+          const runtime = { mc: runtimeMcInput.value.trim(), loader: runtimeLoaderSel.value, loaderVersion: runtimeLoaderVersionInput.value.trim() }
           job = await api.post('/api/mods/convert', { source: state.convertSource, outputDir: outputInput.value.trim(), runtime })
         }
         if (job.error) throw new Error(job.error)
         if (!job.id) throw new Error('转换任务创建失败')
+        activeConvertJobId = job.id
+        if (cancelRequested) await cancelConvert()
         let result
         for (;;) {
           await new Promise((resolve) => setTimeout(resolve, 350))
           const current = await api.get('/api/mods/convert/jobs/' + encodeURIComponent(job.id))
-          if (current.error) throw new Error(current.error)
           setConvertProgress(current)
           if (current.status === 'done') { result = current.result; break }
-          if (current.status === 'failed' || current.status === 'cancelled') throw new Error(current.error || current.detail || '转换失败')
+          if (current.status === 'cancelled') throw new Error('转换已中止')
+          if (current.status === 'failed') throw new Error(current.error || '转换失败')
         }
         const warning = (result.warnings || []).map((x) => h('div', { class: 'result-bad' }, x))
         const detail = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '7px' } },
@@ -231,12 +236,62 @@ export default {
         })
         toast('服务端整合包已生成', 'ok')
       } catch (e) {
-        toast('转换失败：' + e.message, 'err')
-        setConvertProgress({ stage: 'failed', progress: 0, detail: e.message })
+        const cancelled = e.message === '转换已中止' || e.message === '客户端整合包上传已取消'
+        toast(cancelled ? '已中止转换' : '转换失败：' + e.message, cancelled ? 'warn' : 'err')
+        setConvertProgress({ status: cancelled ? 'cancelled' : 'failed', stage: cancelled ? 'cancelled' : 'failed', progress: lastProgress, detail: cancelled ? '转换已中止' : e.message })
       } finally {
         state.convertBusy = false
         btnConvert.disabled = false
+        btnCancelConvert.style.display = 'none'
+        activeConvertJobId = ''
+        activeUploadXhr = null
       }
+    }
+
+    async function cancelConvert() {
+      if (!state.convertBusy) return
+      cancelRequested = true
+      btnCancelConvert.disabled = true
+      setConvertProgress({ status: 'cancelling', progress: null, detail: '正在请求中止，请等待后台停止并清理…' })
+      if (activeUploadXhr) {
+        activeUploadXhr.abort()
+        return
+      }
+      if (activeConvertJobId) {
+        try { await api.post('/api/mods/convert/jobs/' + encodeURIComponent(activeConvertJobId) + '/cancel') }
+        catch (e) { btnCancelConvert.disabled = false; toast('中止请求失败：' + e.message, 'err') }
+      }
+    }
+
+    function uploadConvertFile(url, file) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        activeUploadXhr = xhr
+        xhr.open('POST', url)
+        xhr.setRequestHeader('Content-Type', file.type || 'application/zip')
+        xhr.setRequestHeader('X-File-Name', encodeURIComponent(file.name))
+        xhr.onloadend = () => { if (activeUploadXhr === xhr) activeUploadXhr = null }
+        xhr.upload.onload = () => setConvertProgress({ stage: 'upload', progress: null, detail: '上传完成，正在等待本地工具箱创建任务…' })
+        xhr.upload.onprogress = (event) => {
+          if (!event.lengthComputable) {
+            setConvertProgress({ stage: 'upload', progress: null, detail: `正在上传到本机 · 已传 ${fmtBytes(event.loaded)}` })
+            return
+          }
+          const ratio = Math.max(0, Math.min(1, event.loaded / event.total))
+          const uploaded = `${fmtBytes(event.loaded)} / ${fmtBytes(event.total)}`
+          setConvertProgress({ stage: 'upload', progress: ratio * 100, detail: `上传到本机（上传阶段） · ${uploaded}` })
+        }
+        xhr.onerror = () => reject(new Error('客户端整合包上传失败，请检查文件是否仍可读取'))
+        xhr.onabort = () => reject(new Error('客户端整合包上传已取消'))
+        xhr.onload = () => {
+          let data = null
+          try { data = xhr.responseText ? JSON.parse(xhr.responseText) : null } catch { reject(new Error('上传接口返回了无效响应')); return }
+          if (xhr.status < 200 || xhr.status >= 300) { reject(new Error(data?.error || `上传失败（HTTP ${xhr.status}）`)); return }
+          setConvertProgress({ stage: 'queued', progress: null, detail: '上传完成，正在启动转换任务…' })
+          resolve(data)
+        }
+        xhr.send(file)
+      })
     }
 
     function setConvertProgress(job) {
@@ -245,10 +300,12 @@ export default {
       const detail = convertProgress.querySelector('[data-role="convert-detail"]')
       const percent = convertProgress.querySelector('[data-role="convert-percent"]')
       const bar = convertProgress.querySelector('[data-role="convert-bar"]')
-      const p = Number.isFinite(Number(job.progress)) ? Math.max(0, Math.min(100, Number(job.progress))) : 0
+      const known = typeof job.progress === 'number' && Number.isFinite(job.progress)
+      const p = known ? Math.max(0, Math.min(100, job.progress)) : 0
+      if (known) lastProgress = p
       if (detail) detail.textContent = job.detail || job.stage || '处理中…'
-      if (percent) percent.textContent = `${Math.round(p)}%`
-      if (bar) bar.style.width = `${p}%`
+      if (percent) percent.textContent = ['failed', 'cancelled'].includes(job.status) ? (job.status === 'cancelled' ? '已中止' : '失败') : known ? `${Math.round(p)}%` : '处理中'
+      if (bar) { bar.style.width = known ? `${p}%` : ''; bar.parentElement.classList.toggle('indeterminate', !known) }
       if (job.status === 'done') convertStatus.textContent = '转换完成。已校验服务端核心和启动文件，原客户端文件未修改。'
       else if (job.status === 'failed') convertStatus.textContent = `转换失败：${job.error || job.detail || '未知错误'}`
     }

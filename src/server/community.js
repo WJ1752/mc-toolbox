@@ -300,7 +300,7 @@ const jobs = new Map()
 let jobSeq = 1
 
 function publicJob(j) {
-  const { controller, ...rest } = j
+  const { controller, completion, ...rest } = j
   return rest
 }
 
@@ -317,13 +317,13 @@ export function getJob(id) {
 function pump() {
   const max = Math.max(1, Number(cfg.maxConcurrent) || 1)
   let running = 0
-  for (const j of jobs.values()) if (j.status === 'running') running++
+  for (const j of jobs.values()) if (['running', 'installing'].includes(j.status)) running++
   if (running >= max) return
   for (const j of jobs.values()) {
     if (running >= max) break
     if (j.status !== 'queued') continue
     running++
-    runDownload(j).catch((e) => {
+    j.completion = runDownload(j).catch((e) => {
       j.status = 'failed'
       j.error = e.message
       pump()
@@ -333,11 +333,11 @@ function pump() {
   }
 }
 
-export async function startDownload({ url, dir, filename, title, meta, postCommand, startScript, extraFiles, preserveName }) {
+export async function startDownload({ url, dir, filename, title, meta, postCommand, startScript, extraFiles, preserveName, exactDir = false }) {
   if (!url) throw new Error('缺少下载地址')
   const baseDir = dir && dir.trim() ? dir.trim() : cfg.downloadDir || path.join(os.homedir(), 'Downloads')
   let target = baseDir
-  if (cfg.subdirByType && meta?.type) target = path.join(baseDir, safeName(meta.type))
+  if (!exactDir && cfg.subdirByType && meta?.type) target = path.join(baseDir, safeName(meta.type))
   await fsp.mkdir(target, { recursive: true })
 
   // preserveName：服务端核心等场景保留原生文件名，不套用命名规则
@@ -566,6 +566,7 @@ function parseInstallerLine(job, raw) {
 }
 
 async function runPostCommand(job) {
+  if (job.controller.signal.aborted) return
   job.status = 'installing'
   job.installProgress = null
   job.installLog = ''
@@ -578,6 +579,9 @@ async function runPostCommand(job) {
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe']
       })
+      const stop = () => child.kill('SIGKILL')
+      job.controller.signal.addEventListener('abort', stop, { once: true })
+      if (job.controller.signal.aborted) stop()
       let tail = ''
       let lineBuf = ''
       const feed = (s) => {
@@ -595,15 +599,18 @@ async function runPostCommand(job) {
       child.stderr?.on('data', (d) => feed(d.toString()))
       child.on('error', (e) => reject(new Error(e.code === 'ENOENT' ? '未找到 Java，请先安装 Java 并加入系统 PATH' : e.message)))
       child.on('close', (code) => {
+        job.controller.signal.removeEventListener('abort', stop)
         if (lineBuf.trim()) parseInstallerLine(job, lineBuf)
         if (code === 0) resolve()
         else reject(new Error('安装器退出码 ' + code + (tail ? '：' + tail.slice(-260) : '')))
       })
     })
+    if (job.controller.signal.aborted) return
     job.status = 'done'
     job.installProgress = 100
     job.finishedAt = Date.now()
   } catch (e) {
+    if (job.controller.signal.aborted) return
     job.status = 'failed'
     job.error = e.message
   }
@@ -639,13 +646,19 @@ export function cancelJob(id) {
   return true
 }
 
+export async function cancelJobAndWait(id) {
+  const job = jobs.get(id)
+  cancelJob(id)
+  await job?.completion
+}
+
 export function clearJobs(scope) {
   const isServercore = (j) => !!(j.meta && j.meta.type === 'servercore')
   for (const j of Array.from(jobs.values())) {
     // scope='community'：只清社区资源下载的任务，服务端核心下载的留给自己的磁贴
     if (scope === 'community' && isServercore(j)) continue
     if (scope === 'servercore' && !isServercore(j)) continue
-    if (j.status === 'running' || j.status === 'queued') cancelJob(j.id)
+    if (['running', 'queued', 'installing'].includes(j.status)) cancelJob(j.id)
     jobs.delete(j.id)
   }
   pump()

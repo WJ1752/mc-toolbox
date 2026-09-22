@@ -13,7 +13,7 @@ export const SHELL_INTEGRITY = {
     "js/core/grid.js": "4316b5701cd0327fe47a55c069361d0d2c44bcfe0cfcd167d417774861599a34",
     "js/core/heartbeat.js": "71a08e33c31de9163527294815a9127e918664248230e18b73d573fc0c740b27",
     "js/core/modal.js": "3cdc238403df3a5531accba820ede8494c44bcc590af04aefcd492009f6772f9",
-    "js/core/settings.js": "a4bd6673f03f0a14634f1f95562bf726e8e5e4c42feba79ab6b4802023d4f82f",
+    "js/core/settings.js": "2e3db305948d6d1c32b60c9bb2a7e02ae0607e916d97593f2d0d99131cb80ba1",
     "js/core/toast.js": "1a78aa9cfb94515de64af48922afa1905a70ba91e68714a92c1ec7a25a3cdf57"
   }
 }
