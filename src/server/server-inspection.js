@@ -61,6 +61,21 @@ export async function inspectCore(file) {
   return { mc, loader, loaderVersion }
 }
 
+function runtimeFromCoreName(name) {
+  const forge = /(?:^|[\\/])forge-(1\.\d+(?:\.\d+)?)-(\d+(?:\.\d+)+(?:-1\.\d+(?:\.\d+)?)?)(?:-server)?\.jar$/i.exec(name)
+  if (forge) return { mc: forge[1], loader: 'forge', loaderVersion: forge[2] }
+  const neo = /(?:^|[\\/])neoforge-(\d+(?:\.\d+)+)(?:-server)?\.jar$/i.exec(name)
+  if (neo) return { mc: '', loader: 'neoforge', loaderVersion: neo[1] }
+  const mc = /(?:^|[\\/])(?:minecraft_server|server)[._-](1\.\d+(?:\.\d+)?)(?:\.jar)?$/i.exec(name)
+  if (mc) return { mc: mc[1], loader: 'vanilla', loaderVersion: '' }
+  if (/fabric/i.test(name)) return { mc: '', loader: 'fabric', loaderVersion: '' }
+  if (/quilt/i.test(name)) return { mc: '', loader: 'quilt', loaderVersion: '' }
+  if (/purpur/i.test(name)) return { mc: /1\.\d+(?:\.\d+)?/.exec(name)?.[0] || '', loader: 'purpur', loaderVersion: '' }
+  if (/paper/i.test(name)) return { mc: /1\.\d+(?:\.\d+)?/.exec(name)?.[0] || '', loader: 'paper', loaderVersion: '' }
+  if (/spigot|craftbukkit/i.test(name)) return { mc: /1\.\d+(?:\.\d+)?/.exec(name)?.[0] || '', loader: 'spigot', loaderVersion: '' }
+  return null
+}
+
 function readProperties(text) {
   return Object.fromEntries(text.split(/\r?\n/).filter(line => line.trim() && !/^\s*[#!]/.test(line)).map(line => {
     const at = line.indexOf('='); return at < 0 ? [line.trim(), ''] : [line.slice(0, at).trim(), line.slice(at + 1).trim()]
@@ -104,7 +119,7 @@ async function plansAt(root) {
     } catch (e) { warnings.push(`${entry.name} 读取失败：${e.message}`) }
   }
   // Preserve literal JVM arguments in standard launch scripts. Never execute script text as a shell command.
-  for (const name of ['start.bat', 'run.bat', 'startserver.bat', 'ServerStart.bat', 'start.sh', 'run.sh']) {
+  for (const name of ['start.bat', 'run.bat', 'run-windows.bat', 'startserver.bat', 'ServerStart.bat', 'start.sh', 'run.sh', 'run-linux.sh']) {
     if (!(await exists(path.join(root, name)))) continue
     const script = await fs.readFile(path.join(root, name), 'utf8')
     for (const line of script.split(/\r?\n/)) {
@@ -117,6 +132,11 @@ async function plansAt(root) {
         if (at < 0) continue
         const plan = plans.find(p => p.id === args[at + 1])
         if (plan) { plan.jvm = args.slice(0, at); plan.args = args.slice(at); plan.script = name }
+        else {
+          const jarName = args[at + 1]
+          const runtime = runtimeFromCoreName(jarName) || { mc: '', loader: 'vanilla', loaderVersion: '' }
+          plans.push({ id: jarName, label: `${name} → ${jarName}（脚本引用的核心）`, args: args.slice(at), jvm: args.slice(0, at), script: name, runtime, missingCore: !(await exists(path.resolve(root, jarName))) })
+        }
       } catch { warnings.push(`${name} 参数无法完整识别，请手动核对。`) }
     }
   }

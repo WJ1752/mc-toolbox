@@ -16,7 +16,7 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const DIST = path.join(here, 'dist')
 const BUNDLE = path.join(DIST, '_bundle')
 const NODE_EXE = process.execPath
-const TARGET_EXE = path.join(DIST, process.platform === 'win32' ? 'mc-toolbox.exe' : 'mc-toolbox')
+const TARGET_EXE = path.join(DIST, process.env.MC_TOOLBOX_TARGET_EXE || (process.platform === 'win32' ? 'mc-toolbox.exe' : 'mc-toolbox'))
 const SEA_BLOB = path.join(BUNDLE, 'sea-prep.blob')
 const SEA_CONFIG = path.join(BUNDLE, 'sea-config.json')
 const BUNDLE_CJS = path.join(BUNDLE, 'bundle.cjs')
