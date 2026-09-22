@@ -181,7 +181,7 @@ const SECTIONS = [
               commit()
             }
           })))),
-          row('每行磁贴数', '1 = 一行一个磁贴（占满整行）', num(() => S.general.tileColumns || 1, (v) => { S.general.tileColumns = v; applyTheme() }, { min: 1, max: 4, step: 1, suffix: ' 个' })),
+          row('每行磁贴数', '1 = 一行一个；设置多列后每个磁贴默认占一列', num(() => S.general.tileColumns || 1, (v) => { S.general.tileColumns = v; applyTheme() }, { min: 1, max: 4, step: 1, suffix: ' 个' })),
           row('界面动画', '拖拽与弹窗过渡效果', sw(() => S.general.animations, (v) => { S.general.animations = v; ctxRef.onAnimationsChange?.(v) })),
           row('时间格式', '', seg(() => S.general.timeFormat, (v) => (S.general.timeFormat = v), [['24h', '24 小时'], ['12h', '12 小时']])),
           row('新磁贴默认折叠', '只显示图标和标题，点标题栏箭头展开', sw(() => S.general.defaultCollapsed !== false, (v) => { S.general.defaultCollapsed = v; ctxRef.onCollapsedDefaultChange?.(v) }))
@@ -547,7 +547,7 @@ const SECTIONS = [
       api.get('/api/system/info').then((info) => {
         box.appendChild(
           h('dl', { class: 'kv' },
-            h('dt', {}, '工具箱版本'), h('dd', {}, info.version || '1.5.3'),
+            h('dt', {}, '工具箱版本'), h('dd', {}, info.version || '1.5.4'),
             h('dt', {}, '作者'), h('dd', {}, info.author || 'Rinkore28'),
             h('dt', {}, '运行环境'), h('dd', {}, `Node ${info.node} · ${info.platform}`),
             h('dt', {}, '项目目录'), h('dd', { class: 'mono' }, info.root),

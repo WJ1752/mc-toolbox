@@ -42,11 +42,14 @@ const persistLayout = debounce(async () => {
 
 // ---------------- 磁贴构建 ----------------
 function tileSize(feature) {
+  const columns = Math.max(1, Number(state.settings.general?.tileColumns) || 1)
   const saved = (state.settings.layout || []).find((l) => l.id === feature.id)
   const fallback = { w: feature.size?.w || 1, h: feature.size?.h || 1, collapsed: state.settings.general?.defaultCollapsed !== false }
-  if (!saved) return fallback
+  if (!saved) return { ...fallback, w: columns > 1 ? 1 : fallback.w }
   return {
-    w: saved.w || 1,
+    // 多列模式下每个磁贴默认占一列，避免功能清单里的 w=2 把大多数磁贴
+    // 强行铺满整行，只剩 w=1 的磁贴显示为半宽。单列模式保留原始宽度。
+    w: columns > 1 ? 1 : (saved.w || 1),
     h: saved.h || 1,
     collapsed: saved.collapsed === undefined ? fallback.collapsed : !!saved.collapsed
   }
@@ -137,9 +140,7 @@ function createTile(feature) {
     if (grid?.lastDragEnd && Date.now() - grid.lastDragEnd < 280) return
     toggleCollapse(feature.id)
   })
-  // 单列（一行一个）时不跨列；多列时跨列数不超过总列数
-  const cols = Math.max(1, Number(state.settings.general?.tileColumns) || 1)
-  if (size.w > 1 && cols > 1) el.classList.add('span-' + Math.min(size.w, cols))
+  // 多列模式默认每个磁贴一列；单列模式本身没有可跨的列。
   const tile = { el, body, badge, chev, w: size.w, h: size.h, collapsed: !!size.collapsed, mounted: false, mounting: false }
   applyCollapse(tile)
   return tile
