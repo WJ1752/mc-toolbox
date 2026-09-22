@@ -287,7 +287,8 @@ body.nv .topbar-actions .btn { cursor: default; }
 .badge { white-space: nowrap; }
 .tile.span-2 { grid-column: span 2; }
 .tile.span-3 { grid-column: span 3; }
-.tile.h-2 { grid-row: span 2; }
+/* 磁贴高度由内容自然撑开；不要用 grid-row 跨行，否则多列布局会错行。 */
+.tile.h-2 { grid-row: auto; }
 .tile-head {
   display: flex; align-items: center; gap: 8px;
   padding: 9px 10px 9px 12px;

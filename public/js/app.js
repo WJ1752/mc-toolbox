@@ -61,8 +61,11 @@ function applyCollapse(tile) {
     tile.chev.title = tile.collapsed ? '展开内容' : '折叠为仅标题'
     tile.chev.textContent = '▾'
   }
-  if (tile.collapsed) tile.el.classList.remove('h-2')
-  else if (tile.h > 1) tile.el.classList.add('h-2')
+  // 内容高度由磁贴自身撑开即可。把 manifest 中的 h=2 转成
+  // `grid-row: span 2` 会让 CSS Grid 为展开磁贴额外占用一个整行，
+  // 后面的磁贴就会被推到错误的列（尤其是多列布局中有一个大磁贴时）。
+  // h 仍保留在布局数据中以兼容旧配置，但主网格不再用它跨行。
+  tile.el.classList.remove('h-2')
 }
 
 function toggleCollapse(id) {

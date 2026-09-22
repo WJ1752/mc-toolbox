@@ -87,7 +87,9 @@ export class TileGrid {
   _start(el, x, y) {
     const rect = el.getBoundingClientRect()
     const ph = document.createElement('div')
-    ph.className = this.placeholderClass + ' ' + (el.className.match(/span-\d|h-2/g) || []).join(' ')
+    // 只复制横向跨列尺寸。展开磁贴的实际高度由内容决定，不能把
+    // 旧的 h-2 标记复制成 grid-row 跨行占位，否则拖动时也会错行。
+    ph.className = this.placeholderClass + ' ' + (el.className.match(/span-\d/g) || []).join(' ')
     ph.style.height = rect.height + 'px'
     ph.style.minHeight = rect.height + 'px'
     this.container.insertBefore(ph, el)
