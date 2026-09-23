@@ -201,19 +201,33 @@ async function ensureWebView2Lib() {
   return dir
 }
 
-// ---------- 应用图标：从同一像素 SVG 生成窗口和 EXE 的多尺寸图标 ----------
+// ---------- 应用图标：复用原版左上角 .brand-logo 的形状和默认深色主题配色 ----------
 function drawIconRgba(size) {
   const px = Buffer.alloc(size * size * 4)
-  // This source deliberately uses only integer rectangles in a 32px viewBox.
-  const svg = fs.readFileSync(path.join(here, 'public', 'icon.svg'), 'utf8')
-  const rects = [...svg.matchAll(/<rect x="(\d+)" y="(\d+)" width="(\d+)" height="(\d+)" fill="#([a-f0-9]{6})"\s*\/>/gi)]
-  if (!rects.length || rects.length !== (svg.match(/<rect\b/g) || []).length) throw new Error('icon.svg 必须使用受支持的整数像素矩形')
-  for (const [, sx, sy, sw, sh, color] of rects) {
-    const rgba = [0, 2, 4].map(i => parseInt(color.slice(i, i + 2), 16)).concat(255)
-    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
-      const fx = (x + 0.5) * 32 / size, fy = (y + 0.5) * 32 / size
-      if (fx >= +sx && fx < +sx + +sw && fy >= +sy && fy < +sy + +sh) px.set(rgba, (y * size + x) * 4)
+  const inside = (x, y, inset) => {
+    const radius = 6 - inset
+    if (x < inset || y < inset || x >= 28 - inset || y >= 28 - inset) return false
+    const dx = Math.max(6 - x, 0, x - 22), dy = Math.max(6 - y, 0, y - 22)
+    return dx * dx + dy * dy <= radius * radius
+  }
+  // Rasterize the original 28px CSS mark, including its rounded corners,
+  // diagonal green split, inset border and two overlapping dark squares.
+  // Four samples per axis keep the 16px and 24px Windows icons crisp.
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    const sum = [0, 0, 0]; let covered = 0
+    for (let sy = 0; sy < 4; sy++) for (let sx = 0; sx < 4; sx++) {
+      const fx = (x + (sx + 0.5) / 4) * 28 / size, fy = (y + (sy + 0.5) / 4) * 28 / size
+      if (!inside(fx, fy, 0)) continue
+      let color = fx + fy < 28 ? [94, 201, 106] : [61, 139, 69]
+      if (!inside(fx, fy, 2)) color = color.map(c => c * 0.85)
+      if ((fx >= 6 && fx < 15 && fy >= 6 && fy < 15) || (fx >= 13 && fx < 22 && fy >= 13 && fy < 22)) {
+        color = color.map((c, i) => c * 0.15 + [30, 34, 42][i] * 0.85)
+      }
+      covered++; color.forEach((c, i) => { sum[i] += c })
     }
+    const offset = (y * size + x) * 4
+    if (covered) sum.forEach((c, i) => { px[offset + i] = Math.round(c / covered) })
+    px[offset + 3] = Math.round(covered / 16 * 255)
   }
   return px
 }

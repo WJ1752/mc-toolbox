@@ -1,8 +1,10 @@
 {
   "name": "mc-toolbox",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "author": "Rinkore28",
-  "contributors": ["Rinkore28"],
+  "contributors": [
+    "Rinkore28"
+  ],
   "private": true,
   "type": "module",
   "description": "Minecraft 工具箱 - 磁贴式可扩展工具集",
