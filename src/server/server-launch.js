@@ -73,6 +73,56 @@ export async function resolveJava(runtime, preferred = '') {
   throw new Error(`未找到兼容的 64 位 Java ${required}（MC ${runtime.mc}）。请安装或使用“选择 Java”指定 java.exe；不能直接使用其他大版本的 Java。`)
 }
 
+/**
+ * Find every usable 64-bit Java installation that is visible to this process.
+ * This is intentionally broader than the bundled-runtime list: users often
+ * keep Temurin, Microsoft, Zulu, Oracle or a manually unpacked JDK side by
+ * side. The result is for choosing/inspecting; resolveJava remains the final
+ * compatibility gate for a concrete Minecraft runtime.
+ */
+export async function discoverJavaRuntimes() {
+  const executable = process.platform === 'win32' ? 'java.exe' : 'java'
+  const roots = new Set()
+  if (process.env.JAVA_HOME) roots.add(path.join(process.env.JAVA_HOME, 'bin', executable))
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) if (dir) roots.add(path.join(dir.replace(/^"|"$/g, ''), executable))
+  const baseRoots = process.platform === 'win32'
+    ? [
+      path.join(process.env.ProgramFiles || 'C:/Program Files', 'Java'),
+      path.join(process.env.ProgramFiles || 'C:/Program Files', 'Eclipse Adoptium'),
+      path.join(process.env.ProgramFiles || 'C:/Program Files', 'Microsoft'),
+      path.join(process.env.ProgramFiles || 'C:/Program Files', 'Zulu'),
+      path.join(process.env.ProgramFiles || 'C:/Program Files', 'Amazon Corretto'),
+      path.join(process.env.ProgramFiles || 'C:/Program Files', 'BellSoft'),
+      path.join(process.env.USERPROFILE || os.homedir(), '.jdks')
+    ]
+    : ['/usr/lib/jvm', '/Library/Java/JavaVirtualMachines']
+  for (const root of baseRoots) roots.add(root)
+  roots.add(path.join(RUNTIME_DIR, 'java'))
+  const candidates = new Set()
+  const scan = async (root, depth, maxDepth) => {
+    const stat = await fs.stat(root).catch(() => null)
+    if (!stat) return
+    if (stat.isFile()) { if (path.basename(root).toLowerCase() === executable) candidates.add(root); return }
+    if (depth > maxDepth) return
+    for (const entry of await fs.readdir(root, { withFileTypes: true }).catch(() => [])) {
+      if (!entry.isDirectory() || entry.name.startsWith('.staging-') || entry.name.startsWith('.invalid-')) continue
+      const full = path.join(root, entry.name)
+      candidates.add(path.join(full, 'bin', executable))
+      if (process.platform === 'darwin') candidates.add(path.join(full, 'Contents/Home/bin', executable))
+      await scan(full, depth + 1, maxDepth)
+    }
+  }
+  for (const root of roots) await scan(root, 0, root === path.join(RUNTIME_DIR, 'java') ? 3 : 1)
+  const found = []
+  for (const candidate of candidates) {
+    if (!(await fs.stat(candidate).catch(() => null))?.isFile()) continue
+    const result = await probeJava(candidate)
+    if (!result || result.bits !== 64) continue
+    if (!found.some(item => item.path.toLowerCase() === result.path.toLowerCase())) found.push(result)
+  }
+  return found.sort((a, b) => a.major - b.major || a.path.localeCompare(b.path))
+}
+
 export async function bundleJavaRuntime(root, javaPath, signal, onProgress) {
   // Java 8 JDKs often include a smaller, self-contained jre directory.
   let source = path.dirname(path.dirname(await fs.realpath(javaPath)))

@@ -4,6 +4,9 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { createJavaRuntimeManager } from '../src/server/java-runtime.js'
+import { DOWNLOADABLE_JAVA_MAJORS } from '../src/server/java-runtime.js'
+
+assert.deepEqual(DOWNLOADABLE_JAVA_MAJORS, Array.from({ length: 18 }, (_, i) => i + 8))
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 const settled = async (manager, id) => {

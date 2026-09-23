@@ -6,7 +6,10 @@ import { httpFetch } from './http.js'
 import { downloadVerified } from './verified-download.js'
 import { probeJava } from './server-launch.js'
 
-const supported = new Set([8, 16, 17, 21, 25])
+// Temurin publishes more than just the LTS releases. Keep the chooser broad;
+// the server launch check still validates the selected runtime against MC.
+export const DOWNLOADABLE_JAVA_MAJORS = Object.freeze(Array.from({ length: 18 }, (_, i) => i + 8))
+const supported = new Set(DOWNLOADABLE_JAVA_MAJORS)
 const finished = new Set(['done', 'failed', 'cancelled'])
 
 // Only verified runtimes are published. Inject dependencies for offline failure tests.
@@ -45,7 +48,7 @@ export function createJavaRuntimeManager({ root = path.join(RUNTIME_DIR, 'java')
   }
   async function start(major) {
     major = Number(major)
-    if (!supported.has(major)) throw new Error('支持下载 Java 8、16、17、21、25')
+    if (!supported.has(major)) throw new Error(`支持下载 Java ${DOWNLOADABLE_JAVA_MAJORS.join('、')}`)
     if (platform !== 'win32' || !['x64', 'arm64'].includes(arch)) throw new Error('内置下载目前支持 Windows 64 位 / ARM64；其他系统请安装 Java 后选择其路径。')
     const active = [...jobs.values()].find(j => j.major === major && !finished.has(j.status))
     if (active) return get(active.id)

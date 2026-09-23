@@ -12,7 +12,7 @@ import { startConvertJob, getConvertJob, cancelConvertJob, receiveUploadedPack, 
 import { inspectPack, inspectMetadata } from './pack-preview.js'
 import * as serverManager from './server-manager.js'
 import { resolveServerJava, inspectServer } from './server-inspection.js'
-import { resolveJava, requiredJava } from './server-launch.js'
+import { resolveJava, requiredJava, discoverJavaRuntimes } from './server-launch.js'
 import * as community from './community.js'
 import * as servercore from './servercore.js'
 import * as saveeditor from './saveeditor.js'
@@ -321,6 +321,7 @@ on('POST', '/api/mods/java', async (req) => {
   return { ...(await resolveJava(body.runtime, body.javaPath)), required: requiredJava(body.runtime) }
 })
 on('GET', '/api/java/list', async () => ({ items: await javaRuntime.listBundledJava() }))
+on('GET', '/api/java/available', async () => ({ items: await discoverJavaRuntimes() }))
 on('POST', '/api/java/download', async req => javaRuntime.startJavaDownload((await readBody(req)).major))
 on('GET', '/api/java/download/:id', async (_req, p) => javaRuntime.getJavaJob(p.id) || { error: 'Java 下载任务不存在' })
 on('POST', '/api/java/download/:id/cancel', async (_req, p) => ({ ok: javaRuntime.cancelJavaJob(p.id) }))
