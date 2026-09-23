@@ -1,0 +1,43 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs/promises'
+import path from 'node:path'
+import os from 'node:os'
+import crypto from 'node:crypto'
+import http from 'node:http'
+import { hydrateCurseForgeFiles } from '../src/server/curseforge-pack.js'
+import { downloadVerified } from '../src/server/verified-download.js'
+
+test('CurseForge pins export file IDs, verifies cached files and downloads every declared mod', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mc-cf-test-')), progress = []
+  try {
+    await fs.writeFile(path.join(root, 'manifest.json'), JSON.stringify({ manifestType: 'minecraftModpack', files: [{ projectID: 101, fileID: 202 }] }))
+    const bytes = Buffer.from('exact exported version'), sha = crypto.createHash('sha1').update(bytes).digest('hex')
+    let queries = 0, downloads = 0
+    const options = { cacheDir: path.join(root, 'cache'), apiKey: 'test-key',
+      fetcher: async (url, opts) => {
+        queries++; assert.ok(url.endsWith('/mods/101/files/202')); assert.equal(opts.headers['x-api-key'], 'test-key')
+        return { ok: true, json: async () => ({ data: { id: 202, modId: 101, fileName: 'exact.jar', downloadUrl: 'https://example.invalid/exact.jar', hashes: [{ algo: 1, value: sha }], fileLength: bytes.length } }) }
+      }, download: async (_url, file, opts) => { downloads++; assert.equal(opts.hash, sha); await fs.writeFile(file, bytes) }
+    }
+    await hydrateCurseForgeFiles(root, p => progress.push(p), null, options)
+    assert.equal(await fs.readFile(path.join(root, 'mods/exact.jar'), 'utf8'), bytes.toString())
+    await hydrateCurseForgeFiles(root, null, null, options)
+    assert.equal(queries, 1); assert.equal(downloads, 1)
+    await fs.writeFile(path.join(root, 'cache/202-exact.jar'), 'corrupt')
+    await hydrateCurseForgeFiles(root, null, null, options)
+    assert.equal(downloads, 2)
+    assert.equal(progress.at(-1).progress, 43)
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
+
+test('corrupt HTTP downloads fail hash validation and never publish partial files', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mc-hash-test-'))
+  const server = http.createServer((_req, res) => { res.writeHead(200, { 'Content-Length': '3' }); res.end('bad') })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const file = path.join(root, 'mod.jar')
+    await assert.rejects(downloadVerified(`http://127.0.0.1:${server.address().port}/file`, file, { size: 3, hash: 'a'.repeat(64) }), /哈希/)
+    assert.deepEqual(await fs.readdir(root), [])
+  } finally { await new Promise(resolve => server.close(resolve)); await fs.rm(root, { recursive: true, force: true }) }
+})

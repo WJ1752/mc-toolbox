@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { PUBLIC_DIR, FEATURES_DIR, DATA_DIR, CONFIG_DIR, CLIENT_MODS_DIR, ROOT, safeJoin, getDirs } from './paths.js'
 import { store } from './store.js'
-import { DEFAULT_SETTINGS, DEFAULT_CLIENT_MODS } from './defaults.js'
+import { upgradeClientModLibrary, DEFAULT_SETTINGS, DEFAULT_CLIENT_MODS } from './defaults.js'
 import { scanFeatures, removeFeature } from './features.js'
 import { pingServer } from './mc-ping.js'
 import * as monitor from './monitor.js'
@@ -20,6 +20,7 @@ import * as dirsMgmt from './dirs.js'
 import * as region from './region.js'
 import { setProxy } from './http.js'
 import * as i18n from './i18n.js'
+import * as javaRuntime from './java-runtime.js'
 import { AUTHOR, PRODUCT_VERSION } from './build-meta.js'
 
 const MIME = {
@@ -213,13 +214,13 @@ on('DELETE', '/api/monitors/history', async (req, params, query) => {
 
 // ---------------- 客户端转服务端 ----------------
 on('GET', '/api/mods/client-list', async () => {
-  const db = store.get('clientmods', { items: DEFAULT_CLIENT_MODS })
+  const db = upgradeClientModLibrary(store.get('clientmods', { items: DEFAULT_CLIENT_MODS }))
   return { items: db.items }
 })
 on('POST', '/api/mods/client-list', async (req) => {
   const body = await readBody(req)
   if (!body.modid) return { error: '缺少 modid' }
-  const db = store.get('clientmods', { items: DEFAULT_CLIENT_MODS })
+  const db = upgradeClientModLibrary(store.get('clientmods', { items: DEFAULT_CLIENT_MODS }))
   const exists = db.items.find((x) => x.modid.toLowerCase() === String(body.modid).toLowerCase())
   if (exists) return { error: '该 modid 已存在', item: exists }
   const item = {
@@ -236,7 +237,7 @@ on('POST', '/api/mods/client-list', async (req) => {
 })
 on('PUT', '/api/mods/client-list/:id', async (req, params) => {
   const body = await readBody(req)
-  const db = store.get('clientmods', { items: DEFAULT_CLIENT_MODS })
+  const db = upgradeClientModLibrary(store.get('clientmods', { items: DEFAULT_CLIENT_MODS }))
   const it = db.items.find((x) => x.id === params.id)
   if (!it) return { error: '记录不存在' }
   for (const k of ['modid', 'name', 'note']) if (body[k] !== undefined) it[k] = body[k]
@@ -244,7 +245,7 @@ on('PUT', '/api/mods/client-list/:id', async (req, params) => {
   return { items: db.items }
 })
 on('DELETE', '/api/mods/client-list/:id', async (_req, params) => {
-  const db = store.get('clientmods', { items: DEFAULT_CLIENT_MODS })
+  const db = upgradeClientModLibrary(store.get('clientmods', { items: DEFAULT_CLIENT_MODS }))
   db.items = db.items.filter((x) => x.id !== params.id)
   await store.set('clientmods', db)
   return { items: db.items }
@@ -283,7 +284,7 @@ on('POST', '/api/mods/apply', async (req) => {
 })
 
 function clientModIds() {
-  const db = store.get('clientmods', { items: DEFAULT_CLIENT_MODS })
+  const db = upgradeClientModLibrary(store.get('clientmods', { items: DEFAULT_CLIENT_MODS }))
   return (db.items || []).map((item) => item.modid).filter(Boolean)
 }
 
@@ -295,7 +296,9 @@ on('POST', '/api/mods/convert', async (req) => {
       source: body.source,
       outputDir: body.outputDir,
       outputName: body.outputName,
+      worldPreset: body.worldPreset || '',
       clientModIds: clientModIds(),
+      curseForgeApiKey: store.get('settings', DEFAULT_SETTINGS).community?.cfApiKey || '',
       autoDetectEnv: body.autoDetectEnv !== false,
       installServerCore: true,
       runtime: body.runtime || null,
@@ -317,6 +320,10 @@ on('POST', '/api/mods/java', async (req) => {
   const body = await readBody(req)
   return { ...(await resolveJava(body.runtime, body.javaPath)), required: requiredJava(body.runtime) }
 })
+on('GET', '/api/java/list', async () => ({ items: await javaRuntime.listBundledJava() }))
+on('POST', '/api/java/download', async req => javaRuntime.startJavaDownload((await readBody(req)).major))
+on('GET', '/api/java/download/:id', async (_req, p) => javaRuntime.getJavaJob(p.id) || { error: 'Java 下载任务不存在' })
+on('POST', '/api/java/download/:id/cancel', async (_req, p) => ({ ok: javaRuntime.cancelJavaJob(p.id) }))
 on('GET', '/api/mods/convert/jobs/:id', async (_req, params) => getConvertJob(params.id) || { error: '转换任务不存在' })
 on('POST', '/api/mods/convert/jobs/:id/cancel', async (_req, params) => ({ ok: cancelConvertJob(params.id) }))
 
@@ -341,7 +348,9 @@ on('POST', '/api/mods/convert-upload', async (req, _params, query, res) => {
       source: uploaded.file,
       outputDir: query.outputDir || '',
       outputName: query.outputName || `${stem}-server.zip`,
+      worldPreset: query.worldPreset || '',
       clientModIds: clientModIds(),
+      curseForgeApiKey: store.get('settings', DEFAULT_SETTINGS).community?.cfApiKey || '',
       autoDetectEnv: query.autoDetectEnv !== 'false',
       uploaded: true,
       installServerCore: true,
@@ -478,13 +487,14 @@ on('POST', '/api/servercore/download', async (req) => {
   const s = deepMerge(DEFAULT_SETTINGS, store.get('settings', DEFAULT_SETTINGS))
   const info = await servercore.resolveDownload(body)
   community.configure(s.community)
-  const startScript = info.launchJar ? { jar: info.launchJar, mem: s.servercore?.memory || '2G' } : null
+  const java = info.postCommand ? await resolveJava(body, body.javaPath || '') : null
+  const startScript = { runtime: { mc: body.mc, loader: body.loader, loaderVersion: body.loaderVersion }, info, javaPath: java?.path || body.javaPath || '', mem: s.servercore?.memory || '2G' }
   const job = await community.startDownload({
     url: info.url,
     filename: info.filename,
     dir: body.dir || s.community.downloadDir,
     title: `${body.loader} ${body.mc}`,
-    postCommand: info.postCommand,
+    postCommand: info.postCommand ? [java.path, ...info.postCommand.slice(1)] : undefined,
     startScript,
     extraFiles: info.extraFiles,
     preserveName: true,
@@ -769,7 +779,7 @@ on('POST', '/api/fs/mkdir', async (req) => {
 // ---------------- 数据导入导出 ----------------
 on('GET', '/api/data/export', async () => {
   const settings = store.get('settings', DEFAULT_SETTINGS)
-  const clientmods = store.get('clientmods', { items: DEFAULT_CLIENT_MODS })
+  const clientmods = upgradeClientModLibrary(store.get('clientmods', { items: DEFAULT_CLIENT_MODS }))
   const monitors = store.get('monitors', { items: [] })
   return { type: 'mc-toolbox-backup', version: 1, exportedAt: Date.now(), settings, clientmods, monitors }
 })

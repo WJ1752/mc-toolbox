@@ -33,8 +33,8 @@ let busy = false
 function excludesFor(which) {
   return (name) => {
     if (name === 'dirs.json') return true // 引导文件固定不动
-    const owner = FILE_OWNERS[name] || (name.endsWith('.log') ? 'dataDir' : undefined)
-    return owner !== undefined && owner !== which
+    const owner = FILE_OWNERS[name] || 'dataDir'
+    return owner !== which
   }
 }
 
@@ -94,7 +94,8 @@ export async function changeDir(which, targetArg) {
     // 归属排除：dev 模式下三类目录共用同一个物理目录，不能把别的类别的文件搬走；
     // 目标里已有的「他类/引导」文件不算冲突（本次迁移不会碰它们）
     const skip = excludesFor(which)
-    const existing = fs.readdirSync(target).filter((n) => !skip(n))
+    const sharedTarget = target === dirs.defaults[which] || WHICHES.some(key => key !== which && path.resolve(dirs[key]) === target)
+    const existing = fs.readdirSync(target).filter(n => !sharedTarget || !skip(n))
     if (existing.length) return { error: '目标目录不是空的（存在：' + existing.slice(0, 3).join('、') + '），请选择一个空目录' }
 
     const entries = fs.existsSync(current)

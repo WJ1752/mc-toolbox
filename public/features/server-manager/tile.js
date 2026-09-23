@@ -1,3 +1,4 @@
+import { javaDownloadButton } from '/js/core/java-download.js'
 import { h, clear, fmtBytes } from '/js/core/dom.js'
 import { api } from '/js/core/api.js'
 import { pickDir, pickFile } from '/js/core/dirpicker.js'
@@ -75,6 +76,7 @@ export default {
     const beginImport = h('button', { class: 'btn btn-primary btn-sm', onclick: beginImportNow }, '开始识别并导入')
     const pickJava = h('button', { class: 'btn btn-sm', onclick: async () => { const file = await pickFile('', { title: '选择兼容 Java', exts: ['.exe'] }); if (file) { java.value = file; checkJava() } } }, '选择 Java')
     const autoJava = h('button', { class: 'btn btn-sm', onclick: () => { java.value = ''; checkJava() } }, '自动匹配')
+    const javaDownload = javaDownloadButton({ getRuntime: () => ({ ...inspection?.plans.find(item => item.id === plan.value)?.runtime, mc: mc.value }), isLocked: () => preparing || submitting || ['starting', 'running', 'stopping'].includes(currentStatus), onReady: p => { java.value = p; checkJava() } })
     const btnStart = h('button', { class: 'btn btn-primary btn-sm', onclick: launchServer }, '▶ 启动服务端')
     const stop = h('button', { class: 'btn btn-sm', onclick: async () => { try { await api.post(`/api/server-manager/sessions/${sessionId}/stop`); await poll() } catch (e) { toast(e.message, 'err') } } }, '■ 正常停服')
     const force = h('button', { class: 'btn btn-danger btn-sm', onclick: async () => {
@@ -110,7 +112,7 @@ export default {
     ctx.body.append(drop, row(directory), row(pickPackage, pickFolder, pickCore, beginImport), row(destination, pickDestination),
       hint, row(field('启动入口 / 核心', plan)), row(field('Minecraft 版本', mc)),
       row(field('最大内存（GB）', memory), field('初始内存（GB）', minMemory)),
-      row(field('启动优化', optimization)), row(field('Java 路径', java)), row(pickJava, autoJava), javaHint,
+      row(field('启动优化', optimization)), row(field('Java 路径', java)), row(pickJava, autoJava, javaDownload), javaHint,
       advanced, eulaLabel, row(btnStart, stop, force, cancel), status, progress,
       row(sessions, h('button', { class: 'btn btn-sm', onclick: refreshSessions }, '刷新会话')),
       log, row(command, send), row(
@@ -120,7 +122,7 @@ export default {
 
     function controls() {
       const active = ['starting', 'running', 'stopping'].includes(currentStatus)
-      for (const el of [...editable, pickPackage, pickFolder, pickCore, pickJava, autoJava, pickDestination]) el.disabled = preparing || submitting || active
+      for (const el of [...editable, pickPackage, pickFolder, pickCore, pickJava, autoJava, javaDownload, pickDestination]) el.disabled = preparing || submitting || active
       beginImport.disabled = preparing || submitting || active || (!pendingSource && !pendingFile)
       btnStart.disabled = preparing || submitting || active || !inspection || !plan.value
       stop.disabled = !active || currentStatus === 'stopping'; force.disabled = !active
@@ -246,7 +248,7 @@ export default {
         const result = await api.get(`/api/server-manager/sessions/${sessionId}?after=${after}`)
         currentStatus = result.status
         const failure = result.error ? ` · ${result.error}` : ''
-        status.textContent = `${labels[result.status] || result.status} · ${Math.floor(result.elapsed / 1000)} 秒 · 端口 ${result.port}${failure}`
+        status.textContent = `${labels[result.status] || result.status} · ${Math.floor(result.elapsed / 1000)} 秒 · 端口 ${result.port}${failure}${result.inputHint ? '\n' + result.inputHint : ''}`
         if (result.status === 'starting' || result.status === 'stopping') setProgress(null)
         else progress.style.display = 'none'
         if (result.logs.length) {

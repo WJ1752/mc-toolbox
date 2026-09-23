@@ -112,8 +112,8 @@ export async function readJarEntries(filePath, wanted, options = {}) {
       if (readEntries >= maxEntries || readBytes >= maxBytes) break
       const entry = map.get(name)
       if (!entry || entry.compSize === 0) continue
-      if (entry.compSize > 32 * 1024 * 1024) continue
-      if (readBytes + entry.compSize > maxBytes) break
+      if (entry.compSize > 64 * 1024 * 1024 || entry.size > 64 * 1024 * 1024) continue
+      if (readBytes + entry.size > maxBytes) break
       try {
         const head = Buffer.alloc(30)
         await fh.read(head, 0, 30, entry.offset)
@@ -123,9 +123,10 @@ export async function readJarEntries(filePath, wanted, options = {}) {
         const start = entry.offset + 30 + nameLen + extraLen
         const raw = Buffer.alloc(entry.compSize)
         await fh.read(raw, 0, entry.compSize, start)
-        out[name] = entry.method === 0 ? raw : entry.method === 8 ? zlib.inflateRawSync(raw) : null
+        out[name] = entry.method === 0 ? raw : entry.method === 8 ? zlib.inflateRawSync(raw, { maxOutputLength: Math.max(1, entry.size) }) : null
+        if (out[name]?.length !== entry.size) out[name] = null
         if (out[name]) {
-          readBytes += entry.compSize
+          readBytes += out[name].length
           readEntries++
         }
       } catch {

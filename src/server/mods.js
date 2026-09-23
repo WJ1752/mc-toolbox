@@ -3,6 +3,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { readJarEntries } from './zip.js'
+import { classAnnotations } from './class-annotations.js'
 
 const META_FILES = [
   'fabric.mod.json',
@@ -32,7 +33,7 @@ function jsonParseLoose(text) {
 
 const RUNTIME_DEPENDENCIES = new Set([
   'minecraft', 'forge', 'neoforge', 'fabricloader', 'quilt_loader', 'quilt-loader', 'java',
-  'minecraftforge', 'mod_minecraftforge', 'forge_loader'
+  'minecraftforge', 'mod_minecraftforge', 'forge_loader', 'fml'
 ])
 
 function dependency(id, range = '', optional = false) {
@@ -106,7 +107,7 @@ function parseFabricMeta(buf) {
     name: obj.name || obj.id || null,
     version: obj.version || null,
     loader: 'fabric',
-    environment: obj.environment || (obj.entrypoints && obj.entrypoints.client ? 'client' : '*'),
+    environment: obj.environment || '*',
     dependencies: uniqueDependencies(dependencies)
   }
 }
@@ -200,29 +201,30 @@ function parseMcmodInfo(buf) {
 }
 
 export async function readForgeAnnotationInfo(filePath) {
-  const entries = await readJarEntries(filePath, ['*.class'], { maxBytes: 8 * 1024 * 1024, maxEntries: 256 })
-  const dependencies = []
-  let modid = null
-  let version = null
+  const entries = await readJarEntries(filePath, ['*.class'], { maxBytes: 64 * 1024 * 1024, maxEntries: 30000 })
+  const dependencies = [], mods = []
   for (const buf of Object.values(entries)) {
-    if (!buf) continue
-    // Forge 1.7–1.12 stores @Mod(dependencies = "required-after:foo")
-    // in the class constant pool rather than mcmod.info. Class bytes are
-    // safe to inspect as latin1 because annotation values are ASCII IDs.
-    const text = buf.toString('latin1')
-    const isForgeModClass = /net\/minecraftforge\/fml\/common\/Mod;/.test(text)
-    if (!isForgeModClass) continue
-    if (!modid) modid = /modid[\u0000-\u001f]{1,4}([A-Za-z][A-Za-z0-9_.-]{1,63})/i.exec(text)?.[1] || null
-    if (!version) version = /version[\u0000-\u001f]{1,4}([A-Za-z0-9][A-Za-z0-9_.+\-]{1,63})/i.exec(text)?.[1] || null
-    const re = /(?:^|[\u0000;,)])[-_\s]*(required|required-after|after-required|before-required)\s*:\s*([A-Za-z0-9_.-]+)(?:@([^;\u0000\x01]+))?/gi
-    for (const match of text.matchAll(re)) addDependency(dependencies, { id: match[2], versionRange: match[3] || '' })
+    if (!buf || (!buf.includes(Buffer.from('net/minecraftforge/fml/common/Mod;')) && !buf.includes(Buffer.from('net/minecraftforge/fml/relauncher/IFMLLoadingPlugin')))) continue
+    let annotations
+    try { annotations = classAnnotations(buf) } catch { continue }
+    if (buf.includes(Buffer.from('net/minecraftforge/fml/relauncher/IFMLLoadingPlugin')) && annotations.constants.MOD_ID) mods.push({ modid: annotations.constants.MOD_ID, version: annotations.constants.VERSION || null })
+    for (const annotation of annotations) {
+      if (annotation.type !== 'Lnet/minecraftforge/fml/common/Mod;') continue
+      const info = annotation.values
+      if (info.modid) mods.push(info)
+      for (const rule of String(info.dependencies || '').split(';')) {
+        const match = /^(required-after|required-before|required):([^@]+)(?:@(.+))?$/.exec(rule.trim())
+        if (match) addDependency(dependencies, { id: match[2], versionRange: match[3] || '' })
+      }
+    }
   }
-  return { modid, version, dependencies: uniqueDependencies(dependencies) }
+  return { mods, modid: mods[0]?.modid || null, modids: mods.map(m => m.modid), version: mods[0]?.version || null, environment: mods.length && mods.every(m => m.clientSideOnly === 1) ? 'client' : '*', dependencies: uniqueDependencies(dependencies) }
 }
 
-export async function readModMeta(filePath) {
+async function readPrimaryModMeta(filePath, runtime = {}) {
   const entries = await readJarEntries(filePath, META_FILES)
-  for (const [file, buf] of Object.entries(entries)) {
+  const ordered = Object.entries(entries).sort(([a], [b]) => runtime.mc === '1.12.2' ? Number(b === 'mcmod.info') - Number(a === 'mcmod.info') : 0)
+  for (const [file, buf] of ordered) {
     if (!buf) continue
     try {
       if (file === 'fabric.mod.json') return parseFabricMeta(buf)
@@ -232,12 +234,15 @@ export async function readModMeta(filePath) {
         const meta = parseMcmodInfo(buf)
         if (meta) {
           const info = await readForgeAnnotationInfo(filePath)
+          meta.environment = info.environment
           meta.dependencies = uniqueDependencies([...(meta.dependencies || []), ...info.dependencies])
           if (info.modid) {
-            meta.modid = info.modid
-            meta.modids = [...new Set([...(meta.modids || []), info.modid])]
+            const matched = info.mods.find(m => m.modid === meta.modid) || info.mods[0]
+            meta.modid = matched.modid
+            meta.modids = [...new Set([...(meta.modids || []), ...info.modids])]
+            if (matched.version) meta.version = matched.version
+            meta.providedVersions = Object.fromEntries(info.mods.filter(m => m.version).map(m => [m.modid.toLowerCase(), m.version]))
           }
-          if (info.version && (!meta.version || meta.version === '0.0.1' || meta.modid === info.modid)) meta.version = info.version
           return meta
         }
       }
@@ -247,8 +252,35 @@ export async function readModMeta(filePath) {
   }
   const info = await readForgeAnnotationInfo(filePath).catch(() => ({ modid: null, version: null, dependencies: [] }))
   return info.dependencies.length || info.modid
-    ? { modid: info.modid, modids: info.modid ? [info.modid] : [], name: path.basename(filePath).replace(/\.jar(?:\.disabled)?$/i, ''), version: info.version, loader: 'legacy-forge', environment: '*', dependencies: info.dependencies }
+    ? { modid: info.modid, modids: info.modids || [], name: path.basename(filePath).replace(/\.jar(?:\.disabled)?$/i, ''), version: info.version, loader: 'legacy-forge', environment: info.environment, dependencies: info.dependencies }
     : null
+}
+
+export async function readModMeta(filePath, runtime = {}, depth = 0) {
+  const meta = await readPrimaryModMeta(filePath, runtime)
+  if (!meta || depth >= 3) return meta
+  const entries = await readJarEntries(filePath, ['META-INF/MANIFEST.MF', 'fabric.mod.json', 'quilt.mod.json'])
+  const manifest = entries['META-INF/MANIFEST.MF']?.toString().replace(/\r?\n /g, '') || ''
+  let nested = /^ContainedDeps:\s*(.+)$/im.exec(manifest)?.[1]?.trim().split(/\s+/) || []
+  for (const f of ['fabric.mod.json', 'quilt.mod.json']) {
+    const json = entries[f] && jsonParseLoose(entries[f].toString())
+    nested.push(...(json?.jars || json?.quilt_loader?.jars || []).map(j => typeof j === 'string' ? j : j.file).filter(Boolean))
+  }
+  if (!nested.length) return meta
+  const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'mc-toolbox-nested-'))
+  try {
+    const jars = await readJarEntries(filePath, nested, { maxBytes: 64 * 1024 * 1024, maxEntries: 64 })
+    let i = 0
+    for (const bytes of Object.values(jars)) if (bytes) {
+      const file = path.join(tmp, `${i++}.jar`); await fsp.writeFile(file, bytes)
+      const child = await readModMeta(file, runtime, depth + 1)
+      if (!child) continue
+      meta.modids = [...new Set([...(meta.modids || [meta.modid]), ...(child.modids || [child.modid])].filter(Boolean))]
+      meta.dependencies = uniqueDependencies([...meta.dependencies, ...child.dependencies])
+      meta.providedVersions = { ...meta.providedVersions, [child.modid?.toLowerCase()]: child.version, ...child.providedVersions }
+    }
+  } finally { await fsp.rm(tmp, { recursive: true, force: true }) }
+  return meta
 }
 
 export async function scanModsDir(dir, opts = {}) {
@@ -280,7 +312,7 @@ export async function scanModsDir(dir, opts = {}) {
       if (!isJar && !(includeDisabled && isDisabled)) continue
 
       const st = await fsp.stat(full).catch(() => null)
-      const meta = await readModMeta(full).catch(() => null)
+      const meta = await readModMeta(full, opts.runtime).catch(() => null)
       const stem = it.name.replace(/\.jar(?:\.disabled)?$/i, '')
       const filenameModIds = [...new Set([
         stem,
@@ -297,11 +329,13 @@ export async function scanModsDir(dir, opts = {}) {
         modids: [...new Set([...(meta?.modids || (meta?.modid ? [meta.modid] : [])), ...filenameModIds])],
         name: meta?.name || it.name.replace(/\.jar(\.disabled)?$/i, ''),
         version: meta?.version || null,
+        providedVersions: meta?.providedVersions || {},
         loader: meta?.loader || null,
         environment: meta?.environment || '*',
         dependencies: meta?.dependencies || [],
         hasMeta: !!meta
       })
+      opts.onProgress?.({ done: results.length, file: it.name })
     }
   }
   await walk(dir, 0)

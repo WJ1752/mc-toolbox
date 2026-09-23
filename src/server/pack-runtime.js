@@ -3,13 +3,14 @@ import path from 'node:path'
 
 const mcPattern = /^1\.\d+(?:\.\d+)?$/
 const loaders = { 'fabric-loader': 'fabric', 'quilt-loader': 'quilt', forge: 'forge', neoforge: 'neoforge' }
-const ignored = new Set(['mods', 'assets', 'saves', 'logs', 'config', 'resourcepacks', '.git', 'node_modules'])
+const ignored = new Set(['mods', 'assets', 'saves', 'logs', 'config', 'resourcepacks', '.git', 'node_modules', 'libraries', 'runtime', 'addons', 'resources', 'oresources', 'structures', 'scripts'])
 
 export function mergeRuntime(detected, manual = {}) {
   const result = { ...detected }
   // Changing game/loader invalidates a version inferred for a different runtime.
   if ((manual.mc && manual.mc !== result.mc) || (manual.loader && manual.loader !== result.loader)) result.loaderVersion = ''
   for (const key of ['mc', 'loader', 'loaderVersion']) if (manual[key]?.trim()) result[key] = manual[key].trim()
+  result.cleanroom = result.loader === 'cleanroom'
   return result
 }
 
@@ -22,9 +23,13 @@ export async function detectPackRuntime(root, { signal } = {}) {
       const file = path.join(dir, ent.name)
       if (ent.isDirectory()) {
         if (!ignored.has(ent.name.toLowerCase())) await walk(file, depth + 1)
+        else if (ent.name.toLowerCase() === 'config') {
+          const cfg = path.join(file, 'forge_early.cfg')
+          try { records.push({ name: path.relative(root, cfg), text: await fs.readFile(cfg, 'utf8') }) } catch {}
+        }
       } else if (ent.isFile()) {
         const name = path.relative(root, file)
-        if (/^forge-.*\.jar$/i.test(ent.name)) records.push({ name, text: '' })
+        if (/^(forge|cleanroom)-.*\.jar$/i.test(ent.name)) records.push({ name, text: '' })
         if (/\.(json|bat|cmd|sh)$/i.test(ent.name) && (await fs.stat(file)).size <= 2 * 1024 * 1024) {
           records.push({ name, text: await fs.readFile(file, { encoding: 'utf8', signal }) })
         }
@@ -46,6 +51,8 @@ export function detectRuntimeRecords(records) {
     if (m) add({ mc: m[1], loader: 'forge', loaderVersion: m[2] }, file, priority)
   }
   for (const { name: file, text = '' } of records) {
+    const clean = /^cleanroom-(\d+\.[^.]+.+?)(?:-installer)?\.jar$/i.exec(path.basename(file))
+    if (clean) add({ mc: '1.12.2', loader: 'cleanroom', loaderVersion: clean[1], cleanroom: true }, file, 110)
     if (/^forge-.*\.jar$/i.test(path.basename(file))) forge(path.basename(file), file, 30)
     if (!/\.json$/i.test(file)) { forge(text, file, 40); continue }
     let d
@@ -87,6 +94,7 @@ export function detectRuntimeRecords(records) {
   const unique = new Map(top.map(x => [`${x.mc}/${x.loader}/${x.loaderVersion}`, x]))
   if (unique.size > 1) throw new Error('检测到多个游戏版本：' + [...unique.keys()].join('、') + '。请选择具体实例目录，或手动填写完整的 MC、加载器及版本。')
   const { priority, ...result } = top[0]
+  if (result.mc === '1.12.2' && result.loader === 'forge' && records.some(r => /forge_early\.cfg$/i.test(r.name) && /cleanroommc/i.test(r.text))) return { ...result, loader: 'cleanroom', loaderVersion: '', cleanroom: true, forgeVersion: result.loaderVersion }
   return result
 }
 

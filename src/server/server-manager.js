@@ -85,7 +85,8 @@ function appendLog(session, text, channel = 'info') {
       if (!session.missingDependencies.includes(value)) session.missingDependencies.push(value)
     }
     if (session.logs.length > 1500) session.logs.shift()
-    if (session.status === 'starting' && /Done \([\d.,]+s\)!|For help, type ["']?help/i.test(line)) session.status = 'running'
+    if (/Choose A default world type|Type.*defaultworldgenerator-port/i.test(line)) session.inputHint = '整合包正在等待选择世界类型。请查看日志中的编号，在下方控制台输入 defaultworldgenerator-port 编号（例如 1）。'
+    if (session.status === 'starting' && /Done \([\d.,]+s\)!|For help, type ["']?help/i.test(line)) { session.status = 'running'; session.inputHint = '' }
   }
 }
 
@@ -203,6 +204,7 @@ export function sendServerCommand(id, command) {
   if (typeof command !== 'string' || !command.trim() || command.length > 4000 || /[\r\n\0]/.test(command)) throw new Error('请输入一行有效控制台命令')
   if (command.trim() === 'stop') { session.stopRequested = true; session.status = 'stopping' }
   session.child.stdin.write(command.trim() + '\n')
+  if (/^\/?defaultworldgenerator-port\s+/i.test(command.trim())) session.inputHint = ''
   appendLog(session, '> ' + command.trim(), 'command')
   return { ok: true }
 }

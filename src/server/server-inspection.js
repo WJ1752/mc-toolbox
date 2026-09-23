@@ -52,7 +52,8 @@ export async function inspectCore(file) {
   let mc = '', loader = 'vanilla', loaderVersion = ''
   try { const v = JSON.parse(info['version.json']); mc = v.id || v.name || '' } catch {}
   const forge = /^forge-(1\.\d+(?:\.\d+)?)-(\d+(?:\.\d+)+(?:-1\.\d+(?:\.\d+)?)?)/i.exec(name)
-  if (forge) { mc = forge[1]; loader = 'forge'; loaderVersion = forge[2] }
+  if (/cleanroom/i.test(name + manifest)) { mc = '1.12.2'; loader = 'cleanroom'; loaderVersion = /cleanroom-(.+)\.jar$/i.exec(name)?.[1] || '' }
+  else if (forge) { mc = forge[1]; loader = 'forge'; loaderVersion = forge[2] }
   else if (/fabric/i.test(name + manifest)) loader = 'fabric'
   else if (/quilt/i.test(name + manifest)) loader = 'quilt'
   else if (/neoforge/i.test(name + manifest)) loader = 'neoforge'
@@ -62,6 +63,8 @@ export async function inspectCore(file) {
 }
 
 function runtimeFromCoreName(name) {
+  const clean = /cleanroom-(.+)\.jar$/i.exec(name)
+  if (clean) return { mc: '1.12.2', loader: 'cleanroom', loaderVersion: clean[1] }
   const forge = /(?:^|[\\/])forge-(1\.\d+(?:\.\d+)?)-(\d+(?:\.\d+)+(?:-1\.\d+(?:\.\d+)?)?)(?:-server)?\.jar$/i.exec(name)
   if (forge) return { mc: forge[1], loader: 'forge', loaderVersion: forge[2] }
   const neo = /(?:^|[\\/])neoforge-(\d+(?:\.\d+)+)(?:-server)?\.jar$/i.exec(name)

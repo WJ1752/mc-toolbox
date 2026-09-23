@@ -22,3 +22,7 @@ dl-mt.mjs
 *.log
 .DS_Store
 Thumbs.db
+
+# 本地整合包验证及下载缓存
+.tmp-*/
+.tmp-*

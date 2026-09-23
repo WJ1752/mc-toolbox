@@ -1,7 +1,7 @@
 // Random-access ZIP inspection shared by local files and browser File slices.
 // Only metadata is read; mod jars and the rest of the pack stay untouched.
 export async function readPackMetadata(size, read) {
-  if (size > 2 * 1024 ** 3) throw new Error('整合包超过 2 GB，请先解压并选择文件夹')
+  if (size > 4 * 1024 ** 3) throw new Error('整合包超过 4 GB，请先解压并选择文件夹')
   const slice = async (offset, length) => {
     if (offset < 0 || length < 0 || offset + length > size) throw new Error('ZIP 文件不完整')
     const bytes = new Uint8Array(await read(offset, length))
@@ -24,7 +24,7 @@ export async function readPackMetadata(size, read) {
   if (length > 32 * 1024 ** 2) throw new Error('ZIP 目录过大，请先解压并选择文件夹')
   const central = await slice(offset, length), c = view(central)
   const records = [], decoder = new TextDecoder()
-  const ignored = new Set(['mods', 'assets', 'saves', 'logs', 'config', 'resourcepacks', '.git', 'node_modules'])
+  const ignored = new Set(['mods', 'assets', 'saves', 'logs', 'config', 'resourcepacks', '.git', 'node_modules', 'libraries', 'runtime', 'addons', 'resources', 'oresources', 'structures', 'scripts'])
   let cursor = 0, total = 0, unpacked = 0
   const summary = { modCount: 0, modBytes: 0 }
   for (let i = 0; i < count; i++) {
@@ -37,10 +37,11 @@ export async function readPackMetadata(size, read) {
     cursor += 46 + n + extra + comment
     const parts = name.split('/'), base = parts.at(-1)
     if (parts.some(part => part.toLowerCase() === 'mods') && /\.jar$/i.test(base)) { summary.modCount++; summary.modBytes += bytes }
-    if (parts.length > 11 || parts.some(p => ignored.has(p.toLowerCase()))) continue
+    const cleanroomConfig = base.toLowerCase() === 'forge_early.cfg'
+    if (parts.length > 11 || (!cleanroomConfig && parts.some(p => ignored.has(p.toLowerCase())))) continue
     if (parts.includes('..') || name.startsWith('/') || /^[A-Za-z]:/.test(name) || name.includes('\0')) throw new Error('ZIP 包含非法路径')
-    if (/^forge-.*\.jar$/i.test(base)) { records.push({ name, method: 0, size: 0, data: '' }); continue }
-    if (!/\.(json|bat|cmd|sh)$/i.test(base) || bytes > 2 * 1024 ** 2) continue
+    if (/^(forge|cleanroom)-.*\.jar$/i.test(base)) { records.push({ name, method: 0, size: 0, data: '' }); continue }
+    if ((!cleanroomConfig && !/\.(json|bat|cmd|sh)$/i.test(base)) || bytes > 2 * 1024 ** 2) continue
     total += compressed; unpacked += bytes
     if (total > 8 * 1024 ** 2 || unpacked > 16 * 1024 ** 2 || records.length >= 2000) throw new Error('版本信息过多，请先解压并选择具体实例文件夹')
     if (flags & 1) throw new Error('无法识别加密压缩包，请先解压')

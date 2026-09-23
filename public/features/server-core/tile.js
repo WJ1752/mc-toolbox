@@ -1,3 +1,4 @@
+import { javaDownloadButton } from '/js/core/java-download.js'
 import { h, clear, fmtBytes } from '/js/core/dom.js'
 import { api } from '/js/core/api.js'
 import { toast } from '/js/core/toast.js'
@@ -7,6 +8,7 @@ const LOADERS = [
   ['vanilla', '官方原版'],
   ['fabric', 'Fabric'],
   ['forge', 'Forge'],
+  ['cleanroom', 'Cleanroom（1.12.2）'],
   ['neoforge', 'NeoForge'],
   ['quilt', 'Quilt'],
   ['paper', 'Paper']
@@ -15,7 +17,7 @@ const LOADERS = [
 let ctxRef = null
 let timer = null
 let els = {}
-const state = { loader: 'fabric', mc: '', loaderVersion: '', dir: '', note: '', busy: false }
+const state = { javaPath: '', loader: 'fabric', mc: '', loaderVersion: '', dir: '', note: '', busy: false }
 
 function fmtSpeed(bps) {
   if (!bps) return ''
@@ -44,6 +46,8 @@ export default {
 
     loaderSel.onchange = () => {
       state.loader = loaderSel.value
+      state.javaPath = ''
+      if (state.loader === 'cleanroom') { state.mc = '1.12.2'; mcSel.value = state.mc }
       state.loaderVersion = ''
       loadLoaderVersions()
     }
@@ -66,7 +70,7 @@ export default {
           state.dir = p
         }
       } }, '浏览')))
-    ctx.body.appendChild(h('div', { class: 'row' }, btnDownload, h('span', { class: 'spacer' }), noteEl))
+    ctx.body.appendChild(h('div', { class: 'row' }, btnDownload, javaDownloadButton({ getRuntime: () => state, isLocked: () => state.busy, onReady: p => { state.javaPath = p; noteEl.textContent = 'Java 已就绪' } }), h('span', { class: 'spacer' }), noteEl))
     ctx.body.appendChild(h('div', { class: 'hr' }))
     ctx.body.appendChild(jobsEl)
 
@@ -95,7 +99,7 @@ function serverCoreExpanded(container, ctx) {
   container.appendChild(h('div', { class: 'row' },
     h('b', { style: { fontSize: '14px' } }, '服务端核心下载'),
     h('span', { class: 'spacer' }),
-    h('span', { class: 'muted' }, '支持 官方原版 / Fabric / Forge / NeoForge / Quilt / Paper')))
+    h('span', { class: 'muted' }, '支持 官方原版 / Fabric / Forge / Cleanroom / NeoForge / Quilt / Paper')))
 
   const loaderSel = h('select', { class: 'input' }, ...LOADERS.map(([v, l]) => h('option', { value: v }, l)))
   loaderSel.value = 'fabric'
@@ -105,9 +109,9 @@ function serverCoreExpanded(container, ctx) {
   const noteEl = h('div', { class: 'muted' }, '')
   const jobsEl = h('div', { class: 'scroll-y', style: { maxHeight: '300px', display: 'flex', flexDirection: 'column', gap: '6px' } })
 
-  const local = { loader: 'fabric', mc: '', lv: '' }
+  const local = { javaPath: '', loader: 'fabric', mc: '', lv: '' }
 
-  loaderSel.onchange = () => { local.loader = loaderSel.value; local.lv = ''; loadLoaderVersions() }
+  loaderSel.onchange = () => { local.loader = loaderSel.value; local.javaPath = ''; if (local.loader === 'cleanroom') { local.mc = '1.12.2'; mcSel.value = local.mc }; local.lv = ''; loadLoaderVersions() }
   mcSel.onchange = () => { local.mc = mcSel.value; local.lv = ''; loadLoaderVersions() }
   lvSel.onchange = () => { local.lv = lvSel.value }
 
@@ -150,7 +154,7 @@ function serverCoreExpanded(container, ctx) {
     btnDownload.disabled = true
     try {
       const r = await api.post('/api/servercore/download', {
-        loader: local.loader, mc: local.mc, loaderVersion: local.lv, dir: dirInput.value
+        loader: local.loader, mc: local.mc, loaderVersion: local.lv, dir: dirInput.value, javaPath: local.javaPath
       })
       if (r.error) throw new Error(r.error)
       if (r.note) noteEl.textContent = r.note
@@ -203,7 +207,7 @@ function serverCoreExpanded(container, ctx) {
       h('div', { class: 'field grow' }, h('label', {}, '加载器版本'), lvSel)),
     h('div', { class: 'row', style: { marginTop: '8px' } }, h('div', { class: 'grow' }, dirInput),
       h('button', { class: 'btn btn-sm', onclick: async () => { const p = await pickDir(dirInput.value || ''); if (p) dirInput.value = p } }, '浏览')),
-    h('div', { class: 'row', style: { marginTop: '10px' } }, btnDownload, h('span', { class: 'spacer' }), noteEl)))
+    h('div', { class: 'row', style: { marginTop: '10px' } }, btnDownload, javaDownloadButton({ getRuntime: () => ({ ...local, loaderVersion: local.lv }), isLocked: () => btnDownload.disabled, onReady: p => { local.javaPath = p; noteEl.textContent = 'Java 已就绪' } }), h('span', { class: 'spacer' }), noteEl)))
   container.appendChild(h('div', { class: 'hr' }))
   container.appendChild(h('div', { class: 'row' }, h('span', { class: 'muted' }, '下载任务'), h('span', { class: 'spacer' }), h('button', { class: 'btn btn-sm', onclick: refreshJobs }, '↻ 刷新')))
   container.appendChild(jobsEl)
@@ -281,7 +285,7 @@ async function download() {
       loader: state.loader,
       mc: state.mc,
       loaderVersion: state.loaderVersion,
-      dir: state.dir
+      dir: state.dir, javaPath: state.javaPath
     })
     if (r.error) throw new Error(r.error)
     if (r.note) els.noteEl.textContent = r.note

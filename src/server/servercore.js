@@ -16,6 +16,7 @@ export const LOADERS = [
   ['vanilla', '官方原版'],
   ['fabric', 'Fabric'],
   ['forge', 'Forge'],
+  ['cleanroom', 'Cleanroom (1.12.2)'],
   ['neoforge', 'NeoForge'],
   ['quilt', 'Quilt'],
   ['paper', 'Paper']
@@ -79,13 +80,20 @@ async function fabricLikeLoaders(baseUrl, mc) {
 
 /** Forge：promotions_slim 提供 latest / recommended */
 async function forgeLoaders(mc) {
-  const data = await request(FORGE_PROMOS)
-  const promos = data.promos || {}
+  const [metadata, promotions] = await Promise.allSettled([
+    request(`${FORGE_MAVEN}/maven-metadata.xml`, { json: false }), request(FORGE_PROMOS)
+  ])
+  const promos = promotions.status === 'fulfilled' ? promotions.value.promos || {} : {}
   const latest = promos[`${mc}-latest`]
   const recommended = promos[`${mc}-recommended`]
   const out = []
   if (recommended) out.push({ version: recommended, stable: true, label: 'recommended' })
   if (latest && latest !== recommended) out.push({ version: latest, stable: false, label: 'latest' })
+  if (metadata.status === 'fulfilled') {
+    const versions = [...metadata.value.matchAll(/<version>([^<]+)<\/version>/g)]
+      .map(m => m[1]).filter(v => v.startsWith(mc + '-')).map(v => v.slice(mc.length + 1)).sort(compareVersionDesc)
+    for (const version of new Set(versions)) if (!out.some(item => item.version === version)) out.push({ version, stable: true })
+  }
   if (!out.length) throw new Error(`该 MC 版本没有可用的 Forge：${mc}`)
   return out
 }
@@ -144,6 +152,9 @@ export async function listLoaderVersions(loader, mc) {
       return fabricLikeLoaders(FABRIC_META, mc)
     case 'quilt':
       return fabricLikeLoaders(QUILT_META, mc)
+    case 'cleanroom':
+      if (mc !== '1.12.2') throw new Error('Cleanroom 仅支持 Minecraft 1.12.2')
+      return (await request('https://api.github.com/repos/CleanroomMC/Cleanroom/releases?per_page=50')).filter(r => !r.draft && r.assets?.some(a => /-installer\.jar$/.test(a.name))).map(r => ({ version: r.tag_name, stable: !r.prerelease }))
     case 'forge':
       return forgeLoaders(mc)
     case 'neoforge':
@@ -177,7 +188,7 @@ function javaCmd(args) {
   return ['java', ...jvm, '-jar', '{jar}', ...args]
 }
 
-export async function resolveDownload({ loader, mc, loaderVersion, signal }) {
+export async function resolveDownload({ loader, mc, loaderVersion, cleanroom = false, signal }) {
   if (!loader || !mc) throw new Error('缺少加载器或 MC 版本')
 
   if (loader === 'vanilla') {
@@ -223,6 +234,14 @@ export async function resolveDownload({ loader, mc, loaderVersion, signal }) {
       extraFiles: [{ url: serverUrl, filename: 'server.jar' }],
       launchJar: 'quilt-server-launch.jar'
     }
+  }
+
+  if (loader === 'cleanroom' || cleanroom) {
+    if (mc !== '1.12.2') throw new Error('Cleanroom 仅支持 Minecraft 1.12.2')
+    const release = await request(`https://api.github.com/repos/CleanroomMC/Cleanroom/releases/${loaderVersion && loader === 'cleanroom' ? 'tags/' + encodeURIComponent(loaderVersion) : 'latest'}`, { signal })
+    const asset = release.assets?.find(a => /-installer\.jar$/.test(a.name))
+    if (!asset) throw new Error('此 Cleanroom 版本没有服务端安装器')
+    return { url: asset.browser_download_url, filename: asset.name, postCommand: javaCmd(['--installServer', '{dir}']), note: `Cleanroom ${release.tag_name}`, launchJar: `cleanroom-${release.tag_name}.jar` }
   }
 
   if (loader === 'forge') {

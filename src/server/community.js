@@ -619,6 +619,11 @@ async function runPostCommand(job) {
 /** 安装完成后生成启动脚本（start.bat / start.sh） */
 async function writeStartScripts(job) {
   const sc = job.startScript
+  if (sc.runtime) {
+    const { writeServerScripts } = await import('./pack-converter.js')
+    await writeServerScripts(job.dir, sc.runtime, sc.info, { memory: sc.mem, minMemory: '1G', javaPath: sc.javaPath })
+    return
+  }
   if (!sc?.jar) return
   const mem = String(sc.mem || '2G').trim()
   const cmd = `java -Xms${mem} -Xmx${mem} -jar ${sc.jar} nogui`

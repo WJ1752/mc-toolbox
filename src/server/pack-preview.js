@@ -1,3 +1,4 @@
+import { listLoaderVersions } from './servercore.js'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { inflateRaw } from 'node:zlib'
@@ -6,6 +7,25 @@ import { readPackMetadata, recommendPackMemory } from '../../public/js/core/pack
 import { detectPackRuntime, detectRuntimeRecords } from './pack-runtime.js'
 
 const inflate = promisify(inflateRaw)
+async function completeRuntime(runtime) {
+  if (runtime?.loader === 'cleanroom' && !runtime.loaderVersion) {
+    runtime.loaderVersionSuggested = true
+    runtime.loaderVersion = await listLoaderVersions('cleanroom', '1.12.2').then(items => items[0]?.version || '').catch(() => '')
+  }
+}
+
+function includeManifest(summary, records) {
+  let declared = 0
+  for (const record of records) {
+    if (!/(?:manifest|modrinth\.index)\.json$/i.test(record.name)) continue
+    try {
+      const manifest = JSON.parse(record.text)
+      if (manifest.manifestType === 'minecraftModpack') declared += manifest.files?.length || 0
+      else if (manifest.game === 'minecraft') declared += (manifest.files || []).filter(f => f.path?.startsWith('mods/')).length
+    } catch {}
+  }
+  return { ...summary, modCount: (Number(summary?.modCount) || 0) + declared }
+}
 export async function inspectMetadata(records, summary = records?.summary) {
   if (!Array.isArray(records) || records.length > 2000) throw new Error('版本信息无效或过多')
   let total = 0, compressed = 0
@@ -20,6 +40,8 @@ export async function inspectMetadata(records, summary = records?.summary) {
     decoded.push({ name: r.name, text: out.toString('utf8') })
   }
   const runtime = detectRuntimeRecords(decoded)
+  await completeRuntime(runtime)
+  summary = includeManifest(summary, decoded)
   return runtime ? { ...runtime, modCount: Number(summary?.modCount) || 0, recommendedMemory: recommendPackMemory(summary) } : null
 }
 
@@ -37,7 +59,16 @@ export async function inspectPack(source) {
       }
     }
     const runtime = await detectPackRuntime(source)
+    await completeRuntime(runtime)
     await count(source, 0)
+    if (runtime?.source && /manifest\.json$/i.test(runtime.source)) {
+      try {
+        const manifest = JSON.parse(await fs.readFile(path.join(source, runtime.source), 'utf8'))
+        // Installed instances already contain the downloaded mods. The greater
+        // count is a conservative estimate; never count the manifest twice.
+        summary.modCount = Math.max(summary.modCount, manifest.files?.length || 0)
+      } catch {}
+    }
     return runtime ? { ...runtime, modCount: summary.modCount, recommendedMemory: recommendPackMemory(summary) } : null
   }
   if (!stat.isFile()) throw new Error('请选择普通文件或目录')

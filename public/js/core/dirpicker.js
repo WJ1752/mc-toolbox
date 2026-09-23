@@ -57,7 +57,7 @@ export function pickDir(current, { title = '选择目录', fileMode = false, ext
     const specialsBar = h('div', { class: 'dp-specials' })
     const filterInput = h('input', {
       class: 'input',
-      placeholder: fileMode ? '🔍 过滤脚本文件…' : '🔍 过滤文件夹…',
+      placeholder: fileMode ? '🔍 过滤文件…' : '🔍 过滤文件夹…',
       oninput: (e) => { filter = e.target.value.toLowerCase(); renderList() }
     })
     const list = h('div', { class: 'dp-list' })
@@ -131,7 +131,7 @@ export function pickDir(current, { title = '选择目录', fileMode = false, ext
       const files = fileMode && q ? curFiles.filter((f) => f.name.toLowerCase().includes(q)) : (fileMode ? curFiles : [])
       if (!dirs.length && !files.length) {
         list.appendChild(h('div', { class: 'muted center', style: { padding: '14px' } },
-          q ? `没有匹配「${escapeHtml(q)}」的${fileMode ? '脚本/文件夹' : '文件夹'}` : (fileMode ? '该目录下没有匹配的脚本' : '该目录下没有子文件夹')))
+          q ? `没有匹配「${escapeHtml(q)}」的${fileMode ? '文件/文件夹' : '文件夹'}` : (fileMode ? '该目录下没有匹配的文件' : '该目录下没有子文件夹')))
         return
       }
       for (const d of dirs) {
@@ -213,7 +213,7 @@ export function pickDir(current, { title = '选择目录', fileMode = false, ext
         renderSpecials(path)
         renderList()
         renderPresets(data.presets)
-        const fileWord = fileMode ? `· ${curFiles.length} 个脚本` : `· ${curFiles.length} 个 jar`
+        const fileWord = fileMode ? `· ${curFiles.length} 个文件` : `· ${curFiles.length} 个 jar`
         status.textContent = `${curDirs.length} 个文件夹 ${fileWord} · 当前：「${path}」`
       } catch (e) {
         status.textContent = '❌ ' + e.message
@@ -252,8 +252,8 @@ export function pickDir(current, { title = '选择目录', fileMode = false, ext
       if (finished) return
       if (fileMode) {
         const v = (selFile || pathInput.value.trim() || '').trim()
-        if (!v) { toast('请先在列表中单击选中一个脚本，或直接粘贴路径'); return }
-        if (exts.length && !exts.some((e) => v.toLowerCase().endsWith(e))) { toast('请选择 ' + exts.join(' / ') + ' 脚本'); return }
+        if (!v) { toast('请先在列表中单击选中一个文件，或直接粘贴路径'); return }
+        if (exts.length && !exts.some((e) => v.toLowerCase().endsWith(e))) { toast('请选择 ' + exts.join(' / ') + ' 文件'); return }
         finished = true
         resolve(v)
       } else {
@@ -304,7 +304,7 @@ export function pickDir(current, { title = '选择目录', fileMode = false, ext
         roots = r.roots || []
         specials = r.specials || []
         homePath = r.home || ''
-        isWin = roots.some((x) => x.kind === 'drive' && /^[A-Z]:$/i.test(x.name))
+        isWin = roots.some((x) => x.kind === 'drive' && /^[A-Z]:[\\/]?$/i.test(x.path))
         renderDrives(path)
         renderSpecials(path)
         await load(path)

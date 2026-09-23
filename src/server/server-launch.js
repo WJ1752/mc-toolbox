@@ -3,9 +3,11 @@ import path from 'node:path'
 import os from 'node:os'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { RUNTIME_DIR } from './paths.js'
 
 const exec = promisify(execFile)
 export function requiredJava(runtime) {
+  if (runtime?.cleanroom === true || runtime?.loader === 'cleanroom') return /^0\.[0-5]\./.test(runtime.loaderVersion || '') ? 21 : 25
   const parts = /^1\.(\d+)(?:\.(\d+))?$/.exec(runtime?.mc || '')
   if (!parts) throw new Error('请填写有效的 Minecraft 版本')
   const minor = Number(parts[1]), patch = Number(parts[2] || 0)
@@ -49,12 +51,19 @@ export async function resolveJava(runtime, preferred = '') {
   const roots = process.platform === 'win32'
     ? [path.join(process.env.ProgramFiles || 'C:/Program Files', 'Java'), path.join(process.env.ProgramFiles || 'C:/Program Files', 'Eclipse Adoptium'), path.join(process.env.ProgramFiles || 'C:/Program Files', 'Microsoft'), path.join(process.env.ProgramFiles || 'C:/Program Files', 'Zulu'), path.join(os.homedir(), '.jdks')]
     : ['/usr/lib/jvm', '/Library/Java/JavaVirtualMachines']
-  for (const root of roots) {
+  roots.push(path.join(RUNTIME_DIR, 'java'))
+  const addCandidates = async (root, depth = 0, maxDepth = 0) => {
+    if (depth > maxDepth) return
     for (const entry of await fs.readdir(root, { withFileTypes: true }).catch(() => [])) {
-      if (!entry.isDirectory()) continue
-      candidates.add(path.join(root, entry.name, 'bin', executable))
-      if (process.platform === 'darwin') candidates.add(path.join(root, entry.name, 'Contents/Home/bin/java'))
+      if (!entry.isDirectory() || entry.name.startsWith('.staging-') || entry.name.startsWith('.invalid-')) continue
+      const full = path.join(root, entry.name)
+      candidates.add(path.join(full, 'bin', executable))
+      if (process.platform === 'darwin') candidates.add(path.join(full, 'Contents/Home/bin', executable))
+      await addCandidates(full, depth + 1, maxDepth)
     }
+  }
+  for (const root of roots) {
+    await addCandidates(root, 0, root === path.join(RUNTIME_DIR, 'java') ? 1 : 0)
   }
   for (const candidate of candidates) {
     if (!(await fs.stat(candidate).catch(() => null))?.isFile()) continue

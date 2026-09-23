@@ -74,6 +74,7 @@ export const DEFAULT_SETTINGS = {
 
 // 内置「仅客户端 mod」库（按 modid 匹配），用户可在 GUI 中增删
 // 格式: [modid, 显示名, 备注]
+export const SERVER_CAPABLE_MOD_IDS = new Set(['ferritecore', 'smoothboot', 'betterfps', 'ftbchunks', 'theoneprobe', 'craftingtweaks', 'inventorytweaks', 'jei', 'rei', 'emi', 'nei', 'appleskin', 'journeymap', 'xaerominimap', 'xaeroworldmap', 'jade', 'hwyla', 'waila', 'wthit'])
 const SEED = [
   // ===== 渲染 / 性能优化 =====
   ['sodium', 'Sodium', '渲染优化，服务端不需要'],
@@ -159,7 +160,14 @@ const SEED = [
   ['fancymenu', 'FancyMenu', '主菜单自定义'],
   ['defaultoptions', 'Default Options', '默认选项保存'],
   ['the5zigmod', '5zig Mod', '旧版客户端信息'],
-  ['damageindicators', 'Damage Indicators', '旧版伤害显示']
+  ['damageindicators', 'Damage Indicators', '旧版伤害显示'],
+  ['renderlib', 'RenderLib', '客户端渲染库'],
+  ['brilliant_text', 'Brilliant Text', '客户端字体渲染'],
+  ['brillianttext', 'Brilliant Text Remixin', '客户端字体渲染'],
+  ['bdht', 'Better Draw Hovering Text', '客户端悬浮提示渲染'],
+  ['inertiacancellation', 'Inertia Cancellation', '客户端移动控制'],
+  ['searchonmcmod', 'Search on MCMOD', '客户端百科搜索快捷键'],
+  ['classicbar', 'ClassicBar Legacy', '客户端状态条界面']
 ]
 
 export const DEFAULT_CLIENT_MODS = SEED.map(([modid, name, note], i) => ({
@@ -169,4 +177,11 @@ export const DEFAULT_CLIENT_MODS = SEED.map(([modid, name, note], i) => ({
   note,
   source: 'builtin',
   createdAt: Date.now()
-}))
+})).filter(item => !SERVER_CAPABLE_MOD_IDS.has(item.modid))
+
+export function upgradeClientModLibrary(db) {
+  if (db.rulesVersion === 2) return db
+  const items = (db.items || []).filter(item => item.source !== 'builtin' || !SERVER_CAPABLE_MOD_IDS.has(item.modid))
+  for (const item of DEFAULT_CLIENT_MODS) if (!items.some(old => old.modid === item.modid)) items.push(item)
+  return { ...db, items, rulesVersion: 2 }
+}

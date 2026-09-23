@@ -5,10 +5,12 @@ import os from 'node:os'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
-const ROOT = fileURLToPath(new URL('..', import.meta.url))
+const SOURCE = fileURLToPath(new URL('..', import.meta.url))
+const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-tb-isolated-dirs-'))
+for (const name of ['src', 'public', 'server.js', 'package.json']) fs.cpSync(path.join(SOURCE, name), path.join(ROOT, name), { recursive: true })
 const PORT = 8791
 const BASE = 'http://127.0.0.1:' + PORT
-const TMP = path.join(os.tmpdir(), 'mc-tb-dirstest')
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-tb-dirs-destination-'))
 const J = (r) => r.json()
 const assert = (cond, msg) => { if (!cond) { console.error('✗ ' + msg); process.exit(1) } console.log('✓ ' + msg) }
 

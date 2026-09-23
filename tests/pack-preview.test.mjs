@@ -21,7 +21,18 @@ try {
   const file = new Blob([await fs.readFile(result.output)])
   const records = await readPackMetadata(file.size, (offset, length) => file.slice(offset, offset + length).arrayBuffer())
   assert.deepEqual(await inspectMetadata(records), runtime)
-  await assert.rejects(readPackMetadata(3 * 1024 ** 3, () => { throw new Error('must not read') }), /2 GB/)
+  await assert.rejects(readPackMetadata(5 * 1024 ** 3, () => { throw new Error('must not read') }), /4 GB/)
+  let inspectedBytes = 0
+  const largeSize = 3 * 1024 ** 3
+  const emptyEnd = Buffer.alloc(22); emptyEnd.writeUInt32LE(0x06054b50)
+  const large = await readPackMetadata(largeSize, (offset, length) => {
+    inspectedBytes += length
+    const bytes = new Uint8Array(length)
+    if (offset + length === largeSize) bytes.set(emptyEnd, length - 22)
+    return bytes
+  })
+  assert.equal(large.length, 0)
+  assert.ok(inspectedBytes < 70000, '3 GB ZIP preview reads only bounded directory slices')
   await assert.rejects(readPackMetadata(3, () => new Uint8Array(3)), /ZIP/)
   await assert.rejects(inspectMetadata([{ name: 'manifest.json', size: 1, method: 0, data: btoa('oversized') }]), /校验/)
   await assert.rejects(inspectMetadata([{ name: 'manifest.json', size: 3 * 1024 ** 2, method: 0, data: '' }]), /无效/)

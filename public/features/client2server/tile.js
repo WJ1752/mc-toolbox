@@ -1,3 +1,4 @@
+import { javaDownloadButton } from '/js/core/java-download.js'
 import { h, clear, fmtBytes } from '/js/core/dom.js'
 import { api } from '/js/core/api.js'
 import { openModal, confirmDialog } from '/js/core/modal.js'
@@ -41,37 +42,42 @@ export default {
     // 整合包转换：目录走本地路径，拖入的压缩包在浏览器无法暴露路径时改为上传到本地服务。
     const convertInput = h('input', { class: 'input mono', readonly: true, placeholder: '拖入或选择客户端整合包 / 客户端目录' })
     const outputInput = h('input', { class: 'input mono', readonly: true, placeholder: '输出文件夹（可选）' })
-    const runtimeMcInput = h('input', { class: 'input mono', id: 'convert-mc', placeholder: '例如 1.12.2' })
+    const mcOptions = h('datalist', { id: 'convert-mc-options' })
+    api.get('/api/servercore/gameversions').then(r => { for (const v of r.items || []) mcOptions.appendChild(h('option', { value: v.id })) }).catch(() => {})
+    const runtimeMcInput = h('input', { class: 'input mono', list: 'convert-mc-options', id: 'convert-mc', placeholder: '例如 1.12.2' })
     const runtimeLoaderSel = h('select', { class: 'input', id: 'convert-loader' },
       h('option', { value: '' }, '请选择加载器'),
       h('option', { value: 'vanilla' }, '原版 Vanilla'),
       h('option', { value: 'fabric' }, 'Fabric'),
       h('option', { value: 'forge' }, 'Forge'),
+      h('option', { value: 'cleanroom' }, 'Cleanroom（1.12.2）'),
       h('option', { value: 'neoforge' }, 'NeoForge'),
       h('option', { value: 'quilt' }, 'Quilt'),
       h('option', { value: 'paper' }, 'Paper'))
-    const runtimeLoaderVersionInput = h('input', { class: 'input mono', id: 'convert-loader-version', placeholder: '识别后自动填写' })
-    const versionOptions = h('select', { class: 'input', 'aria-label': '选择在线加载器版本' }, h('option', { value: '' }, '在线候选版本'))
-    const versionHint = h('div', { class: 'muted' }, '模组加载器必须指定版本；可以手动填写历史版本。')
+    const versionOptions = h('datalist', { id: 'convert-loader-version-options' })
+    const runtimeLoaderVersionInput = h('input', { class: 'input mono', id: 'convert-loader-version', list: 'convert-loader-version-options', placeholder: '识别后自动填写，可输入或展开选择' })
+    const versionHint = h('div', { class: 'muted' }, '点击版本输入框即可滚动查看在线候选；也可以输入历史版本，输入内容会自动过滤候选。')
     const detectHint = h('div', { class: 'muted', style: { overflowWrap: 'anywhere', lineHeight: '1.6' }, 'aria-live': 'polite' }, '选择整合包后自动读取 MC、加载器和加载器版本。')
     const memoryInput = h('input', { class: 'input mono', id: 'convert-memory', type: 'number', min: '1', max: '256', step: '1', value: '4' })
     const minMemoryInput = h('input', { class: 'input mono', id: 'convert-min-memory', type: 'number', min: '1', max: '256', step: '1', value: '1' })
     const javaInput = h('input', { class: 'input mono', id: 'convert-java', placeholder: '自动选择兼容的 Java', readonly: true })
-    const javaHint = h('div', { class: 'muted', style: { overflowWrap: 'anywhere' }, 'aria-live': 'polite' }, '根据 MC 版本检查 Java；旧版 Forge 1.12.2 需要 Java 8。')
+    const javaHint = h('div', { class: 'muted', style: { overflowWrap: 'anywhere' }, 'aria-live': 'polite' }, '根据 MC 版本检查 Java；Forge 1.12.2 通常需要 Java 8；新版 Cleanroom 需要 Java 25，可直接下载。')
     const bundleJavaInput = h('input', { type: 'checkbox', checked: true })
+    const worldPreset = h('input', { class: 'input mono', placeholder: '可选：填入整合包提供的世界预设 UUID', 'aria-label': '世界预设 UUID' })
     const memoryHint = h('div', { class: 'muted' }, '最大内存是上限，不应占满物理内存；请为系统和其他程序保留空间。')
     const javaPick = h('button', { class: 'btn btn-sm', onclick: async () => {
       const p = await pickFile('', { title: '选择 Java 可执行文件', exts: ['.exe'] })
       if (p && !state.convertBusy) { javaInput.value = p; checkJava() }
     } }, '选择 Java')
     const javaAuto = h('button', { class: 'btn btn-sm', onclick: () => { javaInput.value = ''; checkJava() } }, '自动选择')
+    const javaDownload = javaDownloadButton({ getRuntime: () => ({ mc: runtimeMcInput.value, loader: runtimeLoaderSel.value, loaderVersion: runtimeLoaderVersionInput.value }), isLocked: () => state.convertBusy || inspecting, onReady: p => { javaInput.value = p; checkJava() } })
     let inspectSerial = 0, versionSerial = 0, javaSerial = 0, inspecting = false, memoryEdited = false
     memoryInput.oninput = () => { memoryEdited = true }
     const runtimeControls = [runtimeMcInput, runtimeLoaderSel, runtimeLoaderVersionInput]
     const labeled = (label, control) => h('div', { class: 'field', style: { flex: '1 1 180px', minWidth: '0', margin: '0' } }, h('label', { for: control.id }, label), control)
     function updateDisabled() {
       btnConvert.disabled = state.convertBusy || inspecting
-      for (const el of [...runtimeControls, versionOptions, memoryInput, minMemoryInput, bundleJavaInput, javaPick, javaAuto, btnPackage, btnFolder, btnOutput]) el.disabled = state.convertBusy || inspecting
+      for (const el of [...runtimeControls, versionOptions, memoryInput, minMemoryInput, bundleJavaInput, worldPreset, javaPick, javaAuto, javaDownload, btnPackage, btnFolder, btnOutput]) el.disabled = state.convertBusy || inspecting
       if (!state.convertBusy && !inspecting && runtimeLoaderSel.value === 'vanilla') { runtimeLoaderVersionInput.disabled = true; versionOptions.disabled = true }
     }
     async function checkJava() {
@@ -79,14 +85,14 @@ export default {
       if (!runtimeMcInput.value || !runtimeLoaderSel.value) { javaHint.textContent = '先确定 MC 版本和加载器，再检查兼容的 Java。'; return }
       javaHint.textContent = '正在检查本机 Java…'
       try {
-        const r = await api.post('/api/mods/java', { runtime: { mc: runtimeMcInput.value, loader: runtimeLoaderSel.value }, javaPath: javaInput.value })
+        const r = await api.post('/api/mods/java', { runtime: { mc: runtimeMcInput.value, loader: runtimeLoaderSel.value, loaderVersion: runtimeLoaderVersionInput.value }, javaPath: javaInput.value })
         if (serial !== javaSerial) return
         javaHint.textContent = `已找到 Java ${r.major}（64 位）：${r.path}。此版本服务端使用 Java ${r.required}。`
       } catch (e) { if (serial === javaSerial) javaHint.textContent = e.message }
     }
     async function refreshVersions() {
       const serial = ++versionSerial
-      clear(versionOptions); versionOptions.appendChild(h('option', { value: '' }, '选择在线版本（可手动输入）'))
+      clear(versionOptions)
       const loader = runtimeLoaderSel.value, mc = runtimeMcInput.value.trim()
       runtimeLoaderVersionInput.disabled = state.convertBusy || inspecting || loader === 'vanilla'
       versionOptions.disabled = state.convertBusy || inspecting || loader === 'vanilla'
@@ -97,19 +103,19 @@ export default {
       runtimeLoaderVersionInput.placeholder = '填写准确版本号'
       if (!loader || !mc) { versionHint.textContent = '先填写 MC 版本并选择加载器；模组加载器版本必填。'; return }
       const current = runtimeLoaderVersionInput.value.trim()
-      if (current) versionOptions.appendChild(h('option', { value: current }, `${current}（当前版本）`))
+      if (current) versionOptions.appendChild(h('option', { value: current, label: `${current}（当前版本）` }))
       versionHint.textContent = '正在获取在线候选；当前版本不会被自动替换。'
       try {
         const r = await api.get('/api/servercore/loaderversions?' + new URLSearchParams({ loader, mc }))
         if (serial !== versionSerial) return
-        for (const item of r.items || []) if (String(item.version) !== current) versionOptions.appendChild(h('option', { value: item.version }, `${item.version}${item.label ? '（' + ({ recommended: '推荐', latest: '最新' }[item.label] || item.label) + '）' : ''}`))
-        versionHint.textContent = loader === 'forge' ? '在线列表提供推荐 / 最新版；整合包应优先保持已识别的准确版本，历史版本可直接填写。' : '请选择与整合包一致的版本，也可以直接填写；不会自动升级。'
+        for (const item of r.items || []) if (String(item.version) !== current) versionOptions.appendChild(h('option', { value: item.version, label: `${item.version}${item.label ? '（' + ({ recommended: '推荐', latest: '最新' }[item.label] || item.label) + '）' : ''}` }))
+        versionHint.textContent = '可滚动或输入搜索历史版本；优先保持整合包的准确版本，不会自动升级。'
       } catch (e) { if (serial === versionSerial) versionHint.textContent = '在线列表暂不可用，仍可使用已识别版本或手动填写。' }
     }
-    versionOptions.onchange = () => { if (versionOptions.value) runtimeLoaderVersionInput.value = versionOptions.value }
     const runtimeChanged = () => { runtimeLoaderVersionInput.value = ''; detectHint.textContent = '已手动更改运行环境，请重新确定对应的加载器版本。'; refreshVersions(); checkJava() }
     runtimeMcInput.oninput = () => { ++versionSerial; ++javaSerial; runtimeLoaderVersionInput.value = ''; clear(versionOptions) }
     runtimeMcInput.onchange = runtimeChanged
+    runtimeLoaderVersionInput.onchange = checkJava
     runtimeLoaderSel.onchange = runtimeChanged
     const convertStatus = h('div', { class: 'muted', style: { marginTop: '6px', lineHeight: '1.5' } },
       '未选择输出文件夹时：目录或已选择的压缩包会在客户端原文件夹生成；直接拖入的文件会生成到系统“下载”文件夹。原文件不会被修改。')
@@ -168,7 +174,7 @@ export default {
           runtimeMcInput.value = r.runtime.mc
           runtimeLoaderSel.value = r.runtime.loader
           runtimeLoaderVersionInput.value = r.runtime.loaderVersion || ''
-          detectHint.textContent = `已识别：Minecraft ${r.runtime.mc} · ${r.runtime.loader} ${r.runtime.loaderVersion || ''}；来源：${r.runtime.source}`
+          detectHint.textContent = `已识别：Minecraft ${r.runtime.mc} · ${r.runtime.loader} ${r.runtime.loaderVersion || ''}；来源：${r.runtime.source}${r.runtime.loaderVersionSuggested ? '；Cleanroom 版本为在线建议，请核对作者要求' : ''}`
         } else detectHint.textContent = '未找到有效版本信息，请手动填写下方 MC、加载器及其版本后再转换。'
       } catch (e) { if (serial === inspectSerial) detectHint.textContent = '自动识别失败：' + e.message + '。可以手动填写版本。' }
       finally {
@@ -196,11 +202,13 @@ export default {
       h('div', { style: { marginTop: '12px' } }, h('b', {}, '核心识别'), detectHint),
       h('div', { class: 'row wrap', style: { alignItems: 'flex-start', marginTop: '8px' } },
         labeled('Minecraft 版本', runtimeMcInput), labeled('加载器类型', runtimeLoaderSel), labeled('加载器版本（模组服必填）', runtimeLoaderVersionInput)),
-      h('div', { style: { marginTop: '6px' } }, versionOptions, versionHint),
+      h('div', { style: { marginTop: '6px' } }, mcOptions, versionOptions, versionHint),
       h('div', { style: { marginTop: '12px' } }, h('b', {}, '启动设置')),
       h('div', { class: 'row wrap', style: { marginTop: '6px' } }, labeled('最大内存（GB）', memoryInput), labeled('初始内存（GB）', minMemoryInput)),
       memoryHint,
-      h('div', { class: 'row wrap', style: { marginTop: '6px' } }, labeled('Java 路径（自动匹配或手动选择）', javaInput), javaPick, javaAuto), javaHint,
+      h('div', { class: 'row wrap', style: { marginTop: '6px' } }, labeled('Java 路径（自动匹配或手动选择）', javaInput), javaPick, javaAuto, javaDownload), javaHint,
+      h('details', {}, h('summary', { style: { cursor: 'pointer', marginTop: '8px' } }, '世界生成预设（可选）'), worldPreset,
+        h('div', { class: 'muted' }, '使用 Default World Generator 的整合包可能在首次启动时等待选择世界。已知预设 UUID 可在此填写；留空时可在开服管理控制台按日志提示选择。一般整合包保持空白。')),
       h('label', { class: 'row wrap', style: { marginTop: '8px' } }, bundleJavaInput, '将兼容的 Java 一起打包（增加体积；Windows 运行时仅适用于 Windows）'),
       convertStatus, convertProgress))
 
@@ -286,7 +294,7 @@ export default {
     async function convertPack() {
       if (state.convertBusy || inspecting) return
       if (!state.convertSource && !state.convertFile) { toast('请先拖入或选择客户端整合包 / 目录', 'err'); return }
-      if (state.convertFile?.size > 2 * 1024 * 1024 * 1024) { toast('整合包超过 2 GB，请先解压并使用“选择文件夹”', 'err'); return }
+      if (state.convertFile?.size > 4 * 1024 * 1024 * 1024) { toast('整合包超过 4 GB，请先解压并使用“选择文件夹”', 'err'); return }
       const memory = Number(memoryInput.value), minMemory = Number(minMemoryInput.value)
       if (!Number.isInteger(memory) || !Number.isInteger(minMemory) || minMemory < 1 || memory < minMemory || memory > 256) { toast('内存请输入 1–256 的整数，初始内存不能大于最大内存', 'err'); return }
       if (!/^1\.\d+(?:\.\d+)?$/.test(runtimeMcInput.value.trim()) || !runtimeLoaderSel.value || (runtimeLoaderSel.value !== 'vanilla' && !runtimeLoaderVersionInput.value.trim())) { toast('请先补全 MC 版本、加载器及加载器版本', 'err'); return }
@@ -298,11 +306,12 @@ export default {
       btnCancelConvert.disabled = false
       setConvertProgress({ stage: 'queued', progress: null, detail: '正在提交转换任务…' })
       try {
-        const selectedJava = await api.post('/api/mods/java', { runtime: { mc: runtimeMcInput.value.trim(), loader: runtimeLoaderSel.value }, javaPath: javaInput.value })
+        const selectedJava = await api.post('/api/mods/java', { runtime: { mc: runtimeMcInput.value.trim(), loader: runtimeLoaderSel.value, loaderVersion: runtimeLoaderVersionInput.value }, javaPath: javaInput.value })
         if (cancelRequested) throw new Error('转换已中止')
         let job
         if (state.convertFile) {
           const q = new URLSearchParams({ memory: memory + 'G', minMemory: minMemory + 'G', javaPath: selectedJava.path, bundleJava: String(bundleJavaInput.checked) })
+          if (worldPreset.value.trim()) q.set('worldPreset', worldPreset.value.trim())
           if (outputInput.value.trim()) q.set('outputDir', outputInput.value.trim())
           if (runtimeMcInput.value.trim()) q.set('mc', runtimeMcInput.value.trim())
           if (runtimeLoaderSel.value) q.set('loader', runtimeLoaderSel.value)
@@ -310,7 +319,7 @@ export default {
           job = await uploadConvertFile('/api/mods/convert-upload?' + q, state.convertFile)
         } else {
           const runtime = { mc: runtimeMcInput.value.trim(), loader: runtimeLoaderSel.value, loaderVersion: runtimeLoaderVersionInput.value.trim() }
-          job = await api.post('/api/mods/convert', { source: state.convertSource, outputDir: outputInput.value.trim(), runtime, memory: memory + 'G', minMemory: minMemory + 'G', javaPath: selectedJava.path, bundleJava: bundleJavaInput.checked })
+          job = await api.post('/api/mods/convert', { source: state.convertSource, outputDir: outputInput.value.trim(), runtime, memory: memory + 'G', minMemory: minMemory + 'G', javaPath: selectedJava.path, bundleJava: bundleJavaInput.checked, worldPreset: worldPreset.value.trim() })
         }
         if (job.error) throw new Error(job.error)
         if (!job.id) throw new Error('转换任务创建失败')
@@ -327,10 +336,12 @@ export default {
         }
         const warning = (result.warnings || []).map((x) => h('div', { class: 'result-bad' }, x))
         const detail = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '7px' } },
-          h('div', { class: 'result-ok' }, `转换完成：移除 ${result.removedCount || 0} 个仅客户端 mod`),
+          h('div', { class: 'result-ok' }, `转换完成：移除 ${result.removedCount || 0} 个客户端 / 不适用服务端的 mod`),
           h('div', { class: 'mono', style: { wordBreak: 'break-all' } }, result.output),
           h('div', { class: 'muted' }, `扫描 ${result.totalMods || 0} 个 mod · 输出 ${fmtBytes(result.packed?.bytes || 0)}`),
           result.core && h('div', { class: 'muted' }, `Java ${result.core.javaMajor} · 初始 ${result.core.minMemory} / 最大 ${result.core.memory} · ${result.core.bundledJava ? '已包含 Java 运行时' : '使用本机 Java'}`),
+          h('div', { class: 'muted' }, result.validation || '请在开服管理中启动服务端，检查实际世界加载情况。'),
+          ...(result.compatibility || []).map(change => h('div', { class: 'muted' }, `${change.action}：${change.file}`)),
           ...warning)
         openModal({
           title: '服务端整合包已生成',
