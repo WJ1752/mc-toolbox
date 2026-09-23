@@ -2,8 +2,8 @@
 export const SHELL_INTEGRITY = {
   "authorHash": "8db64220fca20d23cb44970ad85bc8ca211713664db8b51f4c10c185659975e2",
   "files": {
-    "index.html": "c192936faeddc5c7cf4e7ebbb7ce8af4719610f60fd03c2f271801c3230a7b0e",
-    "css/style.css": "ebfae1eb875b326248f230bd623bd4bbf0a6646b8dcde9c3255d4a09e64540e2",
+    "index.html": "a6755e593d0ae73ab76a96e9bda950c493bdddef5d5340a00f34230f3056c2e3",
+    "css/style.css": "96a8ef0ae3cbb0ade5d5552dfd1fd653a524989f3f0a59f6dda933fdac6c5093",
     "js/app.js": "a789d1c8bb652278b36609db8046062efaaf99610b382dd2bc994f03833dacd2",
     "js/core/api.js": "dfb172f3c2ef75a42073a657790bdec24c5035d7c6e84ef82b0eff8e8f9bc04e",
     "js/core/bus.js": "64e0701ab153020c251b8b1e27bd4a1b78fb0a50dc491b5dcfa88ccb8bc20a98",

@@ -1,5 +1,10 @@
 # Minecraft 工具箱
 
+### v1.6.1 应用图标修复
+
+- 下载的 EXE、桌面窗口、任务栏及页面统一使用像素工具箱图标，修复外层 EXE 仍显示 Node.js 默认图标的问题。
+- 嵌入 16–256 像素共七种尺寸，构建时验证最终 EXE 的图标资源并执行程序启动检查。
+
 ### v1.6.0 Cleanroom、复杂整合包转换与 Java 下载
 
 - 识别 Minecraft 1.12.2 整合包中的 Cleanroom 配置，安装官方 Cleanroom 服务端并使用其 Forge 模组启动入口；Cleanroom 0.6 系列匹配 Java 25，0.5 系列匹配 Java 21。完整 Forge 版本候选可搜索选择。

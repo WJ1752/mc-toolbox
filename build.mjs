@@ -201,38 +201,18 @@ async function ensureWebView2Lib() {
   return dir
 }
 
-// ---------- 应用图标：生成多尺寸 .ico（草方块风格，与品牌 logo 一致） ----------
+// ---------- 应用图标：从同一像素 SVG 生成窗口和 EXE 的多尺寸图标 ----------
 function drawIconRgba(size) {
   const px = Buffer.alloc(size * size * 4)
-  const lerp = (a, b, t) => Math.round(a + (b - a) * t)
-  const c1 = [0x7e, 0xdd, 0x8f] // 上左浅绿
-  const c2 = [0x2e, 0x9e, 0x45] // 下右深绿
-  // favicon 同款：斜向渐变 + 两个深色像素块
-  const squares = []
-  const sq = (x0, y0, w) => squares.push({ x0, y0, x1: x0 + w, y1: y0 + w })
-  sq(0.15, 0.15, 0.30)
-  sq(0.55, 0.55, 0.30)
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const t = Math.min(1, (x + y) / (2 * (size - 1)))
-      let r = lerp(c1[0], c2[0], t)
-      let g = lerp(c1[1], c2[1], t)
-      let b = lerp(c1[2], c2[2], t)
-      const fx = x / size
-      const fy = y / size
-      for (const s of squares) {
-        if (fx >= s.x0 && fx < s.x1 && fy >= s.y0 && fy < s.y1) {
-          r = Math.round(r * 0.55)
-          g = Math.round(g * 0.55)
-          b = Math.round(b * 0.55)
-          break
-        }
-      }
-      // 外围 1px 描边让浅色任务栏上更清晰
-      const edge = x === 0 || y === 0 || x === size - 1 || y === size - 1
-      if (edge) { r *= 0.8; g *= 0.8; b *= 0.8 }
-      const o = (y * size + x) * 4
-      px[o] = r; px[o + 1] = g; px[o + 2] = b; px[o + 3] = 255
+  // This source deliberately uses only integer rectangles in a 32px viewBox.
+  const svg = fs.readFileSync(path.join(here, 'public', 'icon.svg'), 'utf8')
+  const rects = [...svg.matchAll(/<rect x="(\d+)" y="(\d+)" width="(\d+)" height="(\d+)" fill="#([a-f0-9]{6})"\s*\/>/gi)]
+  if (!rects.length || rects.length !== (svg.match(/<rect\b/g) || []).length) throw new Error('icon.svg 必须使用受支持的整数像素矩形')
+  for (const [, sx, sy, sw, sh, color] of rects) {
+    const rgba = [0, 2, 4].map(i => parseInt(color.slice(i, i + 2), 16)).concat(255)
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+      const fx = (x + 0.5) * 32 / size, fy = (y + 0.5) * 32 / size
+      if (fx >= +sx && fx < +sx + +sw && fy >= +sy && fy < +sy + +sh) px.set(rgba, (y * size + x) * 4)
     }
   }
   return px
@@ -279,7 +259,7 @@ function encodePng(size, rgba) {
 }
 
 async function writeAppIcon(icoPath) {
-  const sizes = [16, 24, 32, 48, 64]
+  const sizes = [16, 24, 32, 48, 64, 128, 256]
   const pngs = sizes.map((s) => ({ size: s, data: encodePng(s, drawIconRgba(s)) }))
   const head = Buffer.alloc(6 + 16 * pngs.length)
   head.writeUInt16LE(0, 0) // reserved
@@ -396,6 +376,17 @@ async function step4() {
 async function step5() {
   logStep(5, `复制 node.exe → ${path.basename(TARGET_EXE)}`)
   await fsp.copyFile(NODE_EXE, TARGET_EXE)
+  if (process.platform === 'win32') {
+    const csc = findCsc()
+    if (!csc) throw new Error('写入 EXE 图标需要 .NET Framework C# 编译器')
+    const writer = path.join(BUNDLE, 'icon-resource.exe')
+    const icon = path.join(BUNDLE, 'app.ico')
+    await writeAppIcon(icon)
+    await runCmd(csc, ['/nologo', '/target:exe', `/out:${writer}`, path.join(here, 'host', 'icon-resource.cs')])
+    // Replace the Node icon before adding SEA resources. Updating only host.exe
+    // leaves the downloadable executable with Node's icon in Explorer.
+    await runCmd(writer, [TARGET_EXE, icon])
+  }
 }
 
 // ---------- 6. postject 注入 blob ----------
@@ -471,6 +462,7 @@ async function step8() {
     return
   }
   logStep(8, '冒烟测试生成的 exe')
+  if (process.platform === 'win32') await runCmd(path.join(BUNDLE, 'icon-resource.exe'), [TARGET_EXE, path.join(BUNDLE, 'app.ico'), '--verify'])
   await startAndProbe()
 }
 
