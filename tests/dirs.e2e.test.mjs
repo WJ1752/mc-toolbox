@@ -1,5 +1,6 @@
 // 存储目录迁移端到端测试：更改目录 → 文件完整转移 → 立即生效 → 恢复默认
 import fs from 'node:fs'
+import fsp from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
 import { spawn } from 'node:child_process'
@@ -7,7 +8,11 @@ import { fileURLToPath } from 'node:url'
 
 const SOURCE = fileURLToPath(new URL('..', import.meta.url))
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-tb-isolated-dirs-'))
-for (const name of ['src', 'public', 'server.js', 'package.json']) fs.cpSync(path.join(SOURCE, name), path.join(ROOT, name), { recursive: true })
+// 用异步复制：Node 22.18 的 fs.cpSync 在 Windows 上复制目录时，只要源路径含非 ASCII
+// 字符（本仓库位于 F:\DS数据\...）就会整进程 fastfail（0xC0000409），无任何堆栈。
+for (const name of ['src', 'public', 'server.js', 'package.json']) {
+  await fsp.cp(path.join(SOURCE, name), path.join(ROOT, name), { recursive: true })
+}
 const PORT = 8791
 const BASE = 'http://127.0.0.1:' + PORT
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-tb-dirs-destination-'))

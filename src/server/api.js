@@ -149,6 +149,11 @@ on('PUT', '/api/settings', async (req) => {
   const next = deepMerge(current, body)
   next.version = DEFAULT_SETTINGS.version
   await store.set('settings', next)
+  // 「启动后自动监测」在设置页是即时保存的开关；这里同步启停引擎，
+  // 否则要重启整个工具箱才生效。
+  if (!!next.monitor?.autoStart !== !!current.monitor?.autoStart) {
+    try { monitor.setRunning(!!next.monitor?.autoStart) } catch {}
+  }
   return next
 })
 on('POST', '/api/settings/reset', async () => {
@@ -299,7 +304,9 @@ on('POST', '/api/mods/convert', async (req) => {
       worldPreset: body.worldPreset || '',
       clientModIds: clientModIds(),
       curseForgeApiKey: store.get('settings', DEFAULT_SETTINGS).community?.cfApiKey || '',
-      autoDetectEnv: body.autoDetectEnv !== false,
+      autoDetectEnv: body.autoDetectEnv !== undefined
+        ? body.autoDetectEnv !== false
+        : store.get('settings', DEFAULT_SETTINGS).client2server?.autoDetectEnv !== false,
       installServerCore: true,
       runtime: body.runtime || null,
       memory: body.memory || '4G',
@@ -352,7 +359,9 @@ on('POST', '/api/mods/convert-upload', async (req, _params, query, res) => {
       worldPreset: query.worldPreset || '',
       clientModIds: clientModIds(),
       curseForgeApiKey: store.get('settings', DEFAULT_SETTINGS).community?.cfApiKey || '',
-      autoDetectEnv: query.autoDetectEnv !== 'false',
+      autoDetectEnv: query.autoDetectEnv !== undefined
+        ? query.autoDetectEnv !== 'false'
+        : store.get('settings', DEFAULT_SETTINGS).client2server?.autoDetectEnv !== false,
       uploaded: true,
       installServerCore: true,
       runtime: { mc: query.mc || '', loader: query.loader || '', loaderVersion: query.loaderVersion || '' },
@@ -572,6 +581,13 @@ on('POST', '/api/dirs/change', async (req) => {
 on('POST', '/api/dirs/reset', async (req) => {
   const body = await readBody(req)
   return dirsMgmt.resetDir(String(body.which || ''))
+})
+
+// 一键把三类目录迁移到同一个文件夹（<target>\config|client-mods|data）
+on('POST', '/api/dirs/root', async (req) => {
+  const body = await readBody(req)
+  if (!body.target) return { error: '缺少目标文件夹' }
+  return dirsMgmt.changeRoot(body.target)
 })
 
 // ---------------- 区块编辑（区域文件 / 图形化俯视） ----------------

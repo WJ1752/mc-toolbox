@@ -5,6 +5,21 @@ import { DEFAULT_SETTINGS } from './defaults.js'
 const monitors = () => store.get('monitors', { items: [] })
 const runtime = new Map() // id -> { history, current, fails, streakFails, lastAttempt, checking, totalChecks, totalOk }
 
+// 轮询间隔的合法区间（秒）。旧实现把下限硬编码成 5 秒，导致「1 秒轮询」被静默改回 5 秒。
+const MIN_INTERVAL = 1
+const MAX_INTERVAL = 3600
+// 调度器节拍（ms）。必须明显小于 MIN_INTERVAL*1000，否则 1 秒轮询会被 1000ms 定时器的相位抖动推迟到 2 秒。
+// 250ms 让 1 秒间隔实际落在 1.00–1.25 秒；定时器 unref，4 次/秒的空转成本可以忽略。
+const TICK_MS = 250
+
+// 把任意输入规范成 [MIN_INTERVAL, MAX_INTERVAL] 内的有限数字：字符串会被转成数字，NaN/0/负数回落到 fallback，再回落到默认值。
+function clampInterval(value, fallback = DEFAULT_SETTINGS.monitor.defaultInterval) {
+  const n = Number(value)
+  const f = Number(fallback)
+  const base = Number.isFinite(n) && n > 0 ? n : Number.isFinite(f) && f > 0 ? f : DEFAULT_SETTINGS.monitor.defaultInterval
+  return Math.min(MAX_INTERVAL, Math.max(MIN_INTERVAL, base))
+}
+
 let tickTimer = null
 let running = false
 
@@ -32,6 +47,13 @@ function ensureRuntime(id) {
     })
   }
   return runtime.get(id)
+}
+
+// 正在进行的探测数；用于跨 tick 维持全局并发上限。
+function inFlight() {
+  let n = 0
+  for (const r of runtime.values()) if (r.checking) n++
+  return n
 }
 
 function loadHistory() {
@@ -130,11 +152,15 @@ async function tick() {
   const due = items.filter((m) => {
     const r = ensureRuntime(m.id)
     if (r.checking) return false
-    const interval = Math.max(5, m.interval || s.monitor.defaultInterval) * 1000
+    // 每次都从库里现算间隔，不缓存：编辑后下一拍就生效，无需重启引擎。
+    const interval = clampInterval(m.interval, s.monitor.defaultInterval) * 1000
     return now - r.lastAttempt >= interval
   })
   const limit = Math.max(1, s.network.concurrency || 8)
-  const batch = due.slice(0, limit)
+  // 节拍比最小间隔细，上一拍可能仍有探测未结束，用剩余名额维持全局并发上限。
+  const free = limit - inFlight()
+  if (free <= 0) return
+  const batch = due.slice(0, free)
   await Promise.all(batch.map((m) => runCheck(m).catch(() => {})))
 }
 
@@ -143,9 +169,9 @@ export function startEngine() {
   running = settingsNow().monitor.autoStart === true
   if (tickTimer) { clearInterval(tickTimer); tickTimer = null }
   if (running) {
-    tickTimer = setInterval(tick, 1000)
+    tickTimer = setInterval(tick, TICK_MS)
     tickTimer.unref?.()
-    setTimeout(tick, 500)
+    setTimeout(tick, TICK_MS)
   }
 }
 
@@ -162,7 +188,7 @@ export function isRunning() {
 export function setRunning(v) {
   running = !!v
   if (running && !tickTimer) {
-    tickTimer = setInterval(tick, 1000)
+    tickTimer = setInterval(tick, TICK_MS)
     tickTimer.unref?.()
     setTimeout(tick, 50)
   } else if (!running && tickTimer) {
@@ -184,8 +210,8 @@ export function addMonitor(data) {
     name: (data.name || '').trim() || parsed.host + ':' + parsed.port,
     host: parsed.host,
     port: parsed.port,
-    type: data.type || 'auto',
-    interval: Number(data.interval) || s.monitor.defaultInterval,
+    type: data.type || s.network.defaultType || 'auto',
+    interval: clampInterval(data.interval, s.monitor.defaultInterval),
     color: data.color || null,
     metric: pickMetric(data.metric, s.monitor.defaultMetric),
     createdAt: Date.now(),
@@ -207,6 +233,11 @@ export function updateMonitor(id, patch) {
   for (const k of allowed) {
     if (patch[k] === undefined) continue
     if (k === 'metric' && !METRICS.includes(patch[k])) continue
+    if (k === 'interval') {
+      // 以当前值兜底：写入的一定是 [1,3600] 内的数字，字符串 / NaN 不会落库。
+      db.items[idx].interval = clampInterval(patch.interval, db.items[idx].interval)
+      continue
+    }
     db.items[idx][k] = patch[k]
   }
   store.set('monitors', db)
