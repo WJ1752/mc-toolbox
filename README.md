@@ -1,5 +1,21 @@
 # Minecraft 工具箱
 
+### v1.8.0 内置启动器（Launch Bay）
+
+- 新增独立启动器页面并作为默认主菜单：标题栏「启动器 / 工作台」一键切换，`Ctrl/Cmd+1`、`Ctrl/Cmd+2` 直接跳转。工作台、八个功能磁贴、设置页与所有旧数据保持原样，启动器只新增入口，不替换任何工具。
+- 实例管理：原版、Fabric、Quilt、Forge、NeoForge 安装，原版快照/正式版筛选，加载器版本在线候选；实例名称、分组、内存、窗口、全屏、服务器自动连接、JVM / 游戏参数、Java 覆盖都可单独设置。实例目录按实例隔离，`versions` / `libraries` / `assets` 在启动器根目录共享。
+- 安装使用真实字节进度、SHA-1 校验和可取消任务；Mojang 资源支持 BMCLAPI 镜像与自动回退，Forge/NeoForge 运行官方安装器并校验生成的版本 JSON；NeoForge 安装器依赖可从 BMCLAPI 预取，避免 `maven.neoforged.net` 不可达时卡住。任务日志可在下载中心展开。
+- 账户：离线账户（标准 OfflinePlayer UUID）、微软设备码 OAuth（内置 PCL/HMCL 同款公共客户端，开箱即用；也可在设置中覆盖为自己的 Azure 公共客户端 ID）、authlib-injector 第三方登录；令牌只保存在本机、API 返回一律脱敏，启动前自动刷新/验证，第三方账户启动时自动加载 authlib-injector。
+- 启动：解析 `inheritsFrom` 版本链、OS/arch 规则、Modern/legacy 参数、natives 解压、资源索引、日志配置、legacy `virtual` / `map_to_resources`；支持 Forge ModLauncher（自动把实际客户端 JAR 加入 `ignoreList`）、自动进入服务器、窗口尺寸与全屏。日志实时显示并对 OOM、Java 版本、模组依赖/冲突、显卡驱动、权限、网络给出中文诊断。
+- 内容管理：模组启停/删除/拖入导入、Modrinth / CurseForge 搜索安装、按 SHA-1 检查 Modrinth 更新与缺失前置；资源包启停（写 `options.txt`）；光影、世界、截图、`servers.dat`（可一键设为启动服务器）；日志与崩溃报告查看；下载中心统一展示安装/整合包/更新任务。
+- 整合包：支持 Modrinth `.mrpack` 与 CurseForge ZIP，自动识别 MC/加载器、安装对应加载器、下载缺失文件并解压 overrides；CurseForge 按清单项目/文件 ID 补齐，未开放自动下载会给出可操作的中文提示，手动放入 SHA-1 一致的文件后也会复用。
+- 迁移：可扫描并导入本机官方 / PCL2 / HMCL 等标准 `.minecraft/versions`（只引用原目录，不复制游戏文件），也支持按目录扫描。
+- Java：扫描 PATH、JAVA_HOME、常见 JDK、官方启动器 `runtime`、工具箱内置运行时与 `.jdks`，解析 `java.home` 避免 Oracle `javapath` 垫片导致进程无法停止；可直接下载 Temurin 8–25，并支持一键写入 Aikar 风格 G1 优化参数。
+- 启动器设置：游戏目录、下载源（自动 / 官方 / BMCL）、并发、重试、文件校验、默认内存/窗口、默认 JVM/游戏参数、默认 Java、微软客户端 ID、启动后关闭启动器窗口等。
+- 数据位置：启动器数据默认在运行数据目录的 `minecraft/`（开发模式 `data/minecraft`，EXE 模式 `%LOCALAPPDATA%\MC Toolbox\data\minecraft`）；账户令牌在配置目录的 `launcherAccounts.json`，实例清单在 `launcher.json`。
+- 已知边界：OptiFine 未做自动安装（可用导入已有版本或把 OptiFine JAR 放入 Forge 的 mods）；Prism 的实例元数据（`mmc-pack.json`/patches）暂不直接导入；皮肤只显示官方/第三方档案自带皮肤，不提供上传。
+- 详细设计与接口见 [启动器说明](docs/launcher.md)。
+
 ### v1.7.0 新工作台与一键迁移
 
 - 前端按「The Bench」设计系统整体重做：40px 标题栏、功能 Rail、状态栏、命令面板（`Ctrl/Cmd+K`）、任务抽屉，八个功能磁贴与十个设置分区全部换新。API、设置键名与数据文件保持兼容，旧数据无需迁移。
@@ -274,4 +290,29 @@ GET    /api/dirs                     存储目录（当前/默认/是否自定�
 POST   /api/dirs/change             更改目录并完整迁移文件
 POST   /api/dirs/reset              恢复默认目录（文件迁回）
 GET    /api/data/export               导出配置
+
+# 启动器（详见 docs/launcher.md）
+GET    /api/launcher/bootstrap        启动器设置、实例、账户、任务、会话
+GET/PUT /api/launcher/settings        启动器设置
+GET    /api/launcher/instances        实例列表
+GET/PUT/DELETE /api/launcher/instances/:id   实例详情 / 修改 / 删除
+POST   /api/launcher/instances/:id/launch    启动游戏
+POST   /api/launcher/instances/:id/stop      停止游戏
+GET    /api/launcher/instances/:id/preview   启动命令预览（令牌脱敏）
+GET    /api/launcher/instances/:id/log       实时/已保存日志
+GET    /api/launcher/instances/:id/content   模组/资源包/光影/世界/截图/服务器/日志/崩溃
+POST   /api/launcher/instances/:id/upload    导入 JAR / 资源包（原始字节）
+POST   /api/launcher/instances/:id/servers   增删改 servers.dat
+GET    /api/launcher/versions         Mojang 版本清单（正式版/快照）
+GET    /api/launcher/loaders/:loader/versions 加载器版本候选
+POST   /api/launcher/install          创建安装任务
+GET    /api/launcher/jobs             安装/整合包任务
+POST   /api/launcher/packs/install    安装 .mrpack / CurseForge ZIP
+GET    /api/launcher/java             扫描本机 Java
+GET/POST /api/launcher/accounts       账户列表 / 添加离线账户
+POST   /api/launcher/accounts/ms/start|poll 微软设备码登录
+POST   /api/launcher/accounts/authlib 第三方 authlib-injector 登录
+GET    /api/launcher/import/scan      扫描本机 .minecraft / PCL / HMCL 版本
+POST   /api/launcher/import           导入已有版本（引用原目录）
+GET    /api/launcher/news             Mojang 版本动态
 ```

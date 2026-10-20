@@ -12,6 +12,7 @@ import { btn, iconBtn, errorState, spinner } from './ui/kit.js'
 import { openContextMenu } from './ui/contextmenu.js'
 import { initCommandPalette, openCommandPalette, closeCommandPalette, isCommandPaletteOpen } from './ui/command.js'
 import { openDrawer, closeDrawer, isDrawerOpen } from './ui/drawer.js'
+import { initLauncherPage } from './launcher/index.js'
 
 const APP_TITLE = 'Minecraft 工具箱'
 
@@ -24,7 +25,9 @@ const state = {
   version: '',
   author: 'Rinkore28',
   bench: null,
-  jobs: []
+  jobs: [],
+  page: 'launcher',
+  launcher: null
 }
 
 const SETTINGS_BY_FEATURE = {
@@ -482,6 +485,7 @@ function markRail(id) {
 function navigateFeature(id) {
   const feature = state.features.find((f) => f.id === id)
   if (!feature) return
+  setPage('workbench')
   let tile = state.tiles.get(id)
   if (!tile) {
     if (!feature.enabled) {
@@ -584,6 +588,7 @@ async function expandTile(id) {
   const feature = state.features.find((f) => f.id === id)
   const tile = state.tiles.get(id)
   if (!feature || !tile) return
+  setPage('workbench')
   if (settingsUI?.isOpen()) closeSettingsPage()
   closeContextMenuSafe()
   const view = document.getElementById('benchView')
@@ -649,6 +654,60 @@ function closeBench() {
 function closeContextMenuSafe() {
   const root = document.getElementById('contextRoot')
   if (root) root.hidden = true
+}
+
+/* ------------------------------------------------------------------ */
+/* top-level pages: launcher / workbench                              */
+/* ------------------------------------------------------------------ */
+
+function setPage(page, { silent = false } = {}) {
+  if (!['launcher', 'workbench'].includes(page)) return
+  const launcherEl = document.getElementById('launcherPage')
+  const railEl = document.getElementById('rail')
+  const workspaceEl = document.getElementById('workspace')
+  if (!launcherEl || !railEl || !workspaceEl) return
+  const changed = state.page !== page
+  if (page === 'launcher') {
+    closeBench()
+    closeSettingsPage()
+    closeContextMenuSafe()
+  }
+  state.page = page
+  document.body.dataset.page = page
+  railEl.hidden = page === 'launcher'
+  workspaceEl.hidden = page === 'launcher'
+  launcherEl.hidden = page !== 'launcher'
+  for (const b of document.querySelectorAll('#pageSwitch button')) {
+    const active = b.dataset.page === page
+    b.classList.toggle('active', active)
+    b.setAttribute('aria-pressed', String(active))
+  }
+  if (page === 'launcher') {
+    try { state.launcher?.activate?.() } catch (e) { console.warn('[launcher] activate', e) }
+  } else {
+    try { state.launcher?.deactivate?.() } catch {}
+    requestAnimationFrame(() => grid?.relayout?.())
+  }
+  if (changed && !silent) bus.emit('page:changed', page)
+}
+
+function bindPageSwitch() {
+  for (const b of document.querySelectorAll('#pageSwitch button')) {
+    b.onclick = () => setPage(b.dataset.page)
+  }
+  const sbGame = document.getElementById('sbGame')
+  if (sbGame) sbGame.onclick = () => setPage('launcher')
+}
+
+function showLauncherSkeleton() {
+  const launcherEl = document.getElementById('launcherPage')
+  if (!launcherEl) return
+  document.body.dataset.page = 'launcher'
+  document.getElementById('rail').hidden = true
+  document.getElementById('workspace').hidden = true
+  launcherEl.hidden = false
+  clear(launcherEl)
+  launcherEl.appendChild(h('div', { class: 'lp-main-loading', style: { margin: '40px auto' } }, spinner(18), '正在打开启动器…'))
 }
 
 /* ------------------------------------------------------------------ */
@@ -907,6 +966,25 @@ function openTaskDrawer() {
 
 function commandItems() {
   const items = []
+  const launcherItems = state.launcher?.commandItems?.() || []
+  for (const item of launcherItems) {
+    items.push({
+      ...item,
+      group: '启动器',
+      run: () => {
+        setPage('launcher')
+        setTimeout(() => {
+          try { item.run?.() } catch (e) { toast('启动器操作失败：' + e.message, 'err') }
+        }, 30)
+      }
+    })
+  }
+  if (state.page !== 'launcher') {
+    items.push({ group: '页面', label: '打开启动器', hint: 'Launch Bay', iconName: 'play', run: () => setPage('launcher') })
+  }
+  if (state.page !== 'workbench') {
+    items.push({ group: '页面', label: '打开工作台', hint: 'The Bench', iconName: 'workspace', run: () => setPage('workbench') })
+  }
   for (const f of state.features.filter((x) => x.enabled)) {
     items.push({
       group: '功能',
@@ -1103,7 +1181,25 @@ function handleHeartbeat(st) {
   if (tbText) tbText.textContent = level === 'green' ? '本地服务' : text
 }
 
+function handleLauncherStatus(st = {}) {
+  const dot = document.getElementById('sbGameDot')
+  const text = document.getElementById('sbGameText')
+  const button = document.getElementById('sbGame')
+  if (!dot || !text) return
+  const session = st.session || null
+  if (!session || !['starting', 'running', 'stopping'].includes(session.status)) {
+    dot.className = 'dot'
+    text.textContent = st.runningCount ? `${st.runningCount} 个游戏运行中` : '游戏未运行'
+    button?.setAttribute('title', '切换到启动器')
+    return
+  }
+  dot.className = 'dot ' + (session.status === 'running' ? 'ok' : 'warn')
+  text.textContent = session.status === 'starting' ? '游戏启动中' : session.status === 'stopping' ? '游戏停止中' : `游戏运行中 · ${session.instanceName || ''}`
+  button?.setAttribute('title', '点击打开启动器日志')
+}
+
 async function boot() {
+  showLauncherSkeleton()
   const bootData = await api.get('/api/bootstrap')
   state.settings = bootData.settings
   state.features = bootData.features
@@ -1134,9 +1230,22 @@ async function boot() {
   initNativeChrome()
 
   bus.on('heartbeat:state', handleHeartbeat)
+  bus.on('launcher:status', handleLauncherStatus)
   bus.on('settings:changed', () => refreshEngineStatus())
 
   await syncTiles()
+
+  try {
+    state.launcher = await initLauncherPage({ switchPage: setPage })
+    bindPageSwitch()
+    setPage('launcher', { silent: true })
+  } catch (e) {
+    console.error('[launcher] 初始化失败', e)
+    state.launcher = null
+    setPage('workbench')
+    toast('启动器初始化失败：' + e.message, 'err')
+  }
+
   await refreshEngineStatus()
   await refreshJobs()
   jobsTimer = setInterval(refreshJobs, 2500)
@@ -1147,6 +1256,12 @@ async function boot() {
   }
 
   document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === '1' || e.key === '2')) {
+      if (e.target.closest?.('input, textarea, select, [contenteditable]')) return
+      e.preventDefault()
+      setPage(e.key === '1' ? 'launcher' : 'workbench')
+      return
+    }
     if (e.key !== 'Escape') return
     if (isModalOpen() || isCommandPaletteOpen() || isDrawerOpen()) return
     if (document.getElementById('benchView')?.hidden === false) {
@@ -1171,6 +1286,7 @@ startHeartbeat()
 
 boot().catch((e) => {
   console.error('[boot]', e)
+  try { setPage('workbench') } catch {}
   const gridEl = document.getElementById('grid')
   if (gridEl) {
     clear(gridEl)

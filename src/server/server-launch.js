@@ -32,7 +32,17 @@ export async function probeJava(executable) {
     const version = /(?:java|openjdk) version "([^"]+)"/.exec(output)?.[1] || /java.version\s*=\s*(\S+)/.exec(output)?.[1]
     const major = version?.startsWith('1.') ? Number(version.split('.')[1]) : Number(version?.split(/[.+_-]/)[0])
     if (!major) return null
-    return { path: executable, major, version, bits: /sun.arch.data.model\s*=\s*64|64-Bit/i.test(output) ? 64 : 32 }
+    // Oracle/其他发行版的 `javapath\java.exe` 是一个启动垫片：真正运行游戏的
+    // java.exe 在 java.home\bin 下。使用垫片会让子进程提前退出，导致无法停止
+    // 游戏（进程变成孤儿），所以这里返回真实 java.home 下的路径。
+    let realPath = executable
+    const home = /(?:^|\n)\s*java\.home\s*=\s*(.+?)\s*$/m.exec(output)?.[1]
+    if (home) {
+      const candidate = path.join(home.trim(), 'bin', path.basename(executable))
+      const stat = await fs.stat(candidate).catch(() => null)
+      if (stat?.isFile()) realPath = candidate
+    }
+    return { path: realPath, major, version, bits: /sun.arch.data.model\s*=\s*64|64-Bit/i.test(output) ? 64 : 32 }
   } catch { return null }
 }
 

@@ -22,10 +22,10 @@ export const LOADERS = [
   ['paper', 'Paper']
 ]
 
-async function request(url, { json = true, signal } = {}) {
+async function request(url, { json = true, signal, timeout = TIMEOUT } = {}) {
   const res = await httpFetch(url, {
     headers: { 'User-Agent': UA, Accept: json ? 'application/json' : '*/*' },
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT)]) : AbortSignal.timeout(TIMEOUT),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout),
     redirect: 'follow'
   })
   if (!res.ok) {
@@ -78,23 +78,45 @@ async function fabricLikeLoaders(baseUrl, mc) {
   })
 }
 
-/** Forge：promotions_slim 提供 latest / recommended */
+/** Forge：BMCL 版本接口 + 官方 maven 元数据 + promotions_slim 合并。 */
 async function forgeLoaders(mc) {
-  const [metadata, promotions] = await Promise.allSettled([
-    request(`${FORGE_MAVEN}/maven-metadata.xml`, { json: false }), request(FORGE_PROMOS)
+  // BMCLAPI 的 Forge 版本接口对国内网络最稳定，且覆盖所有 MC 版本；
+  // 官方 maven 元数据作为回退，promotions 只用于标记 recommended / latest。
+  // 三者都加短超时，任何一个不可达都不会拖住整个版本列表。
+  const [bmcl, metadata, promotions] = await Promise.allSettled([
+    request(`https://bmclapi2.bangbang93.com/forge/minecraft/${encodeURIComponent(mc)}`, { timeout: 10000 }),
+    request(`${FORGE_MAVEN}/maven-metadata.xml`, { json: false, timeout: 12000 }),
+    request(FORGE_PROMOS, { timeout: 6000 })
   ])
   const promos = promotions.status === 'fulfilled' ? promotions.value.promos || {} : {}
   const latest = promos[`${mc}-latest`]
   const recommended = promos[`${mc}-recommended`]
+  const versions = new Set()
+  if (bmcl.status === 'fulfilled' && Array.isArray(bmcl.value)) {
+    for (const item of bmcl.value) {
+      const version = String(item?.version || '')
+      if (version) versions.add(version)
+    }
+  }
+  if (metadata.status === 'fulfilled') {
+    for (const match of String(metadata.value).matchAll(/<version>([^<]+)<\/version>/g)) {
+      const full = match[1]
+      if (full.startsWith(mc + '-')) versions.add(full.slice(mc.length + 1))
+    }
+  }
+  if (recommended) versions.add(recommended)
+  if (latest) versions.add(latest)
+  if (!versions.size) {
+    const reason = [bmcl, metadata].find((item) => item.status === 'rejected')?.reason?.message || ''
+    throw new Error(`该 MC 版本没有可用的 Forge：${mc}${reason ? '（' + reason + '）' : ''}`)
+  }
   const out = []
   if (recommended) out.push({ version: recommended, stable: true, label: 'recommended' })
   if (latest && latest !== recommended) out.push({ version: latest, stable: false, label: 'latest' })
-  if (metadata.status === 'fulfilled') {
-    const versions = [...metadata.value.matchAll(/<version>([^<]+)<\/version>/g)]
-      .map(m => m[1]).filter(v => v.startsWith(mc + '-')).map(v => v.slice(mc.length + 1)).sort(compareVersionDesc)
-    for (const version of new Set(versions)) if (!out.some(item => item.version === version)) out.push({ version, stable: true })
+  for (const version of [...versions].sort(compareVersionDesc)) {
+    if (out.some((item) => item.version === version)) continue
+    out.push({ version, stable: true })
   }
-  if (!out.length) throw new Error(`该 MC 版本没有可用的 Forge：${mc}`)
   return out
 }
 
@@ -113,8 +135,9 @@ async function neoforgeLoaders(mc) {
   return matched.slice(0, 30).map((v) => ({ version: v, stable: true }))
 }
 
-/** 1.21.1 -> 21.1 ；1.21 -> 21.0 ；1.20.4 -> 20.4 */
+/** 1.21.1 -> 21.1 ；1.21 -> 21.0 ；1.20.4 -> 20.4 ；1.20.1 是唯一的 Forge 编号 47.1 */
 function mcVersionToNeoPrefix(mc) {
+  if (String(mc) === '1.20.1') return '47.1'
   let p = String(mc).replace(/^1\./, '')
   if (!p.includes('.')) p += '.0'
   return p

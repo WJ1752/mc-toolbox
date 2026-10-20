@@ -16,6 +16,7 @@ export async function hydrateCurseForgeFiles(root, onProgress, signal, { apiKey 
   await fs.mkdir(path.join(root, 'mods'), { recursive: true })
   let done = 0, next = 0
   const errors = []
+  const blocked = []
   const destinations = new Map()
   const worker = async () => {
     while (next < files.length) {
@@ -39,15 +40,34 @@ export async function hydrateCurseForgeFiles(root, onProgress, signal, { apiKey 
         }
         if (meta?.id !== item.fileID || meta?.modId !== item.projectID) throw new Error('缓存文件编号校验失败')
         if (!meta.fileName || path.basename(meta.fileName) !== meta.fileName || /[\\/:]/.test(meta.fileName)) throw new Error('无效的文件名')
-        if (!meta.downloadUrl) throw new Error('作者未开放自动下载，请在启动器安装后选择实例文件夹')
         const sha = meta.hashes?.find(h => h.algo === 1)?.value
         if (!sha) throw new Error('缺少 SHA-1 校验值')
         const destinationKey = meta.fileName.toLowerCase()
         if (destinations.has(destinationKey) && destinations.get(destinationKey) !== sha) throw new Error('清单含有同名但内容不同的文件：' + meta.fileName)
         destinations.set(destinationKey, sha)
-        const cached = path.join(cache, `${item.fileID}-${meta.fileName}`)
-        const existing = await fs.readFile(cached).catch(() => null)
-        if (!existing || crypto.createHash('sha1').update(existing).digest('hex') !== sha) {
+        const cacheFile = path.join(cache, `${item.fileID}-${meta.fileName}`)
+        const localCandidates = [
+          cacheFile,
+          path.join(root, 'mods', meta.fileName),
+          path.join(root, 'resourcepacks', meta.fileName),
+          path.join(root, 'shaderpacks', meta.fileName)
+        ]
+        const looksValid = async (file) => {
+          const bytes = await fs.readFile(file).catch(() => null)
+          return !!bytes && crypto.createHash('sha1').update(bytes).digest('hex') === sha
+        }
+        let cached = ''
+        for (const candidate of localCandidates) {
+          if (await looksValid(candidate)) { cached = candidate; break }
+        }
+        if (!cached && !meta.downloadUrl) {
+          // 作者禁止第三方启动器自动下载。用户若已手动放入同 SHA-1 的文件，
+          // 上面的候选路径会命中；否则给出可操作的中文提示。
+          blocked.push(`${id}（${meta.fileName}）`)
+          throw new Error('作者未开放自动下载')
+        }
+        if (!cached) {
+          cached = cacheFile
           await download(meta.downloadUrl, cached, { signal, size: meta.fileLength, hash: sha, algorithm: 'sha1', onProgress: ({ received, total }) => onProgress?.({ stage: 'mods-download', progress: 28 + done / files.length * 15, detail: `CurseForge ${done}/${files.length}：${meta.fileName} · ${Math.round(received / 1024)} / ${Math.round(total / 1024)} KB` }) })
         }
         let folder = 'mods'
@@ -70,6 +90,11 @@ export async function hydrateCurseForgeFiles(root, onProgress, signal, { apiKey 
   const settled = await Promise.allSettled(Array.from({ length: 4 }, worker))
   signal?.throwIfAborted()
   for (const r of settled) if (r.status === 'rejected') throw r.reason
-  if (errors.length) throw new Error(`CurseForge 安装包有 ${errors.length} 个文件未能补齐，不能生成完整服务端。请重试（已下载文件会复用）或在启动器安装后选择实例文件夹。\n${errors.join('\n')}`)
+  if (errors.length) {
+    const suggestion = blocked.length
+      ? `其中 ${blocked.length} 个文件被作者设置为「禁止第三方启动器自动下载」：\n${blocked.join('\n')}\n请先用 CurseForge 官方启动器安装一次，或在浏览器中手动下载这些文件后放入实例的 mods / resourcepacks / shaderpacks 目录。`
+      : '请检查网络后重试（已下载文件会复用），或改用 CurseForge 官方启动器安装。'
+    throw new Error(`CurseForge 整合包有 ${errors.length} 个文件未能补齐。${suggestion}\n${errors.join('\n')}`)
+  }
   return { downloaded: done, metadataSource: (apiKey || process.env.CURSEFORGE_API_KEY) ? 'CurseForge 官方 API' : 'curse.tools 公共元数据服务；文件来自作者提供的下载地址并校验 SHA-1' }
 }

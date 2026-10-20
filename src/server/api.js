@@ -21,6 +21,7 @@ import * as region from './region.js'
 import { setProxy } from './http.js'
 import * as i18n from './i18n.js'
 import * as javaRuntime from './java-runtime.js'
+import { registerLauncherApi } from './launcher/api.js'
 import { AUTHOR, PRODUCT_VERSION } from './build-meta.js'
 
 const MIME = {
@@ -96,6 +97,9 @@ function readRawBody(req, maxBytes = 2 * 1024 * 1024 * 1024) {
 
 const routes = []
 const on = (method, pattern, handler) => routes.push({ method, pattern, handler })
+
+// 启动器（MC launcher）路由：独立模块注册，避免把它和工具箱原有接口混在一起。
+registerLauncherApi(on, { readBody, readRawBody })
 
 // 客户端心跳状态 —— server.js 用它判断「应用窗口是否还开着」。
 // 为什么不用 Edge 子进程的 exit 事件：Edge/Chrome 多进程架构下，spawn 出来的
@@ -412,8 +416,8 @@ on('GET', '/api/community/search', async (_req, _p, q) => {
   const args = {
     query: q.query || '',
     type: q.type || '',
-    gameVersion: q.gameVersion || s.community.defaultGameVersion || '',
-    loader: q.loader || s.community.defaultLoader || '',
+    gameVersion: q.gameVersion === 'all' ? '' : (q.gameVersion || s.community.defaultGameVersion || ''),
+    loader: q.loader === 'none' ? '' : (q.loader || s.community.defaultLoader || ''),
     limit: Number(q.limit) || s.community.pageSize || 20,
     offset: Number(q.offset) || 0,
     sort: q.sort || 'relevance'
@@ -430,7 +434,10 @@ on('GET', '/api/community/project', async (_req, _p, q) => {
 
 on('GET', '/api/community/versions', async (_req, _p, q) => {
   if (!q.id) return { error: '缺少项目 ID' }
-  const opt = { gameVersion: q.gameVersion || '', loader: q.loader || '' }
+  const opt = {
+    gameVersion: q.gameVersion === 'all' ? '' : (q.gameVersion || ''),
+    loader: q.loader === 'none' ? '' : (q.loader || '')
+  }
   return q.source === 'curseforge'
     ? community.curseforgeVersions(q.id, { ...opt, key: cfKey() })
     : community.modrinthVersions(q.id, opt)
@@ -445,7 +452,9 @@ on('POST', '/api/community/download', async (req) => {
     filename: body.filename,
     dir: body.dir,
     title: body.title,
-    meta: body.meta || {}
+    meta: body.meta || {},
+    preserveName: body.preserveName === true,
+    exactDir: body.exactDir === true
   })
 })
 
@@ -472,6 +481,7 @@ on('DELETE', '/api/community/jobs', async (_req, _p, q) => {
   const scope = String((q && q.scope) || '')
   return { ok: community.clearJobs(scope || undefined) }
 })
+on('POST', '/api/community/jobs/clear-finished', async () => ({ ok: true, removed: community.clearFinishedJobs() }))
 
 // ---------------- 服务端核心下载 ----------------
 on('GET', '/api/servercore/loaders', async () => ({ items: servercore.LOADERS }))
@@ -980,6 +990,8 @@ export async function requestHandler(req, res) {
         const params = match(r.pattern, pathname)
         if (!params) continue
         const data = await r.handler(req, params, query, res)
+        // File/stream handlers write the response themselves.
+        if (res.writableEnded) return
         sendJson(res, 200, data)
         return
       }

@@ -432,7 +432,7 @@ body.dragging-tile * { cursor: grabbing !important; }
 .sb-btn b { color: var(--dim); font-weight: 500; }
 .sb-sep { width: 1px; height: 11px; background: var(--line); flex: none; }
 .sb-spacer { flex: 1; }
-.sb-version { font-family: var(--font-mono); font-size: 10px; color: var(--mute); margin-right: 66px; }
+.sb-version { font-family: var(--font-mono); font-size: 10px; color: var(--mute); margin-right: 92px; }
 .sb-author {
   font-family: var(--font-mono);
   font-size: 9.5px;

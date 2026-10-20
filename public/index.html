@@ -11,6 +11,7 @@
 <link rel="stylesheet" href="/css/components.css" />
 <link rel="stylesheet" href="/css/shell.css" />
 <link rel="stylesheet" href="/css/features.css" />
+<link rel="stylesheet" href="/css/launcher.css" />
 </head>
 <body>
   <div class="app-shell">
@@ -22,6 +23,10 @@
           <span class="brand-version" id="brandVersion" aria-label="版本"></span>
         </div>
       </div>
+      <nav class="page-switch" id="pageSwitch" aria-label="页面切换">
+        <button type="button" data-page="launcher" class="active">启动器</button>
+        <button type="button" data-page="workbench">工作台</button>
+      </nav>
       <div class="titlebar-center">
         <button class="tb-status" id="tbStatus" type="button" title="本地服务状态">
           <span class="dot ok" id="tbDot"></span>
@@ -76,6 +81,7 @@
           </div>
         </div>
       </main>
+      <main class="launcher-page" id="launcherPage" hidden></main>
     </div>
 
     <footer class="statusbar">
@@ -85,6 +91,8 @@
       <button class="sb-btn" id="sbEngine" type="button" title="监测引擎状态（打开设置）"><span class="dot" id="sbEngineDot"></span>监测引擎 <b id="sbEngineText">已暂停</b></button>
       <span class="sb-sep"></span>
       <button class="sb-btn" id="sbTasks" type="button" title="打开任务抽屉"><span id="sbTaskText">任务 0</span></button>
+      <span class="sb-sep"></span>
+      <button class="sb-btn" id="sbGame" type="button" title="切换到启动器"><span class="dot" id="sbGameDot"></span><span id="sbGameText">游戏未运行</span></button>
       <span class="sb-spacer"></span>
       <span class="sb-version" id="sbVersion"></span>
       <div class="author-watermark" aria-hidden="true">Rinkore28</div>

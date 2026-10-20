@@ -6,7 +6,11 @@ import { progress, select, btn } from '../ui/kit.js'
 
 export function recommendedJava(runtime = {}) {
   if (runtime.loader === 'cleanroom') return /^0\.[0-5]\./.test(runtime.loaderVersion || '') ? 21 : 25
-  const [, minor, patch = '0'] = /^1\.(\d+)(?:\.(\d+))?$/.exec(runtime.mc || '') || []
+  const mc = String(runtime.mc || '')
+  // New-style versions (26.x and later) use the Java 25 runtime.
+  const modern = /^(\d+)\./.exec(mc)
+  if (modern && Number(modern[1]) >= 2) return 25
+  const [, minor, patch = '0'] = /^1\.(\d+)(?:\.(\d+))?$/.exec(mc) || []
   return Number(minor) > 20 || (Number(minor) === 20 && Number(patch) >= 5) ? 21 : Number(minor) >= 18 ? 17 : Number(minor) === 17 ? 16 : 8
 }
 

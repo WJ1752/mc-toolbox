@@ -669,3 +669,14 @@ export function clearJobs(scope) {
   pump()
   return true
 }
+
+/** Remove only finished jobs; active downloads keep running. */
+export function clearFinishedJobs() {
+  let removed = 0
+  for (const [id, job] of jobs) {
+    if (['running', 'queued', 'installing'].includes(job.status)) continue
+    jobs.delete(id)
+    removed++
+  }
+  return removed
+}
