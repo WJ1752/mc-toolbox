@@ -2,7 +2,7 @@
 
 基线：`v1.6.3` / `9a299c0`（`main`）
 新版分支：`rewrite/frontend-bench-v1`
-范围：只重写 `public/`，`server.js`、`src/server/**`、`host/**`、`build.mjs` 未改动。
+范围：只重写 `public/`，`server.js`、`src/server/**`、`host/**`、`build.mjs` 未改动（v1.7.0 发布时另含 `src/server/dirs.js`、`api.js`、`monitor.js` 的目录迁移与轮询修复，见 README 更新说明）。
 
 ## 1. 一句话
 
