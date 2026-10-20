@@ -1,5 +1,6 @@
 import { h, clear, copyText, fmtAgo, escapeHtml, sanitizeMinecraftHtml } from '/js/core/dom.js'
 import { api } from '/js/core/api.js'
+import { attachHostPortInput } from '/js/core/address.js'
 import { openModal, confirmDialog } from '/js/core/modal.js'
 import { toast } from '/js/core/toast.js'
 import { icon } from '/js/ui/icons.js'
@@ -43,6 +44,8 @@ function buildStatus(ctx, container, { expanded }) {
   portInput.style.width = '78px'
   portInput.setAttribute('aria-label', '端口')
   portInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') run() })
+  // 地址框支持直接粘贴「主机:端口」，粘贴 / 失焦 / 回车时自动拆到地址和端口两个框
+  const addrPair = attachHostPortInput(hostInput, portInput)
   const typeSel = select([['auto', '自动'], ['java', 'Java 版'], ['bedrock', '基岩版']], net.defaultType || 'auto', { ariaLabel: '服务器类型' })
   typeSel.style.width = '96px'
   typeSel.onchange = () => {
@@ -150,6 +153,8 @@ function buildStatus(ctx, container, { expanded }) {
     const alias = input({ placeholder: '别名（显示在快捷上）' })
     const host = input({ placeholder: '域名 / IP，如 mc.example.com', mono: true })
     const port = input({ type: 'number', value: '25565', mono: true })
+    // 快捷项同样支持粘贴「域名:端口」
+    const addrQuick = attachHostPortInput(host, port)
     const type = select([['auto', '自动'], ['java', 'Java 版'], ['bedrock', '基岩版']], 'java')
     const body = h('div', { class: 'col', style: { gap: '9px' } },
       field('别名', alias),
@@ -165,6 +170,7 @@ function buildStatus(ctx, container, { expanded }) {
           label: '保存',
           class: 'btn-primary',
           onClick: async (m) => {
+            addrQuick.flush()
             const hv = host.value.trim()
             if (!hv) { toast('请填写域名 / IP', 'err'); host.focus(); return }
             const a = alias.value.trim() || hv
@@ -197,6 +203,8 @@ function buildStatus(ctx, container, { expanded }) {
   }
 
   async function run() {
+    // 回车 / 点「测试」时先补一次拆分，避免用户没触发 blur 就提交「host:port」
+    addrPair.flush()
     const host = hostInput.value.trim()
     if (!host) {
       toast('请输入服务器地址', 'err')

@@ -1,6 +1,7 @@
 // Latency monitor — gauge cards, detail dialog and the expanded bench.
 import { h, clear, fmtAgo, fmtTime } from '/js/core/dom.js'
 import { api } from '/js/core/api.js'
+import { attachHostPortInput } from '/js/core/address.js'
 import { openModal, confirmDialog } from '/js/core/modal.js'
 import { toast } from '/js/core/toast.js'
 import { TileGrid } from '/js/core/grid.js'
@@ -11,6 +12,17 @@ const PALETTE = ['#5ec96a', '#3ba0ff', '#c084fc', '#ff8a4c', '#22d3ee', '#eab308
 const METRIC_KEYS = ['latency', 'players', 'loss']
 const METRIC_LABEL = { latency: '延迟', players: '在线人数', loss: '丢包率' }
 const POLL_MS = 4000
+// 轮询间隔的合法区间（秒），必须与服务端 monitor.js 的 MIN_INTERVAL / MAX_INTERVAL 保持一致。
+const MIN_INTERVAL = 1
+const MAX_INTERVAL = 3600
+
+// 把输入框的任意值规范成 [1, 3600] 内的数字；非法值回落到默认间隔。
+function clampInterval(value, fallback) {
+  const n = Number(value)
+  const f = Number(fallback)
+  const base = Number.isFinite(n) && n > 0 ? n : Number.isFinite(f) && f > 0 ? f : 30
+  return Math.min(MAX_INTERVAL, Math.max(MIN_INTERVAL, base))
+}
 
 let ctxRef = null
 let innerGrid = null
@@ -354,9 +366,12 @@ function applyTileHeightPolicy() {
   const mon = (ctxRef ? ctxRef.settings() : {}).monitor || {}
   const mode = mon.tileHeightMode || 'fixed'
   const val = Math.max(40, Number(mon.tileHeight) || 100)
+  // maxTileWidth is a live preference too: changing it must not need a reload.
+  const maxW = Number(mon.maxTileWidth)
   for (const m of snapshot.items) {
     const card = innerGrid.get(m.id)
     if (!card) continue
+    card.style.maxWidth = maxW > 0 ? maxW + 'px' : ''
     if (mode === 'auto') {
       card.style.height = 'auto'
       card.style.maxHeight = ''
@@ -689,11 +704,22 @@ function openEditor(existing, isEdit) {
   const nameIn = input({ value: existing?.name || '', placeholder: '留空则使用地址' })
   const hostIn = input({ value: existing?.host || '', placeholder: 'mc.example.com', mono: true })
   const portIn = input({ type: 'number', value: String(existing?.port || (isBedrock ? net.bedrockPort : net.javaPort)), mono: true })
+  // 地址框支持直接粘贴「主机:端口」，粘贴 / 失焦 / 保存时自动拆到地址和端口两个框
+  const addrPair = attachHostPortInput(hostIn, portIn)
   const typeIn = select([['auto', '自动识别'], ['java', 'Java 版'], ['bedrock', '基岩版']], existing?.type || net.defaultType || 'auto', { ariaLabel: '服务器类型' })
   typeIn.addEventListener('change', () => {
     portIn.value = String(typeIn.value === 'bedrock' ? net.bedrockPort : net.javaPort)
   })
-  const intervalIn = input({ type: 'number', min: 5, value: String(existing?.interval || mon.defaultInterval), mono: true })
+  const intervalIn = input({
+    type: 'number',
+    min: MIN_INTERVAL,
+    max: MAX_INTERVAL,
+    step: 1,
+    value: String(clampInterval(existing?.interval, mon.defaultInterval)),
+    placeholder: '1–3600',
+    title: `允许范围 ${MIN_INTERVAL}–${MAX_INTERVAL} 秒`,
+    mono: true
+  })
   const metricDefault = METRIC_KEYS.includes(existing?.metric)
     ? existing.metric
     : METRIC_KEYS.includes(mon.defaultMetric) ? mon.defaultMetric : 'latency'
@@ -721,7 +747,7 @@ function openEditor(existing, isEdit) {
       field('类型', typeIn)
     ),
     h('div', { class: 'row' },
-      field('轮询间隔（秒）', intervalIn, { class: 'grow' }),
+      field('轮询间隔（秒）', intervalIn, { class: 'grow', hint: `允许 ${MIN_INTERVAL}–${MAX_INTERVAL} 秒；保存后下一拍即按新间隔轮询` }),
       field('图表指标', metricIn)
     ),
     field('磁贴颜色', colors)
@@ -733,12 +759,14 @@ function openEditor(existing, isEdit) {
       label: isEdit ? '保存' : '添加',
       class: 'btn-primary',
       onClick: async (m) => {
+        // 提交前再补一次拆分，避免没触发 blur 就提交「host:port」
+        addrPair.flush()
         const payload = {
           name: nameIn.value.trim(),
           host: hostIn.value.trim(),
           port: Number(portIn.value) || undefined,
           type: typeIn.value,
-          interval: Number(intervalIn.value) || mon.defaultInterval,
+          interval: clampInterval(intervalIn.value, mon.defaultInterval),
           metric: metricIn.value,
           color: colors.querySelector('.active')?.style.background || null
         }

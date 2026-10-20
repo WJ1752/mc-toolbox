@@ -31,8 +31,20 @@ function setupCanvas(canvas) {
   return { ctx, w, h, dpr }
 }
 
+// Charts follow the 24h/12h preference from 设置 → 通用 → 时间格式.
+// Reading it once from a module flag keeps every draw call (axis labels, hover
+// tooltips, sparks) consistent without threading an option through each one.
+let timeFormat12h = false
+
+export function setChartTimeFormat(value) {
+  timeFormat12h = value === true || value === '12h'
+}
+
 function timeLabel(t) {
   const d = new Date(t)
+  if (timeFormat12h) {
+    return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: true })
+  }
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 

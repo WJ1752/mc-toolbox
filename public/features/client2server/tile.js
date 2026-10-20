@@ -31,6 +31,16 @@ const LOADERS = [
 
 const LOADER_LABELS = { recommended: '推荐', latest: '最新' }
 
+// 设置 → 服务端核心 → 分配内存（如 "2G" / "4096M"）是转换出的服务端启动脚本的
+// 默认上限；转换面板把同一个数值作为初值，避免设置里填了却完全不生效。
+function memoryGbFromSettings(ctx) {
+  const raw = String(ctx?.settings?.()?.servercore?.memory || '').trim()
+  const n = Number.parseFloat(raw)
+  if (!Number.isFinite(n) || n <= 0) return 4
+  const gb = /m/i.test(raw) ? n / 1024 : n
+  return Math.min(256, Math.max(1, Math.round(gb) || 4))
+}
+
 // enable 没有独立文案：沿用旧实现的 backup 兜底文案，保持确认内容一致。
 const APPLY_MODES = {
   delete: { verb: '删除', tail: '<b class="result-bad">删除后无法恢复！</b>', ok: '确认删除' },
@@ -613,7 +623,7 @@ function buildCleanPanel(inst) {
 /* ------------------------------------------------------------------ */
 
 function buildConvertPanel(inst) {
-  const { expanded, uid } = inst
+  const { expanded, uid, ctx } = inst
   const panel = h('div', { class: 'col', style: { gap: '8px' } })
 
   const c = {
@@ -695,7 +705,7 @@ function buildConvertPanel(inst) {
     min: '1',
     max: '256',
     step: '1',
-    value: '4',
+    value: String(memoryGbFromSettings(ctx)),
     mono: true
   })
   const minMemoryInput = input({

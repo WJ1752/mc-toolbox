@@ -21,12 +21,14 @@
 .dotline { display: flex; align-items: center; gap: 6px; font-size: var(--fs-11); color: var(--mute); }
 
 /* ---------------- server status ---------------- */
-.ss-form { display: grid; grid-template-columns: minmax(0, 1fr) 78px 96px auto; gap: 7px; align-items: end; }
-.ss-form > .field:last-child { justify-self: start; }
-@media (max-width: 760px) {
-  .ss-form { grid-template-columns: minmax(0, 1fr) 78px; }
-  .ss-form > .field:last-child { grid-column: 1 / -1; }
-}
+/* Wrap the address field onto its own row before the fixed-width
+   port/type/test controls squeeze it into a vertical label. */
+.ss-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 7px; }
+.ss-form > .field { min-width: 0; }
+.ss-form > .field:nth-child(1) { flex: 1 1 100px; }
+.ss-form > .field:nth-child(2) { flex: 0 0 78px; }
+.ss-form > .field:nth-child(3) { flex: 0 0 96px; }
+.ss-form > .field:last-child { flex: 0 0 auto; }
 .ss-quickbar {
   display: flex;
   align-items: center;
@@ -77,18 +79,21 @@
   overflow: hidden;
   color: var(--mute);
 }
-.ss-icon img { width: 64px; height: 64px; image-rendering: pixelated; display: block; }
+.ss-icon img { width: 100%; height: 100%; object-fit: cover; image-rendering: pixelated; display: block; }
 .ss-main { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .ss-motel { font-size: var(--fs-13); font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
 .ss-version { font-size: var(--fs-11); color: var(--mute); font-family: var(--font-mono); }
-.ss-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; margin-top: 5px; border-top: 1px solid var(--line); padding-top: 6px; }
-.ss-fact { padding-right: 9px; border-right: 1px solid color-mix(in srgb, var(--line) 70%, transparent); min-width: 0; }
-.ss-fact:last-child { border-right: 0; }
+/* Metrics flow into 3 / 2 / 1 columns instead of forcing three narrow
+   tracks that clip long hosts and split "online / max" across lines. */
+.ss-facts { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 5px 0; margin-top: 5px; border-top: 1px solid var(--line); padding-top: 6px; }
+.ss-fact { flex: 1 1 118px; min-width: 0; padding-right: 10px; }
+.ss-fact:last-child { padding-right: 0; }
 .ss-fact label { display: block; font-size: 9.5px; letter-spacing: .05em; color: var(--mute); text-transform: uppercase; }
-.ss-fact b { font-size: var(--fs-12); font-weight: 600; font-variant-numeric: tabular-nums; }
+.ss-fact b { display: block; min-width: 0; font-size: var(--fs-12); font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.4; overflow-wrap: anywhere; }
 .ss-players { display: flex; flex-wrap: wrap; gap: 4px; }
 .ss-player { font-size: 10.5px; font-family: var(--font-mono); color: var(--dim); padding: 1px 5px; border: 1px solid var(--line); border-radius: 2px; background: var(--surface-2); }
-.ss-foot { display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: var(--mute); }
+.ss-foot { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 8px; font-size: 10.5px; color: var(--mute); }
+.ss-foot > span { white-space: nowrap; }
 .ss-empty { color: var(--mute); font-size: var(--fs-12); padding: 18px 0; text-align: center; }
 
 /* ---------------- latency monitor ---------------- */
@@ -195,7 +200,9 @@
   padding: 1px 0 6px;
   background: linear-gradient(var(--surface) 82%, transparent);
 }
-.cd-search-row { display: flex; gap: 6px; align-items: center; }
+.cd-search-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.cd-search-row > .grow { flex: 1 1 300px; min-width: 0; }
+.cd-search-row .seg { flex: 0 1 auto; min-width: 0; }
 .cd-search-row .input { height: 30px; }
 .cd-typebar { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; padding-bottom: 1px; }
 .cd-typebar::-webkit-scrollbar { display: none; }
@@ -427,4 +434,15 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   max-height: 200px;
+}
+
+/* ---------------- narrow tiles (4 columns / compact window) ----------------
+   The tile is the container (see .tile in shell.css). At this width a
+   horizontal three-step header and two-column result grid no longer fit. */
+@container (max-width: 330px) {
+  .wizard-steps { flex-direction: column; align-items: stretch; gap: 5px; }
+  .wizard-step { flex: none; }
+  .wizard-step::after { display: none; }
+  .wizard-step .t { white-space: normal; overflow: visible; }
+  .cd-results, .cd-versions { grid-template-columns: 1fr; }
 }

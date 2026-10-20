@@ -276,7 +276,7 @@ export function initSettings(ctx) {
             ),
             card('下载代理', '作用于社区资源下载与服务端核心下载（含安装器联网）',
               row('代理地址', '如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080；支持 user:pass@ 认证，留空直连',
-                h('div', { style: { width: '300px', maxWidth: '100%' } }, textField(() => S.network.proxy, (v) => (S.network.proxy = v), 'http://127.0.0.1:7890')))
+                h('div', { class: 'ctrl-wide' }, textField(() => S.network.proxy, (v) => (S.network.proxy = v), 'http://127.0.0.1:7890')))
             )
           )
         }
@@ -322,7 +322,7 @@ export function initSettings(ctx) {
 
           return panel('延迟监测', '影响所有监测磁贴与展开图表。',
             card('监测策略', '采样与展示',
-              row('默认轮询间隔', '新增监测项时使用', numField(() => S.monitor.defaultInterval, (v) => (S.monitor.defaultInterval = v), { min: 5, max: 3600, step: 5, suffix: '秒' })),
+              row('默认轮询间隔', '新增监测项时使用', numField(() => S.monitor.defaultInterval, (v) => (S.monitor.defaultInterval = v), { min: 1, max: 3600, step: 1, suffix: '秒' })),
               row('默认图表指标', '新增监测项默认显示的指标', segField(() => S.monitor.defaultMetric, (v) => (S.monitor.defaultMetric = v), [['latency', '延迟'], ['players', '在线人数'], ['loss', '丢包率']])),
               row('历史保留点数', '每个监测项保留的采样数量', numField(() => S.monitor.historyPoints, (v) => (S.monitor.historyPoints = v), { min: 60, max: 10080, step: 60, suffix: '点' })),
               row('离线判定阈值', '连续失败达到该次数判定离线', numField(() => S.monitor.offlineAfter, (v) => (S.monitor.offlineAfter = v), { min: 1, max: 10, suffix: '次' })),
@@ -364,7 +364,7 @@ export function initSettings(ctx) {
         render() {
           return panel('社区资源', 'Modrinth 无需密钥；CurseForge 需要 Eternal API Key（免费，非商业用途）。',
             card('平台与凭据', '',
-              row('CurseForge API Key', '只保存在本地 settings.json', h('div', { style: { width: '300px', maxWidth: '100%' } }, textField(() => S.community.cfApiKey, (v) => (S.community.cfApiKey = v), '粘贴你的 Eternal API Key'))),
+              row('CurseForge API Key', '只保存在本地 settings.json', h('div', { class: 'ctrl-wide' }, textField(() => S.community.cfApiKey, (v) => (S.community.cfApiKey = v), '粘贴你的 Eternal API Key'))),
               row('默认来源', '', segField(() => S.community.defaultSource, (v) => (S.community.defaultSource = v), [['modrinth', 'Modrinth'], ['curseforge', 'CurseForge']])),
               row('默认游戏版本', '例如 1.20.1，留空不限', textField(() => S.community.defaultGameVersion, (v) => (S.community.defaultGameVersion = v), '1.20.1')),
               row('默认加载器', '', segField(() => S.community.defaultLoader, (v) => (S.community.defaultLoader = v), [['', '不限'], ['fabric', 'Fabric'], ['forge', 'Forge'], ['neoforge', 'NeoForge'], ['quilt', 'Quilt']]))
@@ -377,7 +377,7 @@ export function initSettings(ctx) {
               row('按类型建子目录', 'mod / 整合包 / 光影等分别存到对应文件夹', switchField(() => S.community.subdirByType, (v) => (S.community.subdirByType = v))),
               row('命名规则', '占位符：{project} {version} {loader} {gameversion} {type} {source} {date} {time} {filename} {ext}',
                 h('div', { class: 'row', style: { gap: '5px', flexWrap: 'wrap' } },
-                  h('div', { style: { width: '300px', maxWidth: '100%' } }, monoField(() => S.community.nameRule, (v) => (S.community.nameRule = v), '{project}-{version}{ext}')),
+                  h('div', { class: 'ctrl-wide' }, monoField(() => S.community.nameRule, (v) => (S.community.nameRule = v), '{project}-{version}{ext}')),
                   btn('预览', { size: 'sm', onClick: async () => {
                     try {
                       const r = await api.post('/api/community/preview-name', {
@@ -703,8 +703,49 @@ export function initSettings(ctx) {
       clientModsDir: { label: 'mod 库目录', desc: '仅客户端 mod 库（clientmods.json）' },
       dataDir: { label: '运行数据目录', desc: '历史曲线、日志等运行数据' }
     }
+    // 一键迁移入口：三类目录同源，放在逐目录设置之上。
+    // 高亮用内联样式（公共样式表由其他改动维护，这里不新增选择器，避免互相覆盖）。
+    function rootRow() {
+      const rootBtn = btn('选择文件夹并迁移…', { variant: 'primary', size: 'sm', onClick: async () => {
+        const target = await pickDir('', { title: '选择迁移目标文件夹' })
+        if (!target) return
+        // 仅用于确认框展示：按用户所选路径的分隔符拼接（服务端最终会自己 resolve）
+        const sep = target.includes('\\') ? '\\' : '/'
+        const sub = (name) => target.replace(/[\\/]+$/, '') + sep + name
+        const ok = await confirmDialog(
+          `把三类目录一起迁移到：\n  ${target}\n\n` +
+          `配置目录：\n  ${dirs.configDir}\n  → ${sub('config')}\n\n` +
+          `mod 库目录：\n  ${dirs.clientModsDir}\n  → ${sub('client-mods')}\n\n` +
+          `运行数据目录：\n  ${dirs.dataDir}\n  → ${sub('data')}\n\n` +
+          '所有文件会先复制并校验，三类全部通过后才清空原位置。迁移中请勿关闭应用。',
+          { danger: true, okText: '迁移' })
+        if (!ok) return
+        rootBtn.disabled = true
+        try {
+          const r = await api.post('/api/dirs/root', { target })
+          if (r.error) throw new Error(r.error)
+          toast(`已迁移 ${r.files} 个文件（${fmtSize(r.bytes)}）到 ${r.root}`, 'ok')
+          dirs = await api.get('/api/dirs')
+          renderDirRows()
+        } catch (e) {
+          toast('迁移失败：' + e.message, 'err')
+        } finally { rootBtn.disabled = false }
+      } })
+      const node = row('一键迁移到单个文件夹',
+        '配置、mod 库与运行数据会一起搬到所选文件夹的 config / client-mods / data 子目录，便于整包备份或换机',
+        rootBtn)
+      node.style.padding = '10px 12px'
+      node.style.margin = '6px 0 2px'
+      node.style.border = '1px solid color-mix(in srgb, var(--accent) 40%, var(--line))'
+      node.style.borderRadius = 'var(--r-2)'
+      node.style.background = 'color-mix(in srgb, var(--accent) 8%, transparent)'
+      return node
+    }
     function renderDirRows() {
       clear(box)
+      box.appendChild(rootRow())
+      box.appendChild(h('p', { class: 'settings-note' },
+        `一键迁移不会搬走引导文件 dirs.json，它始终留在默认数据目录（${dirs.dirsFile}），请勿删除。`))
       for (const which of dirs.movable || ['configDir', 'clientModsDir', 'dataDir']) {
         box.appendChild(dirRow(which))
       }

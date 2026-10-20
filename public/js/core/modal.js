@@ -147,10 +147,19 @@ export function isModalOpen() {
   return stack.length > 0
 }
 
+// 设置 → 通用 → 危险操作二次确认。关闭后所有标记为 danger 的确认框直接放行，
+// 这样各个功能里的删除/清空操作都统一服从这一个开关（此前只有少数调用点检查）。
+let dangerConfirmEnabled = true
+
+export function setDangerConfirmEnabled(v) {
+  dangerConfirmEnabled = v !== false
+}
+
 /**
  * Confirmation dialog. Resolves false when dismissed via Esc / backdrop / cancel.
  */
 export function confirmDialog(message, { title = '确认操作', danger = false, okText = '确定', cancelText = '取消' } = {}) {
+  if (danger && dangerConfirmEnabled === false) return Promise.resolve(true)
   return new Promise((resolve) => {
     let done = false
     const finish = (v) => {

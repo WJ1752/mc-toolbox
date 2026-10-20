@@ -2,8 +2,9 @@ import { api } from './core/api.js'
 import { h, clear, $, debounce, escapeHtml } from './core/dom.js'
 import { toast } from './core/toast.js'
 import { TileGrid } from './core/grid.js'
+import { setChartTimeFormat } from './core/chart.js'
 import { initSettings } from './core/settings.js'
-import { openModal, confirmDialog, isModalOpen } from './core/modal.js'
+import { openModal, confirmDialog, isModalOpen, setDangerConfirmEnabled } from './core/modal.js'
 import { bus } from './core/bus.js'
 import { startHeartbeat } from './core/heartbeat.js'
 import { icon, featureIcon, FEATURE_ICONS } from './ui/icons.js'
@@ -43,6 +44,7 @@ let commandUI
 let jobsTimer = null
 let engineTimer = null
 let railActive = ''
+let lastColumns = 0
 
 /* ------------------------------------------------------------------ */
 /* settings application                                                */
@@ -56,23 +58,30 @@ function applySettings() {
   document.documentElement.style.setProperty('--accent', s.general.accent || '#c07a4a')
   document.documentElement.style.setProperty('--tile-cols', String(cols))
   document.body.classList.toggle('no-anim', s.general.animations === false)
+  setChartTimeFormat(s.general.timeFormat === '12h')
+  setDangerConfirmEnabled(s.general.confirmDanger !== false)
   grid?.setAnimations(s.general.animations !== false)
   grid?.relayout?.()
   syncColumnControl(cols)
   updateTileActionLabels()
 }
 
-function syncColumnControl(cols) {
+function syncColumnControl(cols, effective) {
   const wrap = document.getElementById('colSegWrap')
   if (!wrap) return
-  // At <=1100px the CSS forces a single column; reflect what the grid really uses.
-  const computed = Number.parseInt(getComputedStyle(document.documentElement).getPropertyValue('--tile-cols'), 10)
-  const active = Number.isFinite(computed) && computed > 0 ? computed : cols
+  if (effective) lastColumns = effective
+  const fitted = effective || lastColumns
+  // The setting is the user's maximum; narrow windows fit fewer columns.
+  const active = Number(cols) || 1
   for (const b of wrap.querySelectorAll('button')) {
     const on = Number(b.dataset.cols) === active
     b.classList.toggle('active', on)
     b.setAttribute('aria-pressed', String(on))
+    b.title = Number(b.dataset.cols) === active && fitted && fitted < active
+      ? `每行 ${b.dataset.cols} 列（当前窗口只能放下 ${fitted} 列）`
+      : `每行 ${b.dataset.cols} 列`
   }
+  wrap.title = fitted ? `每行磁贴数（当前 ${fitted} 列）` : '每行磁贴数'
 }
 
 const persistLayout = debounce(async () => {
@@ -212,7 +221,7 @@ function createTile(feature) {
     ),
     body
   )
-  el.style.setProperty('--tile-color', feature.color || '#c07a4a')
+  el.style.setProperty('--tile-color', feature.color || 'var(--accent)')
 
   el.addEventListener('click', (e) => {
     // Only the header toggles the tile; content controls must never collapse it.
@@ -590,7 +599,7 @@ async function expandTile(id) {
   clear(benchInner)
   clear(benchNav)
   title.textContent = feature.name
-  iconWrap.style.setProperty('--tile-color', feature.color || 'var(--copper)')
+  iconWrap.style.setProperty('--tile-color', feature.color || 'var(--accent)')
   clear(iconWrap)
   iconWrap.appendChild(featureIcon(feature, { size: 18 }))
   benchBadge.hidden = true
@@ -1115,7 +1124,8 @@ async function boot() {
   grid = new TileGrid(document.getElementById('grid'), {
     onChange: () => persistLayout(),
     animations: state.settings.general.animations !== false,
-    masonry: true
+    masonry: true,
+    onColumnsChange: (effective, preferred) => syncColumnControl(preferred, effective)
   })
 
   initSettingsUI()

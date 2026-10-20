@@ -34,11 +34,11 @@
   height: 22px;
   display: grid;
   place-items: center;
-  border: 1px solid color-mix(in srgb, var(--copper) 55%, var(--line));
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--line));
   border-radius: 2px;
   background:
     linear-gradient(145deg, rgba(255, 255, 255, .14), transparent 42%),
-    linear-gradient(160deg, #a5633a, #6f4226);
+    linear-gradient(160deg, color-mix(in srgb, var(--accent) 78%, #fff), color-mix(in srgb, var(--accent) 55%, #000));
   box-shadow: inset 0 1px 0 rgba(255, 235, 210, .35), 0 1px 2px rgba(0, 0, 0, .5);
   flex: none;
 }
@@ -242,7 +242,7 @@
   letter-spacing: 0;
 }
 .ws-title .overline { display: flex; align-items: center; gap: 6px; }
-.ws-title .overline::before { content: ""; width: 14px; height: 1px; background: var(--copper); opacity: .7; }
+.ws-title .overline::before { content: ""; width: 14px; height: 1px; background: var(--accent); opacity: .7; }
 .ws-tools { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .ws-tools .seg { height: 28px; }
 .ws-tools .seg button { height: 22px; font-family: var(--font-mono); padding: 0 7px; }
@@ -251,18 +251,22 @@
 /* ---------------- Masonry grid + tile ---------------- */
 .grid { position: relative; width: 100%; gap: 14px; }
 .grid.masonry-grid { min-height: 40px; }
+/* Tiles are absolutely positioned, so before the first computed layout they all
+   sit at 0,0. Hide them for that single frame instead of flashing a stack. */
+.grid.masonry-grid:not(.is-laid-out) > .tile { visibility: hidden; }
+/* Tiles are placed by grid.js (left/top/width). No CSS transition here: all
+   reflow animation is done with transforms so dragging stays 1:1 with the
+   pointer instead of easing behind it. */
 .grid.masonry-grid > .tile,
 .grid.masonry-grid > .tile-placeholder {
   position: absolute;
   top: 0;
   left: 0;
-  transition: left var(--t), top var(--t), width var(--t);
-  will-change: left, top;
 }
 .grid.masonry-grid > .tile.flip { z-index: 2; }
 
 .tile {
-  --tile-color: var(--copper);
+  --tile-color: var(--accent);
   display: flex;
   flex-direction: column;
   min-height: 40px;
@@ -272,6 +276,7 @@
   box-shadow: var(--inset-hi);
   overflow: hidden;
   contain: layout style;
+  container-type: inline-size;
   transition: border-color var(--t-fast), box-shadow var(--t-fast);
 }
 .tile::before {
@@ -317,6 +322,7 @@
 }
 .tile-icon svg { width: 16px; height: 16px; }
 .tile-title {
+  flex: 0 1 auto;
   font-size: var(--fs-13);
   font-weight: 600;
   letter-spacing: -.005em;
@@ -332,11 +338,18 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  flex: 0 1 auto;
+  flex: 1 1 0;
   max-width: 46%;
   min-width: 0;
 }
 .tile:not(.collapsed) .tile-summary { display: none; }
+/* Compact tiles: the badge and summary cannot share the 40px header with
+   the title, so keep the title readable and drop the secondary text. */
+@container (max-width: 330px) {
+  .tile-head { gap: 6px; }
+  .tile-summary { display: none; }
+  .tile-head .badge { display: none; }
+}
 .tile-actions { display: flex; align-items: center; gap: 1px; flex: none; opacity: .6; transition: opacity var(--t-fast); }
 .tile:hover .tile-actions, .tile:focus-within .tile-actions { opacity: 1; }
 .tile-actions .icobtn { width: 24px; height: 24px; }
@@ -356,16 +369,25 @@
   18%, 62% { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 0 26px -6px var(--accent); }
 }
 
-.tile.dragging {
+.tile.dragging,
+.tile.dropping {
   position: fixed !important;
+  left: 0 !important;
+  top: 0 !important;
   z-index: 120 !important;
   pointer-events: none;
-  opacity: .96;
-  transform: translateY(-2px) scale(1.006);
-  box-shadow: 0 20px 44px rgba(0, 0, 0, .5), var(--inset-hi);
+  box-shadow: 0 22px 48px rgba(0, 0, 0, .5), var(--inset-hi);
   border-color: var(--line-hi);
+}
+.tile.dragging {
+  opacity: .98;
+  /* grid.js owns the transform (translate3d per frame); a transition here is
+     what made the tile lag a few pixels behind the cursor. */
+  transition: none !important;
   cursor: grabbing;
 }
+body.dragging-tile { cursor: grabbing; }
+body.dragging-tile * { cursor: grabbing !important; }
 .tile-placeholder {
   border: 1px dashed color-mix(in srgb, var(--accent) 45%, var(--line));
   border-radius: var(--r-2);
@@ -433,7 +455,7 @@
   border: 1px dashed var(--line-hi);
   border-radius: var(--r-2);
   background:
-    radial-gradient(400px 200px at 50% 30%, color-mix(in srgb, var(--copper) 6%, transparent), transparent 70%);
+    radial-gradient(400px 200px at 50% 30%, color-mix(in srgb, var(--accent) 6%, transparent), transparent 70%);
   color: var(--mute);
   text-align: center;
   padding: 30px;
@@ -445,7 +467,7 @@
   border-radius: var(--r-2);
   display: grid;
   place-items: center;
-  color: var(--copper);
+  color: var(--accent);
   box-shadow: var(--slot);
   margin-bottom: 4px;
 }
@@ -578,11 +600,11 @@
   top: 6px;
   bottom: 6px;
   width: 2px;
-  background: var(--copper);
+  background: var(--accent);
   border-radius: 0 2px 2px 0;
 }
 .settings-nav button svg { color: var(--mute); flex: none; }
-.settings-nav button.active svg { color: var(--copper); }
+.settings-nav button.active svg { color: var(--accent); }
 .settings-nav .nav-count { margin-left: auto; font-family: var(--font-mono); font-size: 9.5px; color: var(--mute); }
 .settings-content { flex: 1; min-width: 0; overflow-y: auto; padding: 22px 28px 80px; }
 .settings-panel { width: 100%; max-width: 840px; margin: 0 auto; }
@@ -624,10 +646,16 @@
 .setting-row .info span { font-size: var(--fs-11); color: var(--mute); line-height: 1.5; }
 .setting-row .ctrl { display: flex; align-items: center; gap: 7px; justify-content: flex-end; flex-wrap: wrap; }
 .setting-row .ctrl .input { width: 150px; }
-.setting-row .ctrl .input.mono { width: 190px; }
+.setting-row .ctrl .input.mono { width: 240px; }
 .setting-row .ctrl .input.w-sm { width: 96px; }
+.setting-row .ctrl .ctrl-wide { width: 300px; max-width: 100%; }
+.setting-row .ctrl .ctrl-wide .input,
+.setting-row .ctrl .ctrl-wide .input.mono { width: 100%; }
 .setting-row .ctrl .row { gap: 6px; }
 .setting-row .ctrl .row .input { width: 100px; }
+.setting-row .ctrl .row .input.mono { width: 240px; }
+.setting-row .ctrl .row .ctrl-wide .input,
+.setting-row .ctrl .row .ctrl-wide .input.mono { width: 100%; }
 
 .settings-actions { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; padding: 12px 0 2px; }
 .settings-note {
@@ -636,7 +664,7 @@
   line-height: 1.6;
   padding: 9px 11px;
   border: 1px solid var(--line);
-  border-left: 2px solid var(--copper);
+  border-left: 2px solid var(--accent);
   border-radius: 0 var(--r-1) var(--r-1) 0;
   background: color-mix(in srgb, var(--surface-2) 40%, transparent);
   margin: 4px 0 2px;
@@ -855,9 +883,11 @@
 }
 
 /* ---------------- Responsive ---------------- */
+/* The column count itself is capped by grid.js from the measured width
+   (min 300px per column), so resizing the window reflows smoothly instead of
+   jumping between "4 columns" and "1 column" at a breakpoint. */
 @media (max-width: 1100px) {
   :root { --rail-w: var(--rail-w-narrow); }
-  :root { --tile-cols: 1 !important; }
   .rail-btn { width: 30px; height: 30px; }
   .rail-btn.active::before { left: -7px; }
   .workspace { padding: 12px 14px 40px; }
