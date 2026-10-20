@@ -3,33 +3,81 @@ import { h, clear, $, debounce, escapeHtml } from './core/dom.js'
 import { toast } from './core/toast.js'
 import { TileGrid } from './core/grid.js'
 import { initSettings } from './core/settings.js'
-import { openModal, confirmDialog } from './core/modal.js'
+import { openModal, confirmDialog, isModalOpen } from './core/modal.js'
 import { bus } from './core/bus.js'
 import { startHeartbeat } from './core/heartbeat.js'
+import { icon, featureIcon, FEATURE_ICONS } from './ui/icons.js'
+import { btn, iconBtn, errorState, spinner } from './ui/kit.js'
+import { openContextMenu } from './ui/contextmenu.js'
+import { initCommandPalette, openCommandPalette, closeCommandPalette, isCommandPaletteOpen } from './ui/command.js'
+import { openDrawer, closeDrawer, isDrawerOpen } from './ui/drawer.js'
+
+const APP_TITLE = 'Minecraft 工具箱'
 
 const state = {
   settings: null,
   features: [],
-  modules: new Map(),   // featureId -> module
-  tiles: new Map(),     // featureId -> { el, body, api }
-  loading: new Set()
+  modules: new Map(),
+  tiles: new Map(),
+  loading: new Set(),
+  version: '',
+  author: 'Rinkore28',
+  bench: null,
+  jobs: []
 }
 
-let grid, settingsUI
+const SETTINGS_BY_FEATURE = {
+  'server-status': 'network',
+  'latency-monitor': 'monitor',
+  'client2server': 'c2s',
+  'community-download': 'community',
+  'server-core': 'servercore',
+  'i18n': 'i18n',
+  'save-editor': 'data',
+  'server-manager': 'features'
+}
 
-// ---------------- 样式应用 ----------------
+let grid
+let settingsUI
+let commandUI
+let jobsTimer = null
+let engineTimer = null
+let railActive = ''
+
+/* ------------------------------------------------------------------ */
+/* settings application                                                */
+/* ------------------------------------------------------------------ */
+
 function applySettings() {
   const s = state.settings
-  document.documentElement.dataset.theme = s.general.theme
-  document.documentElement.style.setProperty('--accent', s.general.accent)
-  document.documentElement.style.setProperty('--tile-cols', String(Math.max(1, Number(s.general.tileColumns) || 1)))
-  grid?.setAnimations(s.general.animations)
+  if (!s) return
+  const cols = Math.max(1, Math.min(4, Number(s.general.tileColumns) || 1))
+  document.documentElement.dataset.theme = s.general.theme || 'dark'
+  document.documentElement.style.setProperty('--accent', s.general.accent || '#c07a4a')
+  document.documentElement.style.setProperty('--tile-cols', String(cols))
+  document.body.classList.toggle('no-anim', s.general.animations === false)
+  grid?.setAnimations(s.general.animations !== false)
   grid?.relayout?.()
+  syncColumnControl(cols)
+  updateTileActionLabels()
+}
+
+function syncColumnControl(cols) {
+  const wrap = document.getElementById('colSegWrap')
+  if (!wrap) return
+  // At <=1100px the CSS forces a single column; reflect what the grid really uses.
+  const computed = Number.parseInt(getComputedStyle(document.documentElement).getPropertyValue('--tile-cols'), 10)
+  const active = Number.isFinite(computed) && computed > 0 ? computed : cols
+  for (const b of wrap.querySelectorAll('button')) {
+    const on = Number(b.dataset.cols) === active
+    b.classList.toggle('active', on)
+    b.setAttribute('aria-pressed', String(on))
+  }
 }
 
 const persistLayout = debounce(async () => {
-  const order = grid.order()
-  const layout = order.map((id) => {
+  if (!state.settings) return
+  const layout = grid.order().map((id) => {
     const t = state.tiles.get(id)
     return { id, w: t?.w || 1, h: t?.h || 1, collapsed: !!t?.collapsed }
   })
@@ -41,15 +89,20 @@ const persistLayout = debounce(async () => {
   }
 }, 400)
 
-// ---------------- 磁贴构建 ----------------
+/* ------------------------------------------------------------------ */
+/* tiles                                                               */
+/* ------------------------------------------------------------------ */
+
 function tileSize(feature) {
   const columns = Math.max(1, Number(state.settings.general?.tileColumns) || 1)
   const saved = (state.settings.layout || []).find((l) => l.id === feature.id)
-  const fallback = { w: feature.size?.w || 1, h: feature.size?.h || 1, collapsed: state.settings.general?.defaultCollapsed !== false }
+  const fallback = {
+    w: feature.size?.w || 1,
+    h: feature.size?.h || 1,
+    collapsed: state.settings.general?.defaultCollapsed !== false
+  }
   if (!saved) return { ...fallback, w: columns > 1 ? 1 : fallback.w }
   return {
-    // 多列模式下每个磁贴默认占一列，避免功能清单里的 w=2 把大多数磁贴
-    // 强行铺满整行，只剩 w=1 的磁贴显示为半宽。单列模式保留原始宽度。
     w: columns > 1 ? 1 : (saved.w || 1),
     h: saved.h || 1,
     collapsed: saved.collapsed === undefined ? fallback.collapsed : !!saved.collapsed
@@ -58,15 +111,15 @@ function tileSize(feature) {
 
 function applyCollapse(tile) {
   tile.el.classList.toggle('collapsed', tile.collapsed)
-  if (tile.chev) {
-    tile.chev.title = tile.collapsed ? '展开内容' : '折叠为仅标题'
-    tile.chev.textContent = '▾'
+  tile.el.dataset.collapsed = String(tile.collapsed)
+  const chev = tile.chev
+  if (chev) {
+    chev.title = tile.collapsed ? '展开内容' : '折叠为仅标题'
+    chev.setAttribute('aria-label', tile.collapsed ? '展开内容' : '折叠为仅标题')
+    chev.setAttribute('aria-expanded', String(!tile.collapsed))
   }
-  // 内容高度由磁贴自身撑开即可。把 manifest 中的 h=2 转成
-  // `grid-row: span 2` 会让 CSS Grid 为展开磁贴额外占用一个整行，
-  // 后面的磁贴就会被推到错误的列（尤其是多列布局中有一个大磁贴时）。
-  // h 仍保留在布局数据中以兼容旧配置，但主网格不再用它跨行。
   tile.el.classList.remove('h-2')
+  grid?._scheduleLayout?.()
 }
 
 function toggleCollapse(id) {
@@ -80,27 +133,29 @@ function toggleCollapse(id) {
   updateCollapseBtn()
 }
 
-async function ensureMounted(id) {
-  const tile = state.tiles.get(id)
-  if (!tile || tile.mounted || tile.mounting) return
-  tile.mounting = true // 并发锁：避免折叠/展开抖动时 mount 跑两次 → 内容重复
-  const mod = state.modules.get(id)
-  if (mod?.mount) {
-    try {
-      await mod.mount(tile.ctx)
-      tile.mounted = true
-    } catch (e) {
-      console.error('[feature] mount 失败', id, e)
-      tile.body.appendChild(h('div', { class: 'result-bad' }, '功能初始化失败：' + e.message))
-    } finally {
-      tile.mounting = false
-    }
-  } else {
-    tile.mounting = false
-  }
+function updateCollapseBtn() {
+  const btnEl = document.getElementById('btnCollapseAll')
+  if (!btnEl) return
+  const tiles = Array.from(state.tiles.values())
+  const allCollapsed = tiles.length > 0 && tiles.every((t) => t.collapsed)
+  btnEl.textContent = allCollapsed ? '全部展开' : '全部折叠'
+  btnEl.disabled = tiles.length === 0
 }
 
-async function setAllCollapsed(v) {
+function updateTileActionLabels() {
+  // reserved for future per-tile labels; keeps aria state in sync after settings change
+}
+
+function updateWorkspaceMeta() {
+  const count = state.tiles.size
+  const wsCount = document.getElementById('wsCount')
+  if (wsCount) wsCount.textContent = count ? `${count} / ${state.features.filter((f) => f.enabled && f.visible).length}` : ''
+  const empty = document.getElementById('emptyHint')
+  if (empty) empty.hidden = count > 0
+  updateCollapseBtn()
+}
+
+function setAllCollapsed(v) {
   for (const tile of state.tiles.values()) {
     const wasCollapsed = tile.collapsed
     tile.collapsed = v
@@ -111,41 +166,75 @@ async function setAllCollapsed(v) {
   updateCollapseBtn()
 }
 
-function updateCollapseBtn() {
-  const btn = document.getElementById('btnCollapseAll')
-  if (!btn) return
-  const tiles = Array.from(state.tiles.values())
-  const allCollapsed = tiles.length > 0 && tiles.every((t) => t.collapsed)
-  btn.textContent = allCollapsed ? '⇲ 全部展开' : '⇱ 全部折叠'
-}
-
 function createTile(feature) {
   const size = tileSize(feature)
-  const icon = h('span', { class: 'tile-icon' }, feature.icon || '🧩')
+  const iconEl = h('span', { class: 'tile-icon', 'aria-hidden': 'true' })
+  iconEl.appendChild(featureIcon(feature, { size: 16 }))
   const title = h('h3', { class: 'tile-title' }, feature.name)
-  const badge = h('span', { class: 'badge', style: { display: 'none' } })
+  const summary = h('span', { class: 'tile-summary', title: feature.desc || '' }, feature.desc || '')
+  const badge = h('span', { class: 'badge', hidden: true })
   const body = h('div', { class: 'tile-body' })
+  const spacer = h('span', { class: 'spacer' })
 
-  const chev = h('button', { class: 'chev', title: '展开/折叠内容', 'aria-label': '展开或折叠内容', onclick: (e) => { e.stopPropagation(); toggleCollapse(feature.id) } }, '▾')
-  const btnExpand = h('button', { class: 'tile-expand', title: '放大查看', 'aria-label': '放大查看', onclick: (e) => { e.stopPropagation(); expandTile(feature.id) } }, '⤢')
-  const btnMore = h('button', { title: '更多', onclick: (e) => tileMenu(e, feature.id) }, '⋯')
+  const chev = h('button', {
+    class: 'icobtn tile-chev',
+    type: 'button',
+    title: '展开或折叠内容',
+    'aria-label': '展开或折叠内容',
+    onclick: (e) => { e.stopPropagation(); toggleCollapse(feature.id) }
+  }, icon('chevron-down', { size: 14 }))
 
-  const el = h(
-    'section',
-    { class: 'tile', dataset: { id: feature.id } },
-    h('header', { class: 'tile-head' }, chev, icon, title, badge, h('span', { class: 'spacer' }), h('div', { class: 'tile-actions' }, btnExpand, btnMore)),
+  const btnExpand = h('button', {
+    class: 'icobtn',
+    type: 'button',
+    title: '放大查看',
+    'aria-label': '放大查看',
+    onclick: (e) => { e.stopPropagation(); expandTile(feature.id) }
+  }, icon('expand', { size: 14 }))
+
+  const btnMore = h('button', {
+    class: 'icobtn',
+    type: 'button',
+    title: '更多操作',
+    'aria-label': '更多操作',
+    onclick: (e) => { e.stopPropagation(); tileMenu(e, feature.id) }
+  }, icon('more', { size: 15 }))
+
+  const el = h('section', { class: 'tile', dataset: { id: feature.id } },
+    h('header', { class: 'tile-head' },
+      iconEl,
+      title,
+      summary,
+      badge,
+      spacer,
+      h('div', { class: 'tile-actions' }, btnExpand, btnMore),
+      chev
+    ),
     body
   )
-  el.style.setProperty('--tile-color', feature.color)
-  icon.style.background = feature.color
+  el.style.setProperty('--tile-color', feature.color || '#c07a4a')
+
   el.addEventListener('click', (e) => {
-    // 控件点击保持自身行为；标题栏拖动结束产生的 click 也不能折叠磁贴。
+    // Only the header toggles the tile; content controls must never collapse it.
+    if (!e.target.closest('.tile-head')) return
     if (e.target.closest('button, input, select, textarea, a, label, summary, pre, .drop-zone, [role=button], [data-nocollapse]')) return
     if (grid?.lastDragEnd && Date.now() - grid.lastDragEnd < 280) return
     toggleCollapse(feature.id)
   })
-  // 多列模式默认每个磁贴一列；单列模式本身没有可跨的列。
-  const tile = { el, body, badge, chev, w: size.w, h: size.h, collapsed: !!size.collapsed, mounted: false, mounting: false }
+
+  const tile = {
+    el,
+    body,
+    badge,
+    chev,
+    iconEl,
+    w: size.w,
+    h: size.h,
+    collapsed: !!size.collapsed,
+    mounted: false,
+    mounting: false,
+    loadError: null
+  }
   applyCollapse(tile)
   return tile
 }
@@ -161,297 +250,301 @@ function makeContext(feature, tile) {
     confirm: (msg, opts) => (state.settings.general.confirmDanger === false ? Promise.resolve(true) : confirmDialog(msg, opts)),
     openModal,
     settings: () => state.settings,
+    getSettings: () => state.settings,
+    escapeHtml,
     setBadge(text, kind = '') {
       if (!text) {
-        tile.badge.style.display = 'none'
+        tile.badge.hidden = true
+        tile.badge.textContent = ''
+        setRailState(feature.id, '')
         return
       }
-      tile.badge.style.display = ''
-      tile.badge.className = 'badge ' + kind
+      tile.badge.hidden = false
+      tile.badge.className = 'badge ' + (kind || '')
       tile.badge.textContent = text
+      setRailState(feature.id, kind === 'ok' ? 'ok' : kind === 'bad' ? 'bad' : kind ? 'warn' : '')
     },
     expand(renderFn, opts = {}) {
       const container = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } })
       const modal = openModal({ title: feature.name, size: opts.size || 'lg', body: container })
       try {
-        renderFn?.(container, { close: modal.close })
+        renderFn?.(container, { close: modal.close, ctx: makeContext(feature, tile) })
       } catch (e) {
         container.appendChild(h('div', { class: 'result-bad' }, '渲染失败：' + e.message))
       }
       return modal
     },
-    getSettings: () => state.settings,
-    escapeHtml
+    // new capability: features may request the full-screen bench
+    openBench: () => expandTile(feature.id)
   }
 }
 
-function tileMenu(e, id) {
-  e.stopPropagation()
+function showMountError(tile, feature, e, retry) {
+  tile.loadError = e
+  clear(tile.body)
+  tile.body.appendChild(errorState(
+    '功能加载失败',
+    e?.message || String(e),
+    btn('重试', { size: 'sm', iconName: 'refresh', onClick: retry })
+  ))
+  tile.body.style.display = ''
+  if (tile.collapsed) {
+    tile.collapsed = false
+    applyCollapse(tile)
+  }
+}
+
+async function ensureMounted(id) {
+  const tile = state.tiles.get(id)
+  if (!tile || tile.mounted || tile.mounting) return
   const feature = state.features.find((f) => f.id === id)
-  const tile = state.tiles.get(id)
-  const items = [
-    { label: tile?.collapsed ? '▸ 展开内容' : '▾ 折叠为仅标题', onClick: () => toggleCollapse(id) },
-    { label: '隐藏此磁贴（可从设置恢复）', onClick: () => hideTile(id) }
-  ]
-  if (!feature?.builtin) items.push({ label: '删除此功能', danger: true, onClick: () => removeFeature(id) })
-  const list = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px', minWidth: '180px' } })
-  for (const it of items) {
-    list.appendChild(h('button', {
-      class: 'btn btn-sm' + (it.danger ? ' btn-danger' : ''),
-      style: { textAlign: 'left' },
-      onclick: () => { it.onClick(); close() }
-    }, it.label))
+  tile.mounting = true
+  const mod = state.modules.get(id)
+  if (!mod) {
+    tile.mounting = false
+    return
   }
-  const modal = openModal({ title: feature?.name || '磁贴', body: list })
-  function close() { modal.close() }
-}
-
-async function hideTile(id) {
-  await api.put('/api/features/' + id, { visible: false })
-  const f = state.features.find((x) => x.id === id)
-  if (f) f.visible = false
-  unmountTile(id)
-  persistLayout()
-  toast('已隐藏磁贴，可在设置中恢复', 'ok')
-}
-
-async function removeFeature(id) {
-  const f = state.features.find((x) => x.id === id)
-  if (!(await confirmDialog(`确定删除功能「${f?.name || id}」？文件夹会被移动到 features_disabled。`, { danger: true }))) return
-  await api.del('/api/features/' + id)
-  unmountTile(id)
-  state.features = state.features.filter((x) => x.id !== id)
-  persistLayout()
-  toast('功能已删除', 'ok')
-}
-
-function unmountTile(id) {
-  const tile = state.tiles.get(id)
-  if (tile) {
+  if (!tile.ctx) tile.ctx = makeContext(feature, tile)
+  if (tile.loadError) {
+    clear(tile.body)
+    tile.loadError = null
+  }
+  if (mod.mount) {
     try {
-      state.modules.get(id)?.unmount?.()
-    } catch {}
-    grid.remove(id)
-    state.tiles.delete(id)
+      await mod.mount(tile.ctx)
+      tile.mounted = true
+    } catch (e) {
+      console.error('[feature] mount 失败', id, e)
+      showMountError(tile, feature, e, () => {
+        tile.mounted = false
+        tile.loadError = null
+        clear(tile.body)
+        ensureMounted(id)
+      })
+    } finally {
+      tile.mounting = false
+    }
+  } else {
+    tile.mounted = true
+    tile.mounting = false
   }
-  document.getElementById('emptyHint').hidden = state.tiles.size > 0
+  grid?._scheduleLayout?.()
 }
 
 async function mountFeature(feature, beforeId) {
-  if (state.tiles.has(feature.id) || state.loading.has(feature.id)) return
+  if (state.tiles.has(feature.id) || state.loading.has(feature.id)) return state.tiles.get(feature.id)
   state.loading.add(feature.id)
   const tile = createTile(feature)
   state.tiles.set(feature.id, tile)
   grid.mount(tile.el, beforeId)
+  updateWorkspaceMeta()
 
   try {
     const mod = await import(`/features/${feature.dir}/${feature.entry}`)
-    state.modules.set(feature.id, mod.default || mod)
-    const ctx = makeContext(feature, tile)
-    tile.ctx = ctx
-    // 折叠态不主动 mount：等到用户展开或点开大图时才加载（节省 API/计时器）
+    const module = mod.default || mod
+    state.modules.set(feature.id, module)
+    tile.ctx = makeContext(feature, tile)
     if (!tile.collapsed) {
-      await mod.default?.mount?.(ctx)
-      tile.mounted = true
+      await ensureMounted(feature.id)
     }
   } catch (e) {
     console.error('[feature] 加载失败', feature.id, e)
-    tile.body.appendChild(h('div', { class: 'result-bad' }, '功能加载失败：' + e.message))
+    showMountError(tile, feature, e, async () => {
+      try {
+        const mod = await import(`/features/${feature.dir}/${feature.entry}?r=${Date.now()}`)
+        state.modules.set(feature.id, mod.default || mod)
+        tile.ctx = makeContext(feature, tile)
+        tile.mounted = false
+        tile.loadError = null
+        clear(tile.body)
+        await ensureMounted(feature.id)
+      } catch (err) {
+        showMountError(tile, feature, err, () => location.reload())
+      }
+    })
   } finally {
     state.loading.delete(feature.id)
   }
-  document.getElementById('emptyHint').hidden = true
+  updateWorkspaceMeta()
+  return tile
 }
 
-function expandTile(id) {
+function unmountTile(id) {
+  const tile = state.tiles.get(id)
+  if (!tile) return
+  try {
+    state.modules.get(id)?.unmount?.()
+  } catch (e) {
+    console.warn('[feature] unmount 失败', id, e)
+  }
+  grid.remove(id)
+  state.tiles.delete(id)
+  state.modules.delete(id)
+  updateWorkspaceMeta()
+}
+
+function tileMenu(e, id) {
   const feature = state.features.find((f) => f.id === id)
-  const mod = state.modules.get(id)
   const tile = state.tiles.get(id)
   if (!feature || !tile) return
-  ensureMounted(id)
-  const container = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '12px' } })
-  const modal = openModal({ title: feature.name, size: 'xl', body: container })
-  if (mod?.renderExpanded) {
-    try {
-      mod.renderExpanded(container, { close: modal.close, ctx: tile.ctx })
-    } catch (e) {
-      container.appendChild(h('div', { class: 'result-bad' }, '渲染失败：' + e.message))
-    }
-  } else {
-    // 无自定义展开视图时，克隆磁贴内容放大显示
-    container.appendChild(h('div', { class: 'muted' }, '该功能未提供展开视图，以下为磁贴内容放大显示。'))
-    const cloneWrap = h('div')
-    container.appendChild(cloneWrap)
-    const ctx = makeContext(feature, { el: tile.el, body: cloneWrap, badge: tile.badge })
-    try {
-      mod?.mount?.(ctx)
-    } catch (e) {
-      cloneWrap.appendChild(h('div', { class: 'result-bad' }, e.message))
-    }
+  const r = e.currentTarget?.getBoundingClientRect?.() || e.target.getBoundingClientRect()
+  const items = [
+    {
+      label: tile.collapsed ? '展开内容' : '折叠为仅标题',
+      iconName: tile.collapsed ? 'expand' : 'collapse',
+      onClick: () => toggleCollapse(id)
+    },
+    { separator: true },
+    { label: '放大查看', iconName: 'expand', onClick: () => expandTile(id) },
+    { label: '隐藏此磁贴', iconName: 'eye-off', hint: '设置中恢复', onClick: () => hideTile(id) },
+    { label: '打开此功能设置', iconName: 'settings', onClick: () => settingsUI.open(SETTINGS_BY_FEATURE[id] || 'features') }
+  ]
+  if (!feature.builtin) {
+    items.push({ separator: true })
+    items.push({ label: '删除此功能', iconName: 'trash', danger: true, onClick: () => removeFeature(id) })
+  }
+  openContextMenu({ x: r.right - 6, y: r.bottom + 4, items, label: feature.name })
+}
+
+async function hideTile(id) {
+  const feature = state.features.find((f) => f.id === id)
+  try {
+    await api.put('/api/features/' + id, { visible: false })
+    if (feature) feature.visible = false
+    unmountTile(id)
+    buildRail()
+    persistLayout()
+    toast('已隐藏磁贴，可在设置中恢复', 'ok')
+  } catch (e) {
+    toast('隐藏失败：' + e.message, 'err')
   }
 }
 
-// ---------------- 添加磁贴 ----------------
+async function removeFeature(id) {
+  const feature = state.features.find((f) => f.id === id)
+  if (!(await confirmDialog(`确定删除功能「${feature?.name || id}」？文件夹会被移动到 features_disabled。`, { danger: true }))) return
+  try {
+    await api.del('/api/features/' + id)
+    unmountTile(id)
+    state.features = state.features.filter((x) => x.id !== id)
+    buildRail()
+    persistLayout()
+    toast('功能已删除', 'ok')
+  } catch (e) {
+    toast('删除失败：' + e.message, 'err')
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* rail                                                                */
+/* ------------------------------------------------------------------ */
+
+function setRailState(id, kind) {
+  const railBtn = document.querySelector(`#railFeatures [data-rail-id="${id}"]`)
+  if (!railBtn) return
+  railBtn.dataset.state = kind || 'off'
+}
+
+function buildRail() {
+  const wrap = document.getElementById('railFeatures')
+  if (!wrap) return
+  clear(wrap)
+  for (const f of state.features.filter((x) => x.enabled)) {
+    const b = h('button', {
+      class: 'rail-btn',
+      type: 'button',
+      title: `${f.name}${f.desc ? ' · ' + f.desc : ''}`,
+      'aria-label': f.name,
+      dataset: { railId: f.id, state: state.tiles.has(f.id) ? 'off' : 'off' }
+    }, featureIcon(f, { size: 18 }))
+    b.addEventListener('click', () => navigateFeature(f.id))
+    wrap.appendChild(b)
+  }
+  markRail(railActive)
+}
+
+function markRail(id) {
+  railActive = id || ''
+  for (const b of document.querySelectorAll('#railFeatures .rail-btn, #btnWorkspace')) {
+    b.classList.toggle('active', b.id === 'btnWorkspace' ? !railActive : b.dataset.railId === railActive)
+  }
+}
+
+function navigateFeature(id) {
+  const feature = state.features.find((f) => f.id === id)
+  if (!feature) return
+  let tile = state.tiles.get(id)
+  if (!tile) {
+    if (!feature.enabled) {
+      toast('该功能已在设置中禁用，请先启用', 'warn')
+      return
+    }
+    addFeature(feature, { silent: true }).then(() => {
+      tile = state.tiles.get(id)
+      if (tile) flashTile(tile)
+    })
+    markRail(id)
+    return
+  }
+  markRail(id)
+  closeSettingsPage()
+  flashTile(tile)
+}
+
+function flashTile(tile) {
+  tile.el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  tile.el.classList.remove('is-flash')
+  void tile.el.offsetWidth
+  tile.el.classList.add('is-flash')
+  setTimeout(() => tile.el.classList.remove('is-flash'), 1400)
+}
+
+/* ------------------------------------------------------------------ */
+/* add / sync                                                          */
+/* ------------------------------------------------------------------ */
+
+async function addFeature(feature, { silent = false } = {}) {
+  if (!feature) return null
+  try {
+    await api.put('/api/features/' + feature.id, { visible: true, enabled: true })
+    feature.visible = true
+    feature.enabled = true
+    const tile = await mountFeature(feature)
+    persistLayout()
+    buildRail()
+    if (!silent) toast(`已添加「${feature.name}」`, 'ok')
+    return tile
+  } catch (e) {
+    toast('添加失败：' + e.message, 'err')
+    return null
+  }
+}
+
 function openAddTile() {
   const available = state.features.filter((f) => f.enabled && !state.tiles.has(f.id))
-  const box = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } })
+  const box = h('div', { class: 'col', style: { gap: '6px' } })
   if (!available.length) {
-    box.appendChild(h('div', { class: 'muted center', style: { padding: '20px' } }, '没有可添加的功能。所有功能都已在页面上，或已在设置中禁用。'))
+    box.appendChild(h('div', { class: 'empty-state' },
+      icon('check-circle', { size: 20 }),
+      h('div', { class: 'es-title' }, '没有可添加的功能'),
+      h('div', { class: 'es-text' }, '所有功能都已在页面上，或已在设置中禁用。')
+    ))
   }
   for (const f of available) {
-    box.appendChild(
-      h('div', { class: 'feature-item' },
-        h('div', { class: 'fi-icon', style: { background: f.color } }, f.icon),
-        h('div', { class: 'fi-main' }, h('b', {}, f.name), h('span', {}, f.desc || '')),
-        h('button', {
-          class: 'btn btn-sm btn-primary',
-          onclick: async () => {
-            await api.put('/api/features/' + f.id, { visible: true, enabled: true })
-            f.visible = true
-            await mountFeature(f)
-            persistLayout()
-            modal.close()
-            toast(`已添加「${f.name}」`, 'ok')
-          }
-        }, '添加')
-      )
-    )
-  }
-  const modal = openModal({ title: '添加磁贴', body: box, buttons: [{ label: '关闭' }] })
-}
-
-// ---------------- 无边框窗口（WebView2 宿主）标题栏 ----------------
-// 页面运行在 WebView2 无边框宿主里时（URL 带 ?host=webview2），
-// 顶栏承担窗口拖拽 + 最小化/最大化/关闭按钮，替代系统标题栏。
-function initNativeChrome() {
-  const wv = window.chrome && window.chrome.webview
-  if (!wv) return
-  document.body.classList.add('nv')
-  const wc = document.getElementById('winControls')
-  if (wc) {
-    wc.hidden = false
-    const maxBtn = wc.querySelector('[data-act="max"]')
-    // 宿主在最大化/还原变化时回传状态，用于切换「最大化/还原」图形
-    wv.addEventListener?.('message', (ev) => {
-      const m = ev.data
-      if (m === 'wm 1') maxBtn?.classList.add('maximized')
-      else if (m === 'wm 0') maxBtn?.classList.remove('maximized')
-    })
-    wc.querySelectorAll('button').forEach((b) => {
-      b.onclick = () => {
-        const act = b.dataset.act
-        if (act === 'min' || act === 'close') {
-          try { wv.postMessage(act) } catch {}
-        } else if (act === 'max') {
-          try { wv.postMessage('max') } catch {}
-          // 乐观切换；宿主随后会回传 wm 状态校正
-          b.classList.toggle('maximized')
+    box.appendChild(h('div', { class: 'feature-item' },
+      h('div', { class: 'fi-icon', style: { background: f.color || 'var(--surface-3)' } }, featureIcon(f, { size: 16 })),
+      h('div', { class: 'fi-main' }, h('b', {}, f.name), h('span', {}, f.desc || '')),
+      btn('添加', {
+        variant: 'primary',
+        size: 'sm',
+        onClick: async () => {
+          const tile = await addFeature(f)
+          if (tile) modal.close()
         }
-      }
-    })
+      })
+    ))
   }
-  const bar = document.querySelector('header.topbar')
-  if (!bar) return
-  const interactive = (t) => !!t.closest('button, a, input, select, textarea, label, .win-controls, .topbar-actions')
-
-  // 窗口边缘悬浮层：WebView2 铺满客户区后系统收不到边框命中，改用这些隐形条触发原生缩放
-  // 命中码即 WM_NCHITTEST 的 HT* 值：左10 右11 上12 左上13 右上14 下15 左下16 右下17
-  const RZ = { n: 12, s: 15, e: 11, w: 10, nw: 13, ne: 14, sw: 16, se: 17 }
-  const rzLayer = h('div', { class: 'rsz-layer' })
-  for (const pos of Object.keys(RZ)) {
-    const zone = h('div', { class: 'rsz rsz-' + pos })
-    zone.addEventListener('pointerdown', (e) => {
-      e.preventDefault()
-      try { wv.postMessage('rsz ' + RZ[pos]) } catch {}
-    })
-    rzLayer.appendChild(zone)
-  }
-  document.body.appendChild(rzLayer)
-
-  // 窗口拖拽：按下即通知宿主走系统原生移动（HTCAPTION），平滑跟手
-  bar.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0 || interactive(e.target)) return
-    try { wv.postMessage('cap') } catch {}
-  })
-  bar.addEventListener('dblclick', (e) => {
-    if (interactive(e.target)) return
-    try { wv.postMessage('max') } catch {}
-  })
-}
-
-// ---------------- 初始化 ----------------
-async function boot() {
-  const boot = await api.get('/api/bootstrap')
-  const version = document.getElementById('brandVersion')
-  if (version && boot.version) version.textContent = `v${boot.version}`
-  state.settings = boot.settings
-  state.features = boot.features
-  applySettings()
-
-  grid = new TileGrid(document.getElementById('grid'), {
-    onChange: () => persistLayout(),
-    animations: state.settings.general.animations,
-    masonry: true
-  })
-
-  settingsUI = initSettings({
-    getSettings: () => state.settings,
-    onSaved: (s) => {
-      state.settings = s
-      applySettings()
-      bus.emit('settings:changed', s)
-    },
-    onAnimationsChange: (v) => grid.setAnimations(v),
-    onReload: async () => {
-      const data = await api.get('/api/features')
-      state.features = data.items
-      await syncTiles()
-    },
-    onFeatureToggle: async (id, visible) => {
-      const f = state.features.find((x) => x.id === id)
-      if (f) f.visible = visible
-      if (visible && !state.tiles.has(id)) await mountFeature(f)
-      else if (!visible) unmountTile(id)
-      persistLayout()
-    },
-    onResetLayout: async () => {
-      await api.put('/api/settings', { layout: [] })
-      state.settings.layout = []
-      for (const id of Array.from(state.tiles.keys())) unmountTile(id)
-      await syncTiles()
-      toast('布局已重置', 'ok')
-    },
-    openAddTile
-  })
-
-  await syncTiles()
-
-  // 自动启动不依赖翻译磁贴是否展开（默认折叠时也应生效）。失败交给磁贴
-  // 和设置页在用户需要时再次显示具体错误，避免阻塞工具箱主界面启动。
-  if (state.settings.i18n?.autoStart) {
-    api.post('/api/i18n/start', { i18n: state.settings.i18n }).catch(() => {})
-  }
-
-  $('#btnSettings').onclick = () => settingsUI.open()
-  $('#btnCloseSettings').onclick = () => settingsUI.close()
-  $('#btnAddTile').onclick = openAddTile
-  $('#btnEmptyAdd').onclick = openAddTile
-  $('#btnCollapseAll').onclick = () => {
-    const tiles = Array.from(state.tiles.values())
-    setAllCollapsed(!tiles.every((t) => t.collapsed))
-  }
-  $('#btnReload').onclick = async () => {
-    const data = await api.get('/api/features')
-    state.features = data.items
-    await syncTiles()
-    toast('已重新加载功能', 'ok')
-  }
-
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && settingsUI.isOpen()) settingsUI.close()
-  })
-
-  initNativeChrome()
+  const modal = openModal({ title: '添加磁贴', size: 'md', body: box, buttons: [{ label: '关闭', class: 'btn-ghost' }] })
 }
 
 async function syncTiles() {
@@ -466,18 +559,612 @@ async function syncTiles() {
     const f = wanted.find((x) => x.id === id)
     if (f && !state.tiles.has(id)) await mountFeature(f, null)
   }
-  // 按保存顺序排列
   const existing = grid.order()
   const sorted = order.filter((id) => existing.includes(id))
   for (const id of existing) if (!sorted.includes(id)) sorted.push(id)
   if (sorted.length) grid.setOrder(sorted)
-  document.getElementById('emptyHint').hidden = state.tiles.size > 0
-  updateCollapseBtn()
+  updateWorkspaceMeta()
+  buildRail()
 }
 
-// 启动页面心跳：后端据此判断应用窗口是否还开着（关窗即停服务）
+/* ------------------------------------------------------------------ */
+/* bench (expanded tile)                                               */
+/* ------------------------------------------------------------------ */
+
+async function expandTile(id) {
+  const feature = state.features.find((f) => f.id === id)
+  const tile = state.tiles.get(id)
+  if (!feature || !tile) return
+  if (settingsUI?.isOpen()) closeSettingsPage()
+  closeContextMenuSafe()
+  const view = document.getElementById('benchView')
+  const benchInner = document.getElementById('benchInner')
+  const title = document.getElementById('benchTitle')
+  const iconWrap = document.getElementById('benchIcon')
+  const benchBadge = document.getElementById('benchBadge')
+  const benchNav = document.getElementById('benchNav')
+  const benchSettings = document.getElementById('benchSettings')
+  if (!view || !benchInner) return
+  view.hidden = false
+  document.body.classList.add('bench-open')
+  clear(benchInner)
+  clear(benchNav)
+  title.textContent = feature.name
+  iconWrap.style.setProperty('--tile-color', feature.color || 'var(--copper)')
+  clear(iconWrap)
+  iconWrap.appendChild(featureIcon(feature, { size: 18 }))
+  benchBadge.hidden = true
+  benchBadge.textContent = ''
+  benchSettings.onclick = () => settingsUI.open(SETTINGS_BY_FEATURE[id] || 'features')
+
+  const close = () => closeBench()
+  state.bench = { id, close }
+
+  const loading = h('div', { class: 'row', style: { gap: '8px', color: 'var(--mute)', padding: '10px 0' } }, spinner(14), '正在准备视图…')
+  benchInner.appendChild(loading)
+  await ensureMounted(id)
+  clear(benchInner)
+
+  const mod = state.modules.get(id)
+  if (mod?.renderExpanded) {
+    try {
+      mod.renderExpanded(benchInner, { close, ctx: tile.ctx })
+    } catch (e) {
+      console.error('[feature] renderExpanded 失败', id, e)
+      benchInner.appendChild(errorState('渲染失败', e.message || String(e)))
+    }
+  } else {
+    benchInner.appendChild(h('div', { class: 'fx-note', style: { marginBottom: '10px' } },
+      '该功能未提供展开视图，以下为磁贴内容放大显示。'))
+    const cloneWrap = h('div', { class: 'col', style: { gap: '10px' } })
+    benchInner.appendChild(cloneWrap)
+    const cloneCtx = makeContext(feature, { el: tile.el, body: cloneWrap, badge: tile.badge, ctx: tile.ctx })
+    try {
+      mod?.mount?.(cloneCtx)
+    } catch (e) {
+      cloneWrap.appendChild(h('div', { class: 'result-bad' }, e.message))
+    }
+  }
+}
+
+function closeBench() {
+  const view = document.getElementById('benchView')
+  if (!view || view.hidden) return
+  view.hidden = true
+  document.body.classList.remove('bench-open')
+  const inner = document.getElementById('benchInner')
+  if (inner) clear(inner)
+  state.bench = null
+}
+
+function closeContextMenuSafe() {
+  const root = document.getElementById('contextRoot')
+  if (root) root.hidden = true
+}
+
+/* ------------------------------------------------------------------ */
+/* settings                                                            */
+/* ------------------------------------------------------------------ */
+
+function openSettingsPage(id) {
+  closeBench()
+  settingsUI.open(id)
+}
+
+function closeSettingsPage() {
+  if (settingsUI?.isOpen()) settingsUI.close()
+}
+
+function initSettingsUI() {
+  settingsUI = initSettings({
+    getSettings: () => state.settings,
+    onSaved: (s, meta = {}) => {
+      state.settings = s
+      applySettings()
+      bus.emit('settings:changed', s)
+      if (meta.silent !== true) flashSaved()
+    },
+    onAnimationsChange: (v) => grid.setAnimations(v),
+    onReload: async () => {
+      const data = await api.get('/api/features')
+      state.features = data.items
+      await syncTiles()
+    },
+    onFeatureToggle: async (id, visible) => {
+      const f = state.features.find((x) => x.id === id)
+      if (f) f.visible = visible
+      if (visible && !state.tiles.has(id)) await mountFeature(f)
+      else if (!visible) unmountTile(id)
+      persistLayout()
+      buildRail()
+    },
+    onResetLayout: async () => {
+      await api.put('/api/settings', { layout: [] })
+      state.settings.layout = []
+      for (const id of Array.from(state.tiles.keys())) unmountTile(id)
+      await syncTiles()
+      toast('布局已重置', 'ok')
+    },
+    openAddTile,
+    onFeaturesChanged: async () => {
+      const data = await api.get('/api/features')
+      state.features = data.items
+      await syncTiles()
+    }
+  })
+}
+
+const flashSaved = debounce(() => {
+  const el = document.getElementById('settingsSaveState')
+  if (!el) return
+  el.textContent = '已保存 · ' + new Date().toLocaleTimeString()
+}, 80)
+
+/* ------------------------------------------------------------------ */
+/* statusbar: engine + tasks                                           */
+/* ------------------------------------------------------------------ */
+
+async function refreshEngineStatus() {
+  const dotEl = document.getElementById('sbEngineDot')
+  const textEl = document.getElementById('sbEngineText')
+  if (!dotEl || !textEl) return
+  try {
+    const snap = await api.get('/api/monitors')
+    const online = (snap.items || []).filter((x) => x.status?.ok).length
+    if (snap.running) {
+      dotEl.className = 'dot ok'
+      textEl.textContent = `${snap.items.length} 台 · ${online} 在线`
+    } else {
+      dotEl.className = 'dot'
+      textEl.textContent = '已暂停'
+    }
+  } catch {
+    dotEl.className = 'dot bad'
+    textEl.textContent = '不可用'
+  }
+}
+
+function jobStatusLabel(job) {
+  return {
+    queued: '排队中',
+    running: '下载中',
+    installing: '安装中',
+    done: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+    cancelling: '正在取消'
+  }[job.status] || job.status
+}
+
+function jobMeta(job) {
+  if (job.status === 'running') {
+    const pct = job.total ? Math.round((job.received / job.total) * 100) : 0
+    const speed = job.speed ? ` · ${fmtSpeed(job.speed)}` : ''
+    return `${pct}% · ${formatBytes(job.received)} / ${job.total ? formatBytes(job.total) : '?'}${speed}`
+  }
+  if (job.status === 'installing') return job.installProgress != null ? `安装 ${Math.round(job.installProgress)}%` : '安装中…'
+  if (job.status === 'done') return `已完成 · ${formatBytes(job.total || job.received)}`
+  if (job.status === 'failed') return job.error || '失败'
+  return jobStatusLabel(job)
+}
+
+function formatBytes(n) {
+  if (!n && n !== 0) return '-'
+  const u = ['B', 'KB', 'MB', 'GB']
+  let i = 0
+  let v = n
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`
+}
+
+function fmtSpeed(bps) {
+  if (!bps || bps <= 0) return ''
+  if (bps >= 1024 * 1024) return (bps / 1024 / 1024).toFixed(1) + ' MB/s'
+  if (bps >= 1024) return (bps / 1024).toFixed(1) + ' KB/s'
+  return Math.round(bps) + ' B/s'
+}
+
+function activeJobs() {
+  return state.jobs.filter((j) => ['queued', 'running', 'installing'].includes(j.status))
+}
+
+async function refreshJobs() {
+  try {
+    const data = await api.get('/api/community/jobs')
+    state.jobs = data.items || []
+  } catch {
+    return
+  }
+  const n = activeJobs().length
+  const text = document.getElementById('sbTaskText')
+  if (text) text.textContent = n ? `任务 ${n} 进行中` : '任务 0'
+  if (isDrawerOpen()) renderTaskDrawer(document.getElementById('drawerBody'))
+}
+
+async function cancelJob(id) {
+  try {
+    await api.post('/api/community/jobs/cancel', { id })
+    toast('已请求取消任务', 'ok')
+    await refreshJobs()
+  } catch (e) {
+    toast('取消失败：' + e.message, 'err')
+  }
+}
+
+async function retryJob(job) {
+  if (!job?.url) {
+    toast('该任务缺少下载地址，无法重试', 'err')
+    return
+  }
+  try {
+    await api.post('/api/community/download', {
+      url: job.url,
+      filename: job.filename,
+      dir: job.dir,
+      title: job.meta?.project || job.filename,
+      meta: job.meta || {}
+    })
+    toast('已重新加入下载队列', 'ok')
+    await refreshJobs()
+  } catch (e) {
+    toast('重试失败：' + e.message, 'err')
+  }
+}
+
+async function clearAllJobs() {
+  if (!(await confirmDialog('确定取消所有下载任务并清空记录？已下载的文件不会被删除。', { danger: true }))) return
+  try {
+    await api.del('/api/community/jobs')
+    toast('已清空下载记录', 'ok')
+    await refreshJobs()
+  } catch (e) {
+    toast('清空失败：' + e.message, 'err')
+  }
+}
+
+function jobRow(job) {
+  const pct = job.total ? Math.min(100, Math.round((job.received / job.total) * 100)) : 0
+  const installing = job.status === 'installing'
+  const barPct = installing ? job.installProgress : pct
+  const fill = h('i', { style: (barPct == null ? {} : { width: barPct + '%' }) })
+  const bar = h('div', { class: 'bar' + (barPct == null ? ' indeterminate' : '') + ' j-bar' }, fill)
+  const actions = h('div', { class: 'j-actions' })
+  if (['queued', 'running'].includes(job.status)) {
+    actions.appendChild(btn('取消', { size: 'xs', variant: 'danger', onClick: () => cancelJob(job.id) }))
+  } else if (job.status === 'failed' && job.url) {
+    actions.appendChild(btn('重试', { size: 'xs', onClick: () => retryJob(job) }))
+  }
+  if (job.dir) {
+    actions.appendChild(btn('打开', { size: 'xs', onClick: async () => {
+      try { await api.post('/api/fs/open', { path: job.dir }) } catch (e) { toast('打开失败：' + e.message, 'err') }
+    } }))
+  }
+  const kind = job.status === 'done' ? 'ok' : job.status === 'failed' ? 'bad' : ['running', 'installing', 'queued'].includes(job.status) ? 'warn' : ''
+  return h('div', { class: 'job' },
+    h('span', { class: 'dot ' + kind, title: jobStatusLabel(job) }),
+    h('div', { class: 'j-main' },
+      h('div', { class: 'j-title', title: job.filename }, job.filename),
+      h('div', { class: 'j-meta' }, jobMeta(job)),
+      bar,
+      job.error ? h('div', { class: 'j-error' }, job.error) : null
+    ),
+    actions
+  )
+}
+
+function renderTaskDrawer(bodyEl) {
+  if (!bodyEl) return
+  clear(bodyEl)
+  const items = state.jobs
+  const running = items.filter((j) => ['queued', 'running', 'installing'].includes(j.status))
+  const finished = items.filter((j) => !['queued', 'running', 'installing'].includes(j.status))
+  const count = document.getElementById('drawerCount')
+  if (count) { count.textContent = String(running.length); count.hidden = running.length === 0 }
+  if (!items.length) {
+    bodyEl.appendChild(h('div', { class: 'empty-state' },
+      icon('download', { size: 22 }),
+      h('div', { class: 'es-title' }, '没有任务'),
+      h('div', { class: 'es-text' }, '社区资源下载、服务端核心下载与整合包转换的任务会显示在这里。')
+    ))
+    return
+  }
+  const groups = [
+    ['进行中', running],
+    ['已结束', finished.slice(0, 40)]
+  ]
+  for (const [label, list] of groups) {
+    if (!list.length) continue
+    bodyEl.appendChild(h('div', { class: 'overline', style: { padding: '4px 2px' } }, `${label} · ${list.length}`))
+    for (const job of list) bodyEl.appendChild(jobRow(job))
+  }
+}
+
+function openTaskDrawer() {
+  openDrawer({
+    title: '任务',
+    width: 430,
+    render: (body) => renderTaskDrawer(body),
+    footer: h('div', { class: 'row', style: { width: '100%', justifyContent: 'space-between' } },
+      btn('刷新', { size: 'sm', iconName: 'refresh', onClick: refreshJobs }),
+      btn('清空记录', { size: 'sm', variant: 'danger', onClick: clearAllJobs })
+    )
+  })
+  refreshJobs()
+}
+
+/* ------------------------------------------------------------------ */
+/* command palette                                                     */
+/* ------------------------------------------------------------------ */
+
+function commandItems() {
+  const items = []
+  for (const f of state.features.filter((x) => x.enabled)) {
+    items.push({
+      group: '功能',
+      label: f.name,
+      hint: state.tiles.has(f.id) ? '定位' : '添加',
+      iconName: FEATURE_ICONS[f.id] || 'puzzle',
+      keywords: f.desc + ' ' + f.id,
+      run: () => navigateFeature(f.id)
+    })
+  }
+  items.push(
+    { group: '动作', label: '添加磁贴', hint: '', iconName: 'add', run: openAddTile },
+    { group: '动作', label: '全部折叠', hint: '', iconName: 'collapse', run: () => setAllCollapsed(true) },
+    { group: '动作', label: '全部展开', hint: '', iconName: 'expand', run: () => setAllCollapsed(false) },
+    { group: '动作', label: '重新加载功能', hint: '', iconName: 'refresh', run: reloadFeatures },
+    { group: '动作', label: '打开设置', hint: '', iconName: 'settings', run: () => settingsUI.open('general') },
+    { group: '动作', label: '打开任务抽屉', hint: '', iconName: 'download', run: openTaskDrawer },
+    { group: '动作', label: '清空任务记录', hint: '', iconName: 'trash', run: clearAllJobs },
+    { group: '动作', label: '隐藏所有折叠磁贴', hint: '', iconName: 'eye-off', run: async () => {
+      const collapsed = Array.from(state.tiles.values()).filter((t) => t.collapsed)
+      for (const t of collapsed) await hideTile(t.el.dataset.id)
+    } }
+  )
+  const sections = settingsUI?.sections?.() || []
+  for (const s of sections) {
+    items.push({ group: '设置', label: s.label, hint: s.desc || '', iconName: s.iconName, run: () => settingsUI.open(s.id) })
+  }
+  return items
+}
+
+async function reloadFeatures() {
+  try {
+    const data = await api.get('/api/features')
+    state.features = data.items
+    await syncTiles()
+    toast('已重新加载功能', 'ok')
+  } catch (e) {
+    toast('重载失败：' + e.message, 'err')
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* window chrome (WebView2 frameless host)                             */
+/* ------------------------------------------------------------------ */
+
+function initNativeChrome() {
+  const wv = window.chrome && window.chrome.webview
+  if (!wv) return
+  document.body.classList.add('nv')
+  const wc = document.getElementById('winControls')
+  if (wc) {
+    wc.hidden = false
+    const maxBtn = wc.querySelector('[data-act="max"]')
+    wv.addEventListener?.('message', (ev) => {
+      const m = ev.data
+      if (m === 'wm 1') maxBtn?.classList.add('maximized')
+      else if (m === 'wm 0') maxBtn?.classList.remove('maximized')
+    })
+    wc.querySelectorAll('button').forEach((b) => {
+      b.onclick = () => {
+        const act = b.dataset.act
+        if (act === 'min' || act === 'close') {
+          try { wv.postMessage(act) } catch {}
+        } else if (act === 'max') {
+          try { wv.postMessage('max') } catch {}
+          b.classList.toggle('maximized')
+        }
+      }
+    })
+  }
+  const bar = document.querySelector('header.titlebar')
+  if (!bar) return
+  const interactive = (t) => !!t.closest('button, a, input, select, textarea, label, .win-controls, .titlebar-right')
+
+  const RZ = { n: 12, s: 15, e: 11, w: 10, nw: 13, ne: 14, sw: 16, se: 17 }
+  const rzLayer = h('div', { class: 'rsz-layer' })
+  for (const pos of Object.keys(RZ)) {
+    const zone = h('div', { class: 'rsz rsz-' + pos })
+    zone.addEventListener('pointerdown', (e) => {
+      e.preventDefault()
+      try { wv.postMessage('rsz ' + RZ[pos]) } catch {}
+    })
+    rzLayer.appendChild(zone)
+  }
+  document.body.appendChild(rzLayer)
+
+  bar.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || interactive(e.target)) return
+    try { wv.postMessage('cap') } catch {}
+  })
+  bar.addEventListener('dblclick', (e) => {
+    if (interactive(e.target)) return
+    try { wv.postMessage('max') } catch {}
+  })
+}
+
+/* ------------------------------------------------------------------ */
+/* boot                                                                */
+/* ------------------------------------------------------------------ */
+
+function bindToolbar() {
+  const addBtn = document.getElementById('btnAddTile')
+  if (addBtn) {
+    clear(addBtn)
+    addBtn.append(icon('add', { size: 13 }), h('span', {}, '添加磁贴'))
+    addBtn.onclick = openAddTile
+  }
+  const emptyAdd = document.getElementById('btnEmptyAdd')
+  if (emptyAdd) emptyAdd.onclick = openAddTile
+  const reload = document.getElementById('btnReload')
+  if (reload) {
+    clear(reload)
+    reload.append(icon('refresh', { size: 13 }), h('span', {}, '重载'))
+    reload.onclick = reloadFeatures
+  }
+  const settingsBtn = document.getElementById('btnSettings')
+  if (settingsBtn) {
+    clear(settingsBtn)
+    settingsBtn.appendChild(icon('settings', { size: 18 }))
+    settingsBtn.onclick = () => openSettingsPage('general')
+  }
+  const railAdd = document.getElementById('btnRailAdd')
+  if (railAdd) {
+    clear(railAdd)
+    railAdd.appendChild(icon('add', { size: 18 }))
+    railAdd.onclick = openAddTile
+  }
+  const wsBtn = document.getElementById('btnWorkspace')
+  if (wsBtn) {
+    clear(wsBtn)
+    wsBtn.appendChild(icon('workspace', { size: 18 }))
+    wsBtn.onclick = () => {
+      markRail('')
+      closeSettingsPage()
+      document.getElementById('workspace').scrollTo({ top: 0, behavior: 'smooth' })
+    }
+  }
+  const collapseBtn = document.getElementById('btnCollapseAll')
+  if (collapseBtn) {
+    collapseBtn.onclick = () => {
+      const tiles = Array.from(state.tiles.values())
+      setAllCollapsed(!tiles.every((t) => t.collapsed))
+    }
+  }
+  const closeSettings = document.getElementById('btnCloseSettings')
+  if (closeSettings) closeSettings.onclick = () => closeSettingsPage()
+  const commandBtn = document.getElementById('btnCommand')
+  if (commandBtn) commandBtn.onclick = openCommandPalette
+  const benchClose = document.getElementById('benchClose')
+  if (benchClose) benchClose.onclick = closeBench
+  const sbTasks = document.getElementById('sbTasks')
+  if (sbTasks) sbTasks.onclick = openTaskDrawer
+  const sbEngine = document.getElementById('sbEngine')
+  if (sbEngine) sbEngine.onclick = () => openSettingsPage('monitor')
+  const tbStatus = document.getElementById('tbStatus')
+  if (tbStatus) tbStatus.onclick = () => {
+    const dot = document.getElementById('hbDot')
+    const st = dot?.className?.includes('bad') ? '本地服务连接中断' : '本地服务运行正常'
+    toast(st, 'info')
+  }
+}
+
+function buildColumnControl() {
+  const wrap = document.getElementById('colSegWrap')
+  if (!wrap) return
+  clear(wrap)
+  for (let n = 1; n <= 4; n++) {
+    const b = h('button', { class: 'btn btn-sm', type: 'button', dataset: { cols: String(n) }, title: `${n} 列` }, String(n))
+    b.onclick = async () => {
+      if (!state.settings) return
+      state.settings.general.tileColumns = n
+      applySettings()
+      try {
+        await api.put('/api/settings', { general: { tileColumns: n } })
+      } catch (e) {
+        toast('保存列数失败：' + e.message, 'err')
+      }
+    }
+    wrap.appendChild(b)
+  }
+}
+
+function handleHeartbeat(st) {
+  const level = st.level
+  const dotClass = level === 'green' ? 'dot ok' : level === 'amber' ? 'dot warn' : 'dot bad'
+  const text = level === 'green' ? '本地服务正常' : level === 'amber' ? '心跳不稳定' : '本地服务已断开'
+  for (const id of ['hbDot', 'tbDot']) {
+    const el = document.getElementById(id)
+    if (el) el.className = dotClass
+  }
+  const hbText = document.getElementById('hbText')
+  if (hbText) hbText.textContent = text
+  const tbText = document.getElementById('tbStatusText')
+  if (tbText) tbText.textContent = level === 'green' ? '本地服务' : text
+}
+
+async function boot() {
+  const bootData = await api.get('/api/bootstrap')
+  state.settings = bootData.settings
+  state.features = bootData.features
+  state.version = bootData.version || ''
+  state.author = bootData.author || 'Rinkore28'
+
+  const brandVersion = document.getElementById('brandVersion')
+  if (brandVersion && state.version) brandVersion.textContent = `v${state.version}`
+  const sbVersion = document.getElementById('sbVersion')
+  if (sbVersion) sbVersion.textContent = `${APP_TITLE} · v${state.version}`
+  const sbAuthor = document.getElementById('sbAuthor')
+  if (sbAuthor) sbAuthor.textContent = state.author
+
+  document.title = `${APP_TITLE}${state.version ? ' v' + state.version : ''}`
+  buildColumnControl()
+  applySettings()
+
+  grid = new TileGrid(document.getElementById('grid'), {
+    onChange: () => persistLayout(),
+    animations: state.settings.general.animations !== false,
+    masonry: true
+  })
+
+  initSettingsUI()
+  commandUI = initCommandPalette(commandItems)
+  bindToolbar()
+  initNativeChrome()
+
+  bus.on('heartbeat:state', handleHeartbeat)
+  bus.on('settings:changed', () => refreshEngineStatus())
+
+  await syncTiles()
+  await refreshEngineStatus()
+  await refreshJobs()
+  jobsTimer = setInterval(refreshJobs, 2500)
+  engineTimer = setInterval(refreshEngineStatus, 8000)
+
+  if (state.settings.i18n?.autoStart) {
+    api.post('/api/i18n/start', { i18n: state.settings.i18n }).catch(() => {})
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return
+    if (isModalOpen() || isCommandPaletteOpen() || isDrawerOpen()) return
+    if (document.getElementById('benchView')?.hidden === false) {
+      e.preventDefault()
+      closeBench()
+      return
+    }
+    if (settingsUI?.isOpen()) {
+      e.preventDefault()
+      closeSettingsPage()
+    }
+  })
+
+  window.addEventListener('resize', debounce(() => {
+    grid?.relayout?.()
+    if (state.settings) syncColumnControl(Number(state.settings.general.tileColumns) || 1)
+  }, 120))
+}
+
+// heartbeat must start immediately so the backend knows the window is alive
 startHeartbeat()
 
 boot().catch((e) => {
-  document.body.appendChild(h('div', { style: { padding: '20px', color: '#ff5f56' } }, '初始化失败：' + e.message))
+  console.error('[boot]', e)
+  const gridEl = document.getElementById('grid')
+  if (gridEl) {
+    clear(gridEl)
+    gridEl.style.position = 'static'
+    gridEl.appendChild(errorState('初始化失败', e.message || String(e), btn('重新加载', { variant: 'primary', onClick: () => location.reload() })))
+  }
 })

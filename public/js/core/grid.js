@@ -1,8 +1,15 @@
-// 可拖拽磁贴网格：指针事件 + FLIP 动画，零依赖
-const DRAG_THRESHOLD = 4
+// Masonry tile grid — pointer dragging, FLIP reflow, no dependencies.
+const DRAG_THRESHOLD = 5
 
 export class TileGrid {
-  constructor(container, { onChange, animations = true, itemSelector = '.tile', handleSelector = '.tile-head', placeholderClass = 'tile-placeholder', masonry = false } = {}) {
+  constructor(container, {
+    onChange,
+    animations = true,
+    itemSelector = '.tile',
+    handleSelector = '.tile-head',
+    placeholderClass = 'tile-placeholder',
+    masonry = false
+  } = {}) {
     this.container = container
     this.onChange = onChange || (() => {})
     this.animations = animations
@@ -14,21 +21,23 @@ export class TileGrid {
     this.resizeObserver = null
     this.dragging = null
     this.lastDragEnd = 0
+    this._onResize = () => this._scheduleLayout()
+    this._onDown = (e) => this._down(e)
+
     if (this.masonry) {
       container.classList.add('masonry-grid')
       this.resizeObserver = typeof ResizeObserver === 'function'
         ? new ResizeObserver(() => this._scheduleLayout())
         : null
-      window.addEventListener('resize', () => this._scheduleLayout())
+      window.addEventListener('resize', this._onResize)
     }
-    container.addEventListener('pointerdown', (e) => this._down(e))
+    container.addEventListener('pointerdown', this._onDown)
   }
 
   setAnimations(v) {
     this.animations = !!v
   }
 
-  /** 挂载一个磁贴元素（需带 data-id） */
   mount(el, beforeId) {
     if (beforeId) {
       const ref = this.container.querySelector(`[data-id="${beforeId}"]`)
@@ -72,9 +81,15 @@ export class TileGrid {
     this._scheduleLayout()
   }
 
-  /** 重新按当前窗口宽度和磁贴高度计算瀑布流位置。 */
   relayout() {
     this._scheduleLayout()
+  }
+
+  destroy() {
+    this.resizeObserver?.disconnect()
+    this.resizeObserver = null
+    window.removeEventListener('resize', this._onResize)
+    this.container.removeEventListener('pointerdown', this._onDown)
   }
 
   _observe(el) {
@@ -89,11 +104,14 @@ export class TileGrid {
     })
   }
 
+  _columns() {
+    const styles = getComputedStyle(this.container)
+    return Math.max(1, Number.parseInt(styles.getPropertyValue('--tile-cols'), 10) || 1)
+  }
+
   _layoutMasonry() {
     if (!this.masonry) return
     const children = Array.from(this.container.children).filter((el) => {
-      // 拖动中的磁贴由指针位置以 fixed 定位控制，瀑布流只重新排布其余磁贴
-      // 和占位元素，避免布局计算把正在拖动的元素瞬移回列中。
       if (el === this.dragging?.el) return false
       return el.matches?.(this.itemSelector) || el.classList?.contains(this.placeholderClass)
     })
@@ -101,16 +119,14 @@ export class TileGrid {
       this.container.style.height = ''
       return
     }
-
     const styles = getComputedStyle(this.container)
-    const columns = Math.max(1, Number.parseInt(styles.getPropertyValue('--tile-cols'), 10) || 1)
+    const columns = this._columns()
     const gap = Number.parseFloat(styles.columnGap || styles.gap) || 0
     const width = this.container.clientWidth
     if (!width) return
     const colWidth = Math.max(0, (width - gap * (columns - 1)) / columns)
     const heights = Array.from({ length: columns }, () => 0)
 
-    // 先固定宽度并清掉旧位置，才能得到当前内容真实高度。
     for (const el of children) {
       el.style.width = colWidth + 'px'
       el.style.left = '0px'
@@ -127,7 +143,7 @@ export class TileGrid {
       el.style.top = `${top}px`
       heights[column] = top + height + gap
     }
-    this.container.style.height = Math.max(0, ...heights) - gap + 'px'
+    this.container.style.height = Math.max(0, Math.max(...heights) - gap) + 'px'
   }
 
   _down(e) {
@@ -136,7 +152,7 @@ export class TileGrid {
     if (!el || !this.container.contains(el)) return
     const handle = e.target.closest(this.handleSelector)
     if (!handle) return
-    if (e.target.closest('button, input, select, textarea, a, [data-nodrag]')) return
+    if (e.target.closest('button, input, select, textarea, a, label, [data-nodrag]')) return
 
     const startX = e.clientX
     const startY = e.clientY
@@ -164,15 +180,12 @@ export class TileGrid {
   _start(el, x, y) {
     const rect = el.getBoundingClientRect()
     const ph = document.createElement('div')
-    // 只复制横向跨列尺寸。展开磁贴的实际高度由内容决定，不能把
-    // 旧的 h-2 标记复制成 grid-row 跨行占位，否则拖动时也会错行。
     ph.className = this.placeholderClass + ' ' + (el.className.match(/span-\d/g) || []).join(' ')
     ph.style.height = rect.height + 'px'
     ph.style.minHeight = rect.height + 'px'
     this.container.insertBefore(ph, el)
 
-    // 记住拖拽前已有的行内尺寸（例如延迟监测的临时自定义宽高/高度策略），结束后原样还原
-    const prevStyle = ['width', 'height', 'left', 'top', 'position', 'zIndex'].reduce((acc, k) => {
+    const prevStyle = ['width', 'height', 'left', 'top', 'position', 'zIndex', 'transform'].reduce((acc, k) => {
       acc[k] = el.style[k]
       return acc
     }, {})
@@ -183,8 +196,7 @@ export class TileGrid {
       offsetX: x - rect.left,
       offsetY: y - rect.top,
       width: rect.width,
-      height: rect.height,
-      scrollRaf: null
+      height: rect.height
     }
     el.dataset.w = rect.width
     el.style.width = rect.width + 'px'
@@ -193,6 +205,7 @@ export class TileGrid {
     el.style.top = rect.top + 'px'
     el.classList.add('dragging')
     document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'grabbing'
   }
 
   _move(ev) {
@@ -203,7 +216,6 @@ export class TileGrid {
     d.el.style.left = left + 'px'
     d.el.style.top = top + 'px'
 
-    // 边缘自动滚动
     const ws = this.container.parentElement
     if (ws && ws.scrollHeight > ws.clientHeight) {
       const r = ws.getBoundingClientRect()
@@ -247,13 +259,13 @@ export class TileGrid {
         it.style.transition = 'none'
         it.style.transform = `translate(${dx}px, ${dy}px)`
         requestAnimationFrame(() => {
-          it.style.transition = 'transform 170ms cubic-bezier(.2,.8,.3,1)'
+          it.style.transition = 'transform 170ms cubic-bezier(.2,.7,.3,1)'
           it.style.transform = ''
           setTimeout(() => {
             it.style.transition = ''
             it.style.transform = ''
             it.classList.remove('flip')
-          }, 200)
+          }, 190)
         })
       }
     } else {
@@ -270,6 +282,7 @@ export class TileGrid {
     d.el.classList.remove('dragging')
     for (const k of Object.keys(d.prevStyle)) d.el.style[k] = d.prevStyle[k]
     document.body.style.userSelect = ''
+    document.body.style.cursor = ''
     this.dragging = null
     this.lastDragEnd = Date.now()
     this._scheduleLayout()

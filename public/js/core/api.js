@@ -1,3 +1,4 @@
+// API client — request shape is part of the contract; do not change.
 async function request(method, url, body) {
   const res = await fetch(url, {
     method,

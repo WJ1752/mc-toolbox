@@ -3,69 +3,173 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="color-scheme" content="dark light" />
 <title>Minecraft 工具箱</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%235ec96a'/><rect x='6' y='6' width='9' height='9' fill='%23000' opacity='.25'/><rect x='17' y='17' width='9' height='9' fill='%23000' opacity='.25'/></svg>" />
-<link rel="stylesheet" href="/css/style.css" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='5' fill='%23101418'/><rect x='4' y='4' width='24' height='24' rx='2' fill='%23a5633a'/><rect x='9' y='9' width='6' height='6' fill='%230c0e12' opacity='.35'/><rect x='19' y='19' width='6' height='6' fill='%230c0e12' opacity='.35'/><rect x='14' y='14' width='4' height='4' fill='%2363c77e'/></svg>" />
+<link rel="stylesheet" href="/css/tokens.css" />
+<link rel="stylesheet" href="/css/base.css" />
+<link rel="stylesheet" href="/css/components.css" />
+<link rel="stylesheet" href="/css/shell.css" />
+<link rel="stylesheet" href="/css/features.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <span class="brand-logo" aria-hidden="true"></span>
-      <div class="brand-text">
-        <strong>Minecraft 工具箱<span id="brandVersion" class="brand-version" aria-label="版本"></span></strong>
-        <small id="brandSub">磁贴式 · 可扩展</small>
+  <div class="app-shell">
+    <header class="titlebar" id="titlebar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"><i></i></span>
+        <div class="brand-text">
+          <span class="brand-name">Minecraft 工具箱</span>
+          <span class="brand-version" id="brandVersion" aria-label="版本"></span>
+        </div>
+      </div>
+      <div class="titlebar-center">
+        <button class="tb-status" id="tbStatus" type="button" title="本地服务状态">
+          <span class="dot ok" id="tbDot"></span>
+          <span id="tbStatusText">本地服务</span>
+        </button>
+        <button class="tb-command" id="btnCommand" type="button" title="打开命令面板（Ctrl/Cmd+K）">
+          <span>命令</span>
+          <span class="kbd">Ctrl K</span>
+        </button>
+      </div>
+      <div class="titlebar-right">
+        <div class="win-controls" id="winControls" hidden>
+          <button type="button" data-act="min" title="最小化" aria-label="最小化"><i class="ico ico-min" aria-hidden="true"></i></button>
+          <button type="button" data-act="max" title="最大化" aria-label="最大化"><i class="ico ico-max" aria-hidden="true"></i><i class="ico ico-restore" aria-hidden="true"></i></button>
+          <button type="button" data-act="close" title="关闭" aria-label="关闭"><i class="ico ico-close" aria-hidden="true"></i></button>
+        </div>
+      </div>
+    </header>
+
+    <div class="app-body">
+      <nav class="rail" id="rail" aria-label="功能导航">
+        <button class="rail-btn" id="btnWorkspace" type="button" title="工作台" aria-label="工作台"></button>
+        <div class="rail-sep"></div>
+        <div class="rail-features" id="railFeatures"></div>
+        <div class="rail-spacer"></div>
+        <span class="rail-label" aria-hidden="true">BENCH</span>
+        <button class="rail-btn" id="btnRailAdd" type="button" title="添加磁贴" aria-label="添加磁贴"></button>
+        <button class="rail-btn" id="btnSettings" type="button" title="设置" aria-label="设置"></button>
+      </nav>
+
+      <main class="workspace" id="workspace">
+        <div class="workspace-inner" id="workspaceInner">
+          <div class="workspace-head">
+            <div class="ws-title">
+              <span class="overline">The Bench</span>
+              <h1>工作台 <span class="ws-count" id="wsCount"></span></h1>
+            </div>
+            <div class="ws-tools">
+              <div id="colSegWrap" class="row" title="每行磁贴数"></div>
+              <span class="ws-divider"></span>
+              <button class="btn btn-sm" id="btnCollapseAll" type="button">全部折叠</button>
+              <button class="btn btn-sm" id="btnAddTile" type="button">添加磁贴</button>
+              <button class="btn btn-sm" id="btnReload" type="button">重载</button>
+            </div>
+          </div>
+          <div class="grid masonry-grid" id="grid"></div>
+          <div class="workspace-empty" id="emptyHint" hidden>
+            <span class="we-mark" aria-hidden="true"><svg viewBox="0 0 20 20" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.35"><path d="M3 3h6v6H3z"/><path d="M11 3h6v6h-6z"/><path d="M3 11h6v6H3z"/><path d="M11 11h6v6h-6z" fill="currentColor" stroke="none"/></svg></span>
+            <h2>工作台还是空的</h2>
+            <p>所有功能都在设置里保留着。添加一个磁贴，它就会出现在这张台面上。</p>
+            <button class="btn btn-primary" id="btnEmptyAdd" type="button">添加磁贴</button>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <footer class="statusbar">
+      <span class="dot ok" id="hbDot"></span>
+      <span id="hbText">本地服务正常</span>
+      <span class="sb-sep"></span>
+      <button class="sb-btn" id="sbEngine" type="button" title="监测引擎状态（打开设置）"><span class="dot" id="sbEngineDot"></span>监测引擎 <b id="sbEngineText">已暂停</b></button>
+      <span class="sb-sep"></span>
+      <button class="sb-btn" id="sbTasks" type="button" title="打开任务抽屉"><span id="sbTaskText">任务 0</span></button>
+      <span class="sb-spacer"></span>
+      <span class="sb-version" id="sbVersion"></span>
+      <div class="author-watermark" aria-hidden="true">Rinkore28</div>
+    </footer>
+  </div>
+
+  <!-- 放大工作台 -->
+  <div class="bench-view" id="benchView" hidden>
+    <div class="bench-head">
+      <span class="tile-icon" id="benchIcon" aria-hidden="true"></span>
+      <div class="bench-title">
+        <span class="overline">Bench View</span>
+        <h2 id="benchTitle">功能</h2>
+      </div>
+      <div class="bench-actions">
+        <span class="badge" id="benchBadge" hidden></span>
+        <button class="btn btn-sm" id="benchSettings" type="button">设置此项</button>
+        <button class="btn btn-sm" id="benchClose" type="button">关闭</button>
       </div>
     </div>
-    <div class="topbar-actions">
-      <button class="btn btn-ghost" id="btnCollapseAll" title="全部折叠 / 展开">⇱ 全部折叠</button>
-      <button class="btn btn-ghost" id="btnAddTile" title="添加磁贴">＋ 添加磁贴</button>
-      <button class="btn btn-ghost" id="btnReload" title="重新加载功能">↻ 重载</button>
-      <button class="btn btn-ghost" id="btnSettings" title="设置">⚙ 设置</button>
+    <div class="bench-body">
+      <nav class="bench-nav" id="benchNav" aria-label="子视图"></nav>
+      <div class="bench-content">
+        <div class="bench-inner" id="benchInner"></div>
+      </div>
     </div>
-    <div class="win-controls" id="winControls" hidden>
-      <button type="button" data-act="min" title="最小化"><i class="ico ico-min" aria-hidden="true"></i></button>
-      <button type="button" data-act="max" title="最大化"><i class="ico ico-max" aria-hidden="true"></i><i class="ico ico-restore" aria-hidden="true"></i></button>
-      <button type="button" data-act="close" title="关闭"><i class="ico ico-close" aria-hidden="true"></i></button>
-    </div>
-  </header>
-
-  <main class="workspace">
-    <div class="grid" id="grid"></div>
-    <div class="empty-hint" id="emptyHint" hidden>
-      <p>还没有任何磁贴。</p>
-      <button class="btn btn-primary" id="btnEmptyAdd">＋ 添加磁贴</button>
-    </div>
-  </main>
+  </div>
 
   <!-- 设置页 -->
   <div class="settings-page" id="settingsPage" hidden>
     <div class="settings-inner">
       <div class="settings-head">
-        <h2>设置</h2>
-        <button class="btn btn-ghost" id="btnCloseSettings">✕ 关闭</button>
+        <div class="sh-title">
+          <span class="overline">Configuration</span>
+          <h2>设置</h2>
+        </div>
+        <div class="sh-actions">
+          <span class="save-state" id="settingsSaveState">即时保存</span>
+          <button class="btn btn-ghost btn-sm" id="btnCloseSettings" type="button">关闭</button>
+        </div>
       </div>
       <div class="settings-body">
-        <nav class="settings-nav" id="settingsNav"></nav>
+        <nav class="settings-nav" id="settingsNav" aria-label="设置分区"></nav>
         <div class="settings-content" id="settingsContent"></div>
       </div>
     </div>
   </div>
 
-  <!-- 弹窗 / 抽屉 -->
-  <div class="modal-root" id="modalRoot" hidden>
-    <div class="modal-backdrop" data-close="1"></div>
-    <div class="modal" role="dialog" aria-modal="true">
-      <div class="modal-head">
-        <h3 id="modalTitle"></h3>
-        <button class="btn btn-icon" id="modalClose">✕</button>
+  <!-- 任务抽屉 -->
+  <div class="drawer-root" id="drawerRoot" hidden>
+    <div class="drawer-backdrop" data-drawer-close="1"></div>
+    <aside class="drawer" role="dialog" aria-modal="true" aria-label="任务">
+      <div class="drawer-head">
+        <h3 id="drawerTitle">任务</h3>
+        <span class="badge" id="drawerCount">0</span>
+        <button class="btn btn-icon" id="drawerClose" type="button" title="关闭" aria-label="关闭"><svg viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="square" aria-hidden="true"><path d="M5 5l10 10"/><path d="M15 5L5 15"/></svg></button>
       </div>
-      <div class="modal-body" id="modalBody"></div>
-      <div class="modal-foot" id="modalFoot"></div>
+      <div class="drawer-body" id="drawerBody"></div>
+      <div class="drawer-foot" id="drawerFoot"></div>
+    </aside>
+  </div>
+
+  <!-- 命令面板 -->
+  <div class="cmdk-root" id="cmdkRoot" hidden>
+    <div class="cmdk-backdrop" id="cmdkBackdrop"></div>
+    <div class="cmdk" role="dialog" aria-modal="true" aria-label="命令面板">
+      <div class="cmdk-search">
+        <span id="cmdkIcon" aria-hidden="true"></span>
+        <input id="cmdkInput" type="text" placeholder="搜索功能或动作…" aria-label="搜索功能或动作" autocomplete="off" spellcheck="false" />
+        <span class="kbd">Esc</span>
+      </div>
+      <div class="cmdk-list" id="cmdkList" role="listbox" aria-label="命令结果"></div>
+      <div class="cmdk-foot">
+        <span><span class="kbd">↑</span><span class="kbd">↓</span> 选择</span>
+        <span><span class="kbd">Enter</span> 执行</span>
+        <span><span class="kbd">Esc</span> 关闭</span>
+      </div>
     </div>
   </div>
 
-  <div class="toast-root" id="toastRoot"></div>
-  <div class="author-watermark" aria-hidden="true">Rinkore28</div>
+  <div class="modal-root" id="modalRoot" hidden>
+    <div class="modal-backdrop" data-close="1"></div>
+  </div>
+  <div class="context-root" id="contextRoot" hidden></div>
+  <div class="toast-root" id="toastRoot" aria-live="polite"></div>
 
   <script type="module" src="/js/app.js"></script>
 </body>

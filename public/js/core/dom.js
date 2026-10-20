@@ -1,4 +1,4 @@
-// 极简 DOM / 格式化工具
+// Minimal DOM + formatting helpers (public contract: /js/core/dom.js)
 export function h(tag, props, ...children) {
   const el = document.createElement(tag)
   if (props) {
@@ -19,12 +19,20 @@ export function h(tag, props, ...children) {
   return el
 }
 
+/** SVG-safe element factory for icon internals. */
+export const el = h
+
 export const $ = (sel, root = document) => root.querySelector(sel)
 export const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel))
 
 export function clear(el) {
   while (el.firstChild) el.removeChild(el.firstChild)
   return el
+}
+
+export function on(target, event, handler, opts) {
+  target.addEventListener(event, handler, opts)
+  return () => target.removeEventListener(event, handler, opts)
 }
 
 export function fmtTime(ts, use12h = false) {
@@ -92,8 +100,43 @@ export function debounce(fn, ms = 300) {
   }
 }
 
+export function throttle(fn, ms = 100) {
+  let last = 0
+  let timer = null
+  return (...args) => {
+    const now = Date.now()
+    const rest = ms - (now - last)
+    if (rest <= 0) {
+      last = now
+      fn(...args)
+    } else if (!timer) {
+      timer = setTimeout(() => {
+        timer = null
+        last = Date.now()
+        fn(...args)
+      }, rest)
+    }
+  }
+}
+
 export function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+}
+
+/** Minimal HTML whitelist for server MOTD (colors, bold, italic, underline, br). */
+export function sanitizeMinecraftHtml(input) {
+  const raw = String(input ?? '')
+    .replace(/\u00a7[0-9a-fk-orx]/gi, '')
+    .replace(/\r\n?/g, '\n')
+  let s = escapeHtml(raw)
+  s = s.replace(/&lt;br\s*\/?&gt;/gi, '<br>')
+  s = s.replace(/&lt;(\/?)(b|strong|i|em|u)&gt;/gi, '<$1$2>')
+  s = s.replace(/&lt;color:([#a-z0-9]+)&gt;/gi, '<span style="color:$1">')
+  s = s.replace(/&lt;\/color&gt;/gi, '</span>')
+  s = s.replace(/&lt;span[^&]*?&gt;/gi, '')
+  s = s.replace(/&lt;\/span&gt;/gi, '')
+  s = s.replace(/\n/g, '<br>')
+  return s
 }
 
 export async function copyText(text) {

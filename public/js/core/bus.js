@@ -1,4 +1,4 @@
-// 极简事件总线：功能之间可选通信（不依赖彼此是否存在）
+// Minimal event bus for optional cross-feature messages.
 const map = new Map()
 
 export const bus = {

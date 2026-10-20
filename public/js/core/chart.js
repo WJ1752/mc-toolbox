@@ -1,131 +1,41 @@
-// 轻量 Canvas 折线图（延迟监测用）
-export function drawLatencyChart(canvas, points, opts = {}) {
-  const css = getComputedStyle(document.documentElement)
-  const accent = (opts.accent || css.getPropertyValue('--accent').trim() || '#5ec96a')
-  const danger = '#ff5f56'
-  const gridColor = css.getPropertyValue('--line').trim() || '#333'
-  const textColor = css.getPropertyValue('--text-mute').trim() || '#888'
-  const warnAt = opts.warnAt || 200
+// Canvas charts — DPR-aware, theme-driven, with hover readouts.
+// Public exports are part of the feature SDK contract.
 
+function cssVar(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+  return v || fallback
+}
+
+function themeColors() {
+  return {
+    accent: cssVar('--accent', '#c07a4a'),
+    line: cssVar('--line', '#2e3540'),
+    text: cssVar('--mute', '#6e7783'),
+    dim: cssVar('--dim', '#a3acb8'),
+    danger: cssVar('--redstone', '#d9584c'),
+    warn: cssVar('--gold', '#e3b341'),
+    ok: cssVar('--emerald', '#63c77e'),
+    bg: cssVar('--surface-2', '#21262e')
+  }
+}
+
+function setupCanvas(canvas) {
   const dpr = window.devicePixelRatio || 1
-  const w = canvas.clientWidth || 600
-  const hgt = canvas.clientHeight || 200
+  const w = Math.max(1, canvas.clientWidth || 600)
+  const h = Math.max(1, canvas.clientHeight || 200)
   canvas.width = Math.floor(w * dpr)
-  canvas.height = Math.floor(hgt * dpr)
+  canvas.height = Math.floor(h * dpr)
   const ctx = canvas.getContext('2d')
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  ctx.clearRect(0, 0, w, hgt)
-
-  const padL = 38
-  const padR = 8
-  const padT = 10
-  const padB = 20
-  const iw = Math.max(10, w - padL - padR)
-  const ih = Math.max(10, hgt - padT - padB)
-
-  if (!points || !points.length) {
-    ctx.fillStyle = textColor
-    ctx.font = '12px system-ui'
-    ctx.textAlign = 'center'
-    ctx.fillText('暂无数据', w / 2, hgt / 2)
-    return
-  }
-
-  const vals = points.map((p) => (p.ok ? p.ms : null)).filter((v) => typeof v === 'number')
-  const maxV = Math.max(warnAt * 1.5, ...(vals.length ? vals : [50]))
-  const top = Math.ceil(maxV / 50) * 50
-
-  // 网格
-  ctx.strokeStyle = gridColor
-  ctx.fillStyle = textColor
-  ctx.font = '10px system-ui'
-  ctx.textAlign = 'right'
-  ctx.lineWidth = 1
-  for (let i = 0; i <= 4; i++) {
-    const y = padT + (ih * i) / 4
-    ctx.beginPath()
-    ctx.moveTo(padL, y + 0.5)
-    ctx.lineTo(padL + iw, y + 0.5)
-    ctx.stroke()
-    ctx.fillText(String(Math.round((top * (4 - i)) / 4)), padL - 6, y + 3)
-  }
-
-  // 告警线
-  if (warnAt < top) {
-    const y = padT + ih - (warnAt / top) * ih
-    ctx.strokeStyle = 'rgba(255,189,46,.45)'
-    ctx.setLineDash([4, 4])
-    ctx.beginPath()
-    ctx.moveTo(padL, y)
-    ctx.lineTo(padL + iw, y)
-    ctx.stroke()
-    ctx.setLineDash([])
-  }
-
-  const n = points.length
-  const xAt = (i) => padL + (n === 1 ? iw / 2 : (iw * i) / (n - 1))
-  const yAt = (v) => padT + ih - (Math.min(v, top) / top) * ih
-
-  // 离线区间
-  ctx.fillStyle = 'rgba(255,95,86,.22)'
-  for (let i = 0; i < n; i++) {
-    if (!points[i].ok) {
-      const x0 = xAt(i) - (n === 1 ? 20 : iw / (n - 1) / 2)
-      ctx.fillRect(x0, padT, Math.max(2, (n === 1 ? 40 : iw / (n - 1))), ih)
-    }
-  }
-
-  // 折线
-  ctx.strokeStyle = accent
-  ctx.lineWidth = 1.8
-  ctx.lineJoin = 'round'
-  ctx.beginPath()
-  let started = false
-  points.forEach((p, i) => {
-    if (!p.ok || typeof p.ms !== 'number') {
-      started = false
-      return
-    }
-    const x = xAt(i)
-    const y = yAt(p.ms)
-    if (!started) {
-      ctx.moveTo(x, y)
-      started = true
-    } else ctx.lineTo(x, y)
-  })
-  ctx.stroke()
-
-  // 超阈值点标红
-  ctx.fillStyle = danger
-  points.forEach((p, i) => {
-    if (p.ok && typeof p.ms === 'number' && p.ms > warnAt) {
-      ctx.beginPath()
-      ctx.arc(xAt(i), yAt(p.ms), 2.6, 0, Math.PI * 2)
-      ctx.fill()
-    }
-  })
-
-  // 时间轴
-  ctx.fillStyle = textColor
-  ctx.textAlign = 'center'
-  const fmt = (t) => {
-    const d = new Date(t)
-    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-  }
-  ctx.fillText(fmt(points[0].t), padL + 12, hgt - 6)
-  if (n > 1) ctx.fillText(fmt(points[n - 1].t), padL + iw - 12, hgt - 6)
+  ctx.clearRect(0, 0, w, h)
+  return { ctx, w, h, dpr }
 }
 
-// 丢包率（窗口内失败占比）：history 点没有逐点真实丢包，用「近 N 个探测点里失败比例」近似
-const LOSS_WIN = 12
-function lossAt(points, i) {
-  const s = Math.max(0, i - LOSS_WIN + 1)
-  let fails = 0
-  for (let j = s; j <= i; j++) if (!points[j].ok) fails++
-  return +((fails / (i - s + 1)) * 100).toFixed(1)
+function timeLabel(t) {
+  const d = new Date(t)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
 
-// 历史点里的 players 是「在线人数数字」（少数老数据为 {online} 对象），统一取值
 function playerCount(p) {
   if (!p || !p.ok) return null
   const v = p.players
@@ -134,64 +44,186 @@ function playerCount(p) {
   return null
 }
 
-// 通用数值折线大图（延迟/人数/丢包共用骨架），风格与延迟图一致
-function drawValueChart(canvas, points, { color = '#3ba0ff', getY = null, emptyText = '暂无数据', unit = '' } = {}) {
-  const css = getComputedStyle(document.documentElement)
-  const stroke = color || css.getPropertyValue('--accent').trim() || '#3ba0ff'
-  const gridColor = css.getPropertyValue('--line').trim() || '#333'
-  const textColor = css.getPropertyValue('--text-mute').trim() || '#888'
+const LOSS_WIN = 12
+function lossAt(points, i) {
+  const s = Math.max(0, i - LOSS_WIN + 1)
+  let fails = 0
+  for (let j = s; j <= i; j++) if (!points[j].ok) fails++
+  return +((fails / (i - s + 1)) * 100).toFixed(1)
+}
 
-  const dpr = window.devicePixelRatio || 1
-  const w = canvas.clientWidth || 600
-  const hgt = canvas.clientHeight || 200
-  canvas.width = Math.floor(w * dpr)
-  canvas.height = Math.floor(hgt * dpr)
-  const ctx = canvas.getContext('2d')
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  ctx.clearRect(0, 0, w, hgt)
+/* ---------------- hover overlay ---------------- */
+const hoverState = new WeakMap()
 
-  const padL = 38, padR = 8, padT = 10, padB = 20
+function ensureHover(canvas) {
+  let state = hoverState.get(canvas)
+  if (state) return state
+  const parent = canvas.parentElement
+  if (!parent) return null
+  if (getComputedStyle(parent).position === 'static') parent.style.position = 'relative'
+  const tip = document.createElement('div')
+  tip.className = 'chart-hover'
+  tip.hidden = true
+  parent.appendChild(tip)
+  const line = document.createElement('div')
+  line.style.cssText = 'position:absolute;top:0;bottom:0;width:1px;background:currentColor;opacity:.18;pointer-events:none;display:none'
+  parent.appendChild(line)
+  state = { tip, line, data: null }
+  hoverState.set(canvas, state)
+
+  canvas.addEventListener('pointermove', (e) => {
+    const d = state.data
+    if (!d || !d.n) return
+    const rect = canvas.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    if (x < d.padL - 4 || x > d.padL + d.iw + 4) { hide(); return }
+    const rel = (x - d.padL) / Math.max(1, d.iw)
+    const idx = Math.max(0, Math.min(d.n - 1, Math.round(rel * (d.n - 1))))
+    const p = d.points[idx]
+    const v = d.getY(p, idx, d.points)
+    if (v === null || v === undefined) { hide(); return }
+    const px = d.xAt(idx)
+    const py = d.yAt(v)
+    tip.hidden = false
+    tip.textContent = `${timeLabel(p.t)} · ${d.format ? d.format(v) : v}${d.unit ? ' ' + d.unit : ''}`
+    tip.style.left = Math.max(20, Math.min(d.w - 20, px)) + 'px'
+    tip.style.top = Math.max(18, py - 8) + 'px'
+    line.hidden = false
+    line.style.left = px + 'px'
+    line.style.color = d.color
+  })
+  canvas.addEventListener('pointerleave', hide)
+  function hide() {
+    tip.hidden = true
+    line.hidden = true
+  }
+  return state
+}
+
+/* ---------------- generic value chart ---------------- */
+function drawValueChart(canvas, points, {
+  color = '#3ba0ff',
+  getY = null,
+  unit = '',
+  emptyText = '暂无数据',
+  warnAt = null,
+  offlineBands = false,
+  area = false,
+  format = null,
+  maxTop = null
+} = {}) {
+  const c = themeColors()
+  const { ctx, w, h } = setupCanvas(canvas)
+  const stroke = color || c.accent
+  const padL = 38
+  const padR = 10
+  const padT = 10
+  const padB = 20
   const iw = Math.max(10, w - padL - padR)
-  const ih = Math.max(10, hgt - padT - padB)
+  const ih = Math.max(10, h - padT - padB)
+  const pts = Array.isArray(points) ? points : []
 
-  const pairs = (points || []).map((p, i) => {
+  const pairs = pts.map((p, i) => {
     let v = null
-    try { if (p && getY) { const raw = getY(p, i, points); if (raw != null && !Number.isNaN(raw)) v = raw } } catch {}
-    return { i, v: v < 0 ? null : v }
+    try {
+      if (p && getY) {
+        const raw = getY(p, i, pts)
+        if (raw != null && !Number.isNaN(raw)) v = raw
+      }
+    } catch {}
+    return { i, v: v != null && v >= 0 ? v : null }
   })
   const nums = pairs.filter((x) => x.v != null).map((x) => x.v)
+
   if (!nums.length) {
-    ctx.fillStyle = textColor
-    ctx.font = '12px system-ui'
+    ctx.fillStyle = c.text
+    ctx.font = '12px ' + cssVar('--font-sans', 'system-ui')
     ctx.textAlign = 'center'
-    ctx.fillText(emptyText, w / 2, hgt / 2)
+    ctx.fillText(emptyText, w / 2, h / 2)
+    const st = ensureHover(canvas)
+    if (st) st.data = null
     return
   }
-  const maxV = Math.max(...nums)
+
+  const maxV = maxTop != null ? maxTop : Math.max(...nums)
   const step = maxV <= 10 ? 2 : maxV <= 40 ? 10 : maxV <= 100 ? 20 : maxV <= 250 ? 50 : maxV <= 1000 ? 100 : maxV <= 5000 ? 500 : 1000
   const top = Math.max(step, Math.ceil(maxV / step) * step)
-  const n = points.length
+  const n = pts.length
   const xAt = (i) => padL + (n === 1 ? iw / 2 : (iw * i) / (n - 1))
   const yAt = (v) => padT + ih - (Math.min(v, top) / top) * ih
 
-  // 网格
-  ctx.strokeStyle = gridColor
-  ctx.fillStyle = textColor
-  ctx.font = '10px system-ui'
+  // grid
+  ctx.strokeStyle = c.line
+  ctx.fillStyle = c.text
+  ctx.font = '9.5px ' + cssVar('--font-mono', 'monospace')
   ctx.textAlign = 'right'
   ctx.lineWidth = 1
   for (let i = 0; i <= 4; i++) {
-    const y = padT + (ih * i) / 4
+    const y = Math.round(padT + (ih * i) / 4) + 0.5
+    ctx.beginPath()
+    ctx.moveTo(padL, y)
+    ctx.lineTo(padL + iw, y)
+    ctx.stroke()
+    ctx.fillText(String(Math.round((top * (4 - i)) / 4)) + (unit === '%' ? '%' : ''), padL - 6, y + 3)
+  }
+
+  // warn threshold
+  if (warnAt != null && warnAt > 0 && warnAt < top) {
+    const y = padT + ih - (warnAt / top) * ih
+    ctx.save()
+    ctx.setLineDash([3, 3])
+    ctx.strokeStyle = c.warn
+    ctx.globalAlpha = 0.5
     ctx.beginPath()
     ctx.moveTo(padL, y + 0.5)
     ctx.lineTo(padL + iw, y + 0.5)
     ctx.stroke()
-    ctx.fillText(String(Math.round((top * (4 - i)) / 4)) + (unit ? ' ' + unit : ''), padL - 6, y + 3)
+    ctx.restore()
   }
 
-  // 折线（离线 / 无数据处断开）
-  ctx.lineWidth = 1.6
+  // offline bands
+  if (offlineBands) {
+    ctx.fillStyle = c.danger
+    ctx.globalAlpha = 0.12
+    const bandW = n === 1 ? iw : iw / (n - 1)
+    for (let i = 0; i < n; i++) {
+      if (pts[i] && pts[i].ok === false) {
+        ctx.fillRect(xAt(i) - bandW / 2, padT, Math.max(2, bandW), ih)
+      }
+    }
+    ctx.globalAlpha = 1
+  }
+
+  // area fill
+  if (area) {
+    const grad = ctx.createLinearGradient(0, padT, 0, padT + ih)
+    grad.addColorStop(0, hexToRgba(stroke, 0.18))
+    grad.addColorStop(1, hexToRgba(stroke, 0))
+    ctx.fillStyle = grad
+    ctx.beginPath()
+    let started = false
+    let firstX = 0
+    let lastX = 0
+    for (const { i, v } of pairs) {
+      if (v == null) continue
+      const x = xAt(i)
+      const y = yAt(v)
+      if (!started) { ctx.moveTo(x, y); firstX = x; started = true } else ctx.lineTo(x, y)
+      lastX = x
+    }
+    if (started) {
+      ctx.lineTo(lastX, padT + ih)
+      ctx.lineTo(firstX, padT + ih)
+      ctx.closePath()
+      ctx.fill()
+    }
+  }
+
+  // line (break on gaps)
+  ctx.lineWidth = 1.7
   ctx.strokeStyle = stroke
+  ctx.lineJoin = 'round'
+  ctx.lineCap = 'round'
   ctx.beginPath()
   let pen = false
   for (const { i, v } of pairs) {
@@ -202,93 +234,132 @@ function drawValueChart(canvas, points, { color = '#3ba0ff', getY = null, emptyT
   }
   ctx.stroke()
 
-  // 时间轴
-  ctx.fillStyle = textColor
-  ctx.textAlign = 'center'
-  const fmt = (t) => {
-    const d = new Date(t)
-    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  // Isolated samples (e.g. a brand-new monitor) would otherwise be invisible.
+  ctx.fillStyle = stroke
+  for (let k = 0; k < pairs.length; k++) {
+    const cur = pairs[k]
+    if (cur.v == null) continue
+    const prevNull = k === 0 || pairs[k - 1].v == null
+    const nextNull = k === pairs.length - 1 || pairs[k + 1].v == null
+    if (prevNull && nextNull) {
+      ctx.beginPath()
+      ctx.arc(xAt(cur.i), yAt(cur.v), 2.6, 0, Math.PI * 2)
+      ctx.fill()
+    }
   }
-  ctx.fillText(fmt(points[0].t), padL + 12, hgt - 6)
-  if (n > 1) ctx.fillText(fmt(points[n - 1].t), padL + iw - 12, hgt - 6)
+
+  // points over threshold
+  if (warnAt != null) {
+    ctx.fillStyle = c.danger
+    for (const { i, v } of pairs) {
+      if (v == null) continue
+      if (v > warnAt) {
+        ctx.beginPath()
+        ctx.arc(xAt(i), yAt(v), 2.4, 0, Math.PI * 2)
+        ctx.fill()
+      }
+    }
+  }
+
+  // time axis
+  ctx.fillStyle = c.text
+  ctx.font = '9.5px ' + cssVar('--font-mono', 'monospace')
+  ctx.textAlign = 'center'
+  if (pts[0]?.t) ctx.fillText(timeLabel(pts[0].t), padL + 16, h - 5)
+  if (n > 1 && pts[n - 1]?.t) ctx.fillText(timeLabel(pts[n - 1].t), padL + iw - 16, h - 5)
+
+  const st = ensureHover(canvas)
+  if (st) {
+    st.data = { points: pts, n, xAt, yAt, padL, iw, w, unit, color: stroke, getY, format }
+  }
 }
 
-// 在线人数折线：取每个 ok 探测点的人数（p.players 为数字或 {online}）
-export function drawPlayersChart(canvas, points, accent = '#3ba0ff') {
+function hexToRgba(color, alpha) {
+  if (color.startsWith('#')) {
+    const hex = color.slice(1)
+    const full = hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex
+    const num = parseInt(full.slice(0, 6), 16)
+    if (Number.isNaN(num)) return `rgba(192,122,74,${alpha})`
+    return `rgba(${(num >> 16) & 255},${(num >> 8) & 255},${num & 255},${alpha})`
+  }
+  return color
+}
+
+/* ---------------- latency ---------------- */
+export function drawLatencyChart(canvas, points, opts = {}) {
+  const warnAt = opts.warnAt || 200
   return drawValueChart(canvas, points, {
-    color: accent,
-    emptyText: '暂无人数数据',
-    getY: (p) => playerCount(p)
+    color: opts.accent || cssVar('--accent', '#c07a4a'),
+    unit: 'ms',
+    emptyText: '暂无延迟数据',
+    warnAt,
+    offlineBands: true,
+    area: true,
+    format: (v) => Math.round(v) + ' ms',
+    getY: (p) => (p && p.ok && typeof p.ms === 'number' ? p.ms : null)
   })
 }
 
-// 丢包率折线：窗口内失败占比（无逐点真实丢包，用近 12 点失败比例近似）
-export function drawLossChart(canvas, points, accent = '#ff8a4c') {
+export function drawPlayersChart(canvas, points, accent) {
   return drawValueChart(canvas, points, {
-    color: accent,
+    color: accent || cssVar('--lapis', '#4a7dbd'),
+    unit: '人',
+    emptyText: '暂无人数数据',
+    getY: (p) => playerCount(p),
+    format: (v) => v + ' 人'
+  })
+}
+
+export function drawLossChart(canvas, points, accent) {
+  return drawValueChart(canvas, points, {
+    color: accent || cssVar('--gold', '#e3b341'),
     unit: '%',
     emptyText: '暂无丢包数据',
-    getY: (p, i, pts) => lossAt(pts, i)
+    getY: (p, i, pts) => (pts && pts.length ? lossAt(pts, i) : null),
+    format: (v) => v.toFixed(1) + '%',
+    maxTop: 100
   })
 }
 
-// 迷你 sparkline
+/* ---------------- sparklines ---------------- */
 export function drawSpark(canvas, points, accent = '#5ec96a') {
-  const dpr = window.devicePixelRatio || 1
-  const w = canvas.clientWidth || 200
-  const h = canvas.clientHeight || 34
-  canvas.width = Math.floor(w * dpr)
-  canvas.height = Math.floor(h * dpr)
-  const ctx = canvas.getContext('2d')
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  ctx.clearRect(0, 0, w, h)
+  const c = themeColors()
+  const { ctx, w, h } = setupCanvas(canvas)
   if (!points || !points.length) return
+  const stroke = accent || c.accent
   const vals = points.map((p) => (p.ok ? p.ms : null))
   const max = Math.max(60, ...vals.filter((v) => typeof v === 'number'))
   const n = vals.length
   const xAt = (i) => (n === 1 ? w / 2 : (w * i) / (n - 1))
   const yAt = (v) => h - 2 - (v / max) * (h - 6)
 
-  ctx.fillStyle = 'rgba(255,95,86,.25)'
+  ctx.fillStyle = c.danger
+  ctx.globalAlpha = 0.18
   for (let i = 0; i < n; i++) {
     if (vals[i] === null) ctx.fillRect(xAt(i) - w / n / 2, 0, Math.max(1.5, w / n), h)
   }
-  ctx.strokeStyle = accent
+  ctx.globalAlpha = 1
+  ctx.strokeStyle = stroke
   ctx.lineWidth = 1.4
   ctx.beginPath()
   let started = false
   vals.forEach((v, i) => {
-    if (v === null) {
-      started = false
-      return
-    }
-    if (!started) {
-      ctx.moveTo(xAt(i), yAt(v))
-      started = true
-    } else ctx.lineTo(xAt(i), yAt(v))
+    if (v === null) { started = false; return }
+    if (!started) { ctx.moveTo(xAt(i), yAt(v)); started = true } else ctx.lineTo(xAt(i), yAt(v))
   })
   ctx.stroke()
 }
 
-// 迷你折线（磁贴卡片）也跟随「图表指标」：
-//   latency → 原延迟 sparkline；players → 在线人数；loss → 近 12 点失败占比（%）
 export function drawSparkByMetric(canvas, points, metric, accent = '#3ba0ff') {
-  const dpr = window.devicePixelRatio || 1
-  const w = canvas.clientWidth || 200
-  const h = canvas.clientHeight || 34
-  canvas.width = Math.floor(w * dpr)
-  canvas.height = Math.floor(h * dpr)
-  const ctx = canvas.getContext('2d')
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  ctx.clearRect(0, 0, w, h)
+  const c = themeColors()
+  const { ctx, w, h } = setupCanvas(canvas)
   if (!points || !points.length) return
-
   const m = metric === 'players' || metric === 'loss' ? metric : 'latency'
-  const stroke = m === 'loss' ? '#ff8a4c' : accent
+  const stroke = m === 'loss' ? c.warn : m === 'players' ? (accent || c.accent) : (accent || c.accent)
   const vals = points.map((p, i, arr) => {
     if (m === 'players') return playerCount(p)
     if (m === 'loss') return lossAt(arr, i)
-    return p.ok ? p.ms : null
+    return p.ok && typeof p.ms === 'number' ? p.ms : null
   })
   const nums = vals.filter((v) => typeof v === 'number')
   const max = Math.max(m === 'latency' ? 60 : 10, ...nums)
@@ -296,24 +367,34 @@ export function drawSparkByMetric(canvas, points, metric, accent = '#3ba0ff') {
   const xAt = (i) => (n === 1 ? w / 2 : (w * i) / (n - 1))
   const yAt = (v) => h - 2 - (v / max) * (h - 6)
 
-  // 离线区间（红底竖条）
-  ctx.fillStyle = 'rgba(255,95,86,.25)'
+  ctx.fillStyle = c.danger
+  ctx.globalAlpha = 0.2
   for (let i = 0; i < n; i++) {
     if (!points[i].ok) ctx.fillRect(xAt(i) - w / n / 2, 0, Math.max(1.5, w / n), h)
   }
+  ctx.globalAlpha = 1
   ctx.strokeStyle = stroke
   ctx.lineWidth = 1.4
   ctx.beginPath()
   let started = false
   vals.forEach((v, i) => {
-    if (v === null || typeof v !== 'number') {
-      started = false
-      return
-    }
-    if (!started) {
-      ctx.moveTo(xAt(i), yAt(v))
-      started = true
-    } else ctx.lineTo(xAt(i), yAt(v))
+    if (v === null || typeof v !== 'number') { started = false; return }
+    if (!started) { ctx.moveTo(xAt(i), yAt(v)); started = true } else ctx.lineTo(xAt(i), yAt(v))
   })
   ctx.stroke()
+  // single-sample series need a visible mark
+  ctx.fillStyle = stroke
+  for (let i = 0; i < vals.length; i++) {
+    const v = vals[i]
+    if (typeof v !== 'number') continue
+    const prevNull = i === 0 || typeof vals[i - 1] !== 'number'
+    const nextNull = i === vals.length - 1 || typeof vals[i + 1] !== 'number'
+    if (prevNull && nextNull) {
+      ctx.beginPath()
+      ctx.arc(xAt(i), yAt(v), 2, 0, Math.PI * 2)
+      ctx.fill()
+    }
+  }
 }
+
+export { lossAt, playerCount, timeLabel }

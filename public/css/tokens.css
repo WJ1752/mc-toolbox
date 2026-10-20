@@ -1,0 +1,243 @@
+/* ============================================================
+   The Bench — design tokens
+   铸造台 / 2026
+   ============================================================ */
+
+:root {
+  /* typography */
+  --font-sans: "MiSans", "HarmonyOS Sans SC", "Microsoft YaHei UI", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", "Consolas", ui-monospace, monospace;
+
+  --fs-11: 11px;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-15: 15px;
+  --fs-18: 18px;
+  --fs-24: 24px;
+  --lh: 1.55;
+
+  /* spacing */
+  --sp-1: 4px;
+  --sp-2: 6px;
+  --sp-3: 8px;
+  --sp-4: 12px;
+  --sp-5: 16px;
+  --sp-6: 20px;
+  --sp-7: 24px;
+  --sp-8: 32px;
+
+  /* geometry — metal plates, not pills */
+  --r-1: 3px;
+  --r-2: 5px;
+  --r-3: 8px;
+  --r-pill: 999px;
+
+  --titlebar-h: 40px;
+  --statusbar-h: 24px;
+  --rail-w: 52px;
+  --rail-w-narrow: 44px;
+
+  /* accent defaults (overridden by user accent) */
+  --accent: #c07a4a;
+  --accent-soft: rgba(192, 122, 74, .16);
+  --accent-line: rgba(192, 122, 74, .45);
+  --accent-ink: #101215;
+
+  /* semantic */
+  --ok: #63c77e;
+  --warn: #e3b341;
+  --danger: #d9584c;
+  --info: #4a7dbd;
+  --copper: #c07a4a;
+  --patina: #4e9b8a;
+  --emerald: #63c77e;
+  --gold: #e3b341;
+  --redstone: #d9584c;
+  --lapis: #4a7dbd;
+
+  /* motion */
+  --t-fast: 120ms cubic-bezier(.2, .7, .3, 1);
+  --t: 160ms cubic-bezier(.2, .7, .3, 1);
+  --t-slow: 180ms cubic-bezier(.2, .7, .3, 1);
+
+  color-scheme: dark;
+}
+
+/* ---------- dark (default bench) ---------- */
+[data-theme="dark"] {
+  --bg: #0f1115;
+  --bg-2: #14171c;
+  --bg-3: #101318;
+  --surface: #1a1e24;
+  --surface-2: #21262e;
+  --surface-3: #2a3039;
+  --line: #2e3540;
+  --line-hi: #3d4653;
+  --text: #e9ecef;
+  --dim: #a3acb8;
+  --mute: #6e7783;
+
+  --panel: var(--surface);
+  --text-dim: var(--dim);
+  --text-mute: var(--mute);
+  --hdr: #13161b;
+
+  --shadow-1: 0 1px 0 rgba(255, 255, 255, .035) inset, 0 8px 22px rgba(0, 0, 0, .38);
+  --shadow-2: 0 18px 50px rgba(0, 0, 0, .55);
+  --inset-hi: inset 0 1px 0 rgba(255, 255, 255, .05);
+  --slot: inset 0 1px 2px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 255, 255, .035);
+  --noise: .05;
+  --brush: .022;
+  color-scheme: dark;
+}
+
+/* ---------- light: 图纸 ---------- */
+[data-theme="light"] {
+  --bg: #f2efe8;
+  --bg-2: #eae6dc;
+  --bg-3: #f7f5ef;
+  --surface: #fbf9f4;
+  --surface-2: #f1ede4;
+  --surface-3: #e6e0d3;
+  --line: #d6d0c4;
+  --line-hi: #b9b0a0;
+  --text: #23262b;
+  --dim: #50555c;
+  --mute: #666c74;
+
+  --panel: var(--surface);
+  --text-dim: var(--dim);
+  --text-mute: var(--mute);
+  --hdr: #efeade;
+
+  --ok: #3f9e5c;
+  --warn: #b08419;
+  --danger: #b8453c;
+  --info: #3c6ba3;
+  --copper: #a3602f;
+  --patina: #357f70;
+  --emerald: #3f9e5c;
+  --gold: #b08419;
+  --redstone: #b8453c;
+  --lapis: #3c6ba3;
+
+  --shadow-1: 0 1px 0 rgba(255, 255, 255, .65) inset, 0 6px 16px rgba(60, 48, 28, .10);
+  --shadow-2: 0 20px 48px rgba(50, 40, 24, .18);
+  --inset-hi: inset 0 1px 0 rgba(255, 255, 255, .8);
+  --slot: inset 0 1px 2px rgba(60, 48, 28, .16), 0 0 0 1px rgba(60, 48, 28, .07);
+  --noise: .03;
+  --brush: .03;
+  color-scheme: light;
+}
+
+/* ---------- gray ---------- */
+[data-theme="gray"] {
+  --bg: #1c1e20;
+  --bg-2: #212326;
+  --bg-3: #1a1c1e;
+  --surface: #262a2d;
+  --surface-2: #2d3236;
+  --surface-3: #363c41;
+  --line: #3b4247;
+  --line-hi: #4c555b;
+  --text: #e8e8e6;
+  --dim: #a8aca9;
+  --mute: #74797c;
+  --panel: var(--surface);
+  --text-dim: var(--dim);
+  --text-mute: var(--mute);
+  --hdr: #1d2022;
+  --shadow-1: 0 1px 0 rgba(255, 255, 255, .04) inset, 0 8px 22px rgba(0, 0, 0, .38);
+  --shadow-2: 0 18px 50px rgba(0, 0, 0, .55);
+  --inset-hi: inset 0 1px 0 rgba(255, 255, 255, .05);
+  --slot: inset 0 1px 2px rgba(0, 0, 0, .55), 0 0 0 1px rgba(255, 255, 255, .04);
+  --noise: .045;
+  --brush: .025;
+  color-scheme: dark;
+}
+
+/* ---------- orange (warm oxide) ---------- */
+[data-theme="orange"] {
+  --bg: #17120e;
+  --bg-2: #1e1813;
+  --bg-3: #15100c;
+  --surface: #251d16;
+  --surface-2: #2e241b;
+  --surface-3: #392d22;
+  --line: #443529;
+  --line-hi: #5a4735;
+  --text: #f2e9dd;
+  --dim: #bda88f;
+  --mute: #86725b;
+  --panel: var(--surface);
+  --text-dim: var(--dim);
+  --text-mute: var(--mute);
+  --hdr: #1a140f;
+  --info: #6f8fb8;
+  --shadow-1: 0 1px 0 rgba(255, 236, 214, .04) inset, 0 8px 22px rgba(0, 0, 0, .42);
+  --shadow-2: 0 18px 50px rgba(0, 0, 0, .58);
+  --inset-hi: inset 0 1px 0 rgba(255, 236, 214, .055);
+  --slot: inset 0 1px 2px rgba(0, 0, 0, .6), 0 0 0 1px rgba(255, 236, 214, .04);
+  --noise: .055;
+  --brush: .03;
+  color-scheme: dark;
+}
+
+/* ---------- red (redstone) ---------- */
+[data-theme="red"] {
+  --bg: #160f11;
+  --bg-2: #1d1416;
+  --bg-3: #130d0f;
+  --surface: #25181b;
+  --surface-2: #2e1e21;
+  --surface-3: #392629;
+  --line: #452e32;
+  --line-hi: #5a3d42;
+  --text: #f1e6e6;
+  --dim: #bfa2a4;
+  --mute: #876a6d;
+  --panel: var(--surface);
+  --text-dim: var(--dim);
+  --text-mute: var(--mute);
+  --hdr: #191113;
+  --shadow-1: 0 1px 0 rgba(255, 220, 220, .035) inset, 0 8px 22px rgba(0, 0, 0, .42);
+  --shadow-2: 0 18px 50px rgba(0, 0, 0, .58);
+  --inset-hi: inset 0 1px 0 rgba(255, 220, 220, .05);
+  --slot: inset 0 1px 2px rgba(0, 0, 0, .6), 0 0 0 1px rgba(255, 220, 220, .04);
+  --noise: .05;
+  --brush: .028;
+  color-scheme: dark;
+}
+
+/* ---------- blue (lapis night) ---------- */
+[data-theme="blue"] {
+  --bg: #0d1219;
+  --bg-2: #111821;
+  --bg-3: #0b0f15;
+  --surface: #17202c;
+  --surface-2: #1d2836;
+  --surface-3: #253242;
+  --line: #2b3b4e;
+  --line-hi: #3b4f66;
+  --text: #e4ebf4;
+  --dim: #98a9bd;
+  --mute: #68798e;
+  --panel: var(--surface);
+  --text-dim: var(--dim);
+  --text-mute: var(--mute);
+  --hdr: #0f151d;
+  --shadow-1: 0 1px 0 rgba(210, 230, 255, .04) inset, 0 8px 22px rgba(0, 0, 0, .42);
+  --shadow-2: 0 18px 50px rgba(0, 0, 0, .58);
+  --inset-hi: inset 0 1px 0 rgba(210, 230, 255, .05);
+  --slot: inset 0 1px 2px rgba(0, 0, 0, .6), 0 0 0 1px rgba(210, 230, 255, .04);
+  --noise: .045;
+  --brush: .03;
+  color-scheme: dark;
+}
+
+/* accent-derived helpers (kept in sync by app.js) */
+:root {
+  --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+  --accent-line: color-mix(in srgb, var(--accent) 48%, transparent);
+  --accent-ink: #101215;
+}
