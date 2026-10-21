@@ -75,6 +75,7 @@ export const launcherApi = {
   job: (id, after = 0) => api.get(`/api/launcher/jobs/${encodeURIComponent(id)}${qs({ after })}`),
   cancelJob: (id) => api.post(`/api/launcher/jobs/${encodeURIComponent(id)}/cancel`),
   clearJobs: () => api.post('/api/launcher/jobs/clear'),
+  communityJobs: () => api.get('/api/community/jobs'),
 
   java: (refresh = false, mc = '') => api.get('/api/launcher/java' + qs({ refresh: refresh ? 1 : '', mc })),
   requiredJava: (mc) => api.get('/api/launcher/java/required' + qs({ mc })),

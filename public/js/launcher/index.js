@@ -38,6 +38,7 @@ const state = {
   accounts: { selected: '', items: [] },
   sessions: [],
   jobs: [],
+  communityJobs: [],
   detail: null,
   detailToken: 0,
   tab: 'overview',
@@ -1354,9 +1355,13 @@ async function pollStatus(force = false) {
   if (!force && Date.now() - lastPollAt < 1200) return
   lastPollAt = Date.now()
   try {
-    const data = await api.status()
+    const [data, community] = await Promise.all([
+      api.status(),
+      api.communityJobs().catch(() => ({ items: [] }))
+    ])
     state.sessions = data.sessions || []
     state.jobs = data.jobs || []
+    state.communityJobs = community.items || []
     updateRunningIndicators()
     updateHeroRuntime()
     detectJobChanges()
@@ -1366,6 +1371,8 @@ async function pollStatus(force = false) {
 
 function detectJobChanges() {
   const active = state.jobs.filter((job) => ['queued', 'running', 'installing', 'cancelling'].includes(job.status))
+  const communityActive = (state.communityJobs || []).filter((job) => ['queued', 'running', 'installing'].includes(job.status))
+  const totalActive = active.length + communityActive.length
   let finished = null
   for (const job of state.jobs) {
     const prev = state.lastJobState.get(job.id)
@@ -1377,7 +1384,8 @@ function detectJobChanges() {
   }
   if (finished) {
     if (finished.status === 'done') {
-      toast(`${finished.type === 'pack' ? '整合包' : '实例'}「${finished.name || finished.mc}」安装完成`, 'ok')
+      const kind = finished.type === 'pack' ? '整合包' : finished.type === 'update' ? '模组更新' : finished.type === 'repair' ? '修复' : '实例'
+      toast(`${kind}「${finished.name || finished.mc}」完成`, 'ok')
       refreshAll().then(() => {
         if (finished.instanceId && state.instances.some((item) => item.id === finished.instanceId)) {
           if (!state.selectedId) selectInstance(finished.instanceId)
@@ -1390,9 +1398,9 @@ function detectJobChanges() {
   const nav = navWrapEl?.querySelector('[data-nav="downloads"]')
   if (nav) {
     let badge = nav.querySelector('.lp-nav-badge')
-    if (active.length) {
+    if (totalActive) {
       if (!badge) { badge = h('span', { class: 'lp-nav-badge' }); nav.appendChild(badge) }
-      badge.textContent = String(active.length)
+      badge.textContent = String(totalActive)
     } else badge?.remove()
   }
 }
@@ -1400,9 +1408,11 @@ function detectJobChanges() {
 function emitStatus() {
   const running = state.sessions.filter(isRunningSession)
   const selectedSession = sessionOf(state.selectedId)
+  const activeJobs = state.jobs.filter((job) => ['queued', 'running', 'installing'].includes(job.status)).length +
+    (state.communityJobs || []).filter((job) => ['queued', 'running', 'installing'].includes(job.status)).length
   bus.emit('launcher:status', {
     runningCount: running.length,
-    activeJobs: state.jobs.filter((job) => ['queued', 'running', 'installing'].includes(job.status)).length,
+    activeJobs,
     selected: selectedInstance()?.name || '',
     session: selectedSession || null,
     account: selectedAccount()?.name || ''
@@ -1429,9 +1439,13 @@ function startBackgroundStatus() {
   stopBackgroundStatus()
   state.backgroundTimer = setInterval(async () => {
     try {
-      const data = await api.status()
+      const [data, community] = await Promise.all([
+        api.status(),
+        api.communityJobs().catch(() => ({ items: [] }))
+      ])
       state.sessions = data.sessions || []
       state.jobs = data.jobs || []
+      state.communityJobs = community.items || []
       emitStatus()
     } catch {}
   }, 10000)

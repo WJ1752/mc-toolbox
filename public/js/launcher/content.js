@@ -380,7 +380,7 @@ async function mountMods(container, t) {
         updateState.data = null
         await load(false)
         await t.reloadInstance()
-        void checkUpdates(false)
+        void checkUpdates(true)
       })
     } catch (error) { t.toast('更新失败：' + error.message, 'err') }
   }
@@ -423,6 +423,11 @@ async function mountMods(container, t) {
       h('div', { class: 'lp-deps-title' }, h('b', {}, `缺少 ${missing.length} 个前置依赖`),
         h('span', {}, '从 Modrinth 匹配并下载；自动结果不确定时会让你手动选择。')),
       h('div', { class: 'lp-row-actions' },
+        btn('全部补全', {
+          size: 'xs', variant: 'primary', iconName: 'download',
+          disabled: !(depState.data?.items || []).some((item) => item.state === 'ready' && item.version?.file),
+          onClick: () => completeAllDependencies()
+        }),
         btn('重新匹配', { size: 'xs', iconName: 'refresh', onClick: () => loadDependencies(true) }))
     )
     depsPanel.appendChild(head)
@@ -500,6 +505,12 @@ async function mountMods(container, t) {
       if (button) button.disabled = false
       t.toast('下载前置失败：' + error.message, 'err')
     }
+  }
+  function completeAllDependencies() {
+    const ready = (depState.data?.items || []).filter((item) => item.state === 'ready' && item.version?.file?.url)
+    if (!ready.length) { t.toast('没有可自动补全的前置', 'warn'); return }
+    t.toast(`正在补全 ${ready.length} 个前置…`, 'ok')
+    for (const item of ready) void installDependency(item, item.project, item.version, item.version.file)
   }
   function chooseDependency(item) {
     const candidates = item.candidates || []

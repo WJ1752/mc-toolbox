@@ -18,8 +18,8 @@ v1.8.0 在主菜单新增独立的 Minecraft 启动器。它和工作台是同�
 ```
 
 - 实例列表按最近启动排序，可搜索名称、版本、加载器与分组；双击直接启动。
-- 启动器页面的「下载中心」包含：新建实例、整合包、导入已有、任务队列。
-- 「Java 运行时」页负责扫描、设默认、指定 `java.exe` 与下载 Temurin 8–25。
+- 「下载中心」独立成页，只展示启动器任务（安装/整合包/修复/模组更新）与社区资源下载；已完成任务可打开对应文件夹或跳转实例页。
+- 新建实例、整合包与「导入已有」在独立页面，从侧栏「新建实例」进入；「Java」页负责扫描、设默认、指定 `java.exe` 与下载 Temurin 8–25。
 - 实例设置弹窗覆盖名称、分组、内存、窗口、全屏、自动进服、Java、JVM/游戏参数与备注。
 - 命令面板新增「启动器」分组，可在任意页面启动/停止当前实例、打开账户、Java、设置与实例目录。
 
@@ -36,7 +36,7 @@ v1.8.0 在主菜单新增独立的 Minecraft 启动器。它和工作台是同�
 | 启动 | 版本继承、OS/arch 规则、Modern/legacy 参数、natives、日志配置、Forge ModLauncher |
 | 日志 | stdout/stderr 实时捕获（log4j XML 转可读文本）、已保存日志、崩溃报告与中文诊断 |
 | 模组 | JAR 拖入/选择、启停、删除、重复/缺失前置提示、Modrinth / CurseForge 搜索安装；按文件 SHA-1 检查 Modrinth 更新并解析缺失前置 |
-| 资源包 / 光影 | ZIP 导入、启停（写 options.txt）、删除、打开目录 |
+| 资源包 / 光影 | Modrinth / CurseForge 搜索、MC 版本筛选、版本选择下载；ZIP 导入、启停（写 options.txt）、删除、打开目录 |
 | 世界 / 截图 | 世界卡片（版本/模式/大小/时间）、截图缩略图与大图、删除/打开目录 |
 | 服务器 | 读写 `servers.dat`、添加/删除、一键设为启动后自动连接 |
 | 整合包 | Modrinth `.mrpack`、CurseForge ZIP；识别 MC/加载器、安装加载器、补文件、解压 overrides |
@@ -103,7 +103,7 @@ v1.8.0 在主菜单新增独立的 Minecraft 启动器。它和工作台是同�
 1. 取版本清单与版本 JSON，写 `versions/<mc>/<mc>.json`，下载客户端 JAR 与日志配置。
 2. Fabric/Quilt：取 profile JSON，改写 `id` 为自定义版本 ID；Forge/NeoForge：下载官方 installer，写 `launcher_profiles.json`，优先使用本机较高的兼容 Java 运行安装器，读取 `version.json` 确定生成的版本 ID。
    - NeoForge 1.20.1 发布在 `net.neoforged:forge` 坐标（版本形如 `1.20.1-47.1.106`），1.20.2+ 才使用 `net.neoforged:neoforge`；`forgeInstaller()` 会按 MC 版本选择正确坐标与 `expectedId`。
-   - 非官方源时安装器本身从 BMCLAPI 下载，并预取 `version.json` / `install_profile.json` 中声明的全部库；`mirrorUrl()` 同时把 `maven.neoforged.net` / `maven.minecraftforge.net` 映射到 BMCLAPI。这样即使原 maven 被 DNS 污染或超时，安装器也能完成。
+   - 非官方源时安装器本身从 BMCLAPI 下载，并预取 `version.json` / `install_profile.json` 中声明的库、processor 的 `jar`/`classpath` 以及 `data` 里的 mappings/binpatch；`mirrorUrl()` 同时把 `maven.neoforged.net` / `maven.minecraftforge.net` 映射到 BMCLAPI。这样即使原 maven 被 DNS 污染或超时，安装器也能完成。Forge 版本列表优先读取 BMCLAPI 的 `forge/minecraft/<mc>` 接口，再合并官方 maven 元数据与 promotions。
 3. `loadVersionChain` 合并继承链，按当前 OS 规则下载全部 libraries（含 natives）；asset index 与 objects 按 SHA-1 校验，支持镜像回退。
 4. 写 `.mc-toolbox-installed` 标记并更新实例 `installedAt`；修复任务复用同一套文件检查/下载逻辑。
 5. 任务由 `InstallJob` 管理：真实进度、日志环形缓冲、取消（AbortController + 杀安装器进程）、失败清理、完成后刷新实例。
@@ -113,7 +113,7 @@ v1.8.0 在主菜单新增独立的 Minecraft 启动器。它和工作台是同�
 `src/server/launcher/launch.js`：
 
 - 校验实例/账户/Java；`prepareNatives` 只对 legacy natives 解压，并用签名文件避免重复解压。
-- 在 `<instance>/logs/launch-*.log` 留存捕获日志；stdout/stderr 同时进入内存环形缓冲供前端增量轮询。
+- 在 `<instance>/logs/launch-*.log` 留存捕获日志；stdout/stderr 同时进入内存环形缓冲供前端增量轮询。Java 子进程以 `windowsHide: true` 启动，日志走管道，不会额外弹出 cmd 控制台窗口。
 - log4j XML 事件行转换为 `[LEVEL] message`，异常堆栈原样输出。
 - 用户主动停止标记 `stopping`，退出状态记为 `stopped`，不误报崩溃；强制结束使用进程树清理。
 - 启动前验证 classpath 中的客户端 JAR、libraries、natives 是否存在，缺失时提示「检查并修复文件」。
@@ -162,6 +162,8 @@ v1.8.0 在主菜单新增独立的 Minecraft 启动器。它和工作台是同�
 - `tests/launcher-plan.test.mjs`：规则、版本继承、Maven 路径、natives、参数替换、Forge ignoreList、离线 UUID、IPv6、Java 版本、崩溃诊断。
 - `tests/launcher-meta.test.mjs`：BMCLAPI 映射（含 NeoForge / Forge maven）、源回退链、NeoForge 1.20.1 `net.neoforged:forge` 坐标与 1.20.2+ 坐标、authlib 地址归一化、离线名校验。
 - `tests/curseforge-pack.test.mjs`：文件 ID 固定、缓存校验、禁止自动下载的可操作错误文案、本地同 SHA-1 文件复用。
+- `tests/launcher-jvm.test.mjs`：一键 G1 参数完整写入、重复点击不叠加、保留用户 `-Xmx` / `-D` 参数并覆盖旧 G1 数值。
+- `tests/launcher-updates.test.mjs`：按文件 SHA-1 计算与缓存；更新检查、缺失前置解析在临时实例上做了真实 Modrinth 联调。
 
 ### 6.2 构建与 EXE
 
@@ -180,12 +182,16 @@ v1.8.0 在主菜单新增独立的 Minecraft 启动器。它和工作台是同�
 
 - 通过启动器 API 安装 `1.20.1 + NeoForge 47.1.106`。当前网络无法解析/连接 `maven.neoforged.net`；改用 BMCLAPI 安装器 + 预取 version/install_profile 依赖后安装成功，生成版本 `1.20.1-forge-47.1.106`。
 - 启动到主菜单：日志有 `NeoForge v47.1.106 Initialized`、纹理图集与声音引擎完成；停止后 `tasklist` 无 `java.exe`。
+- Forge 回归：隔离数据目录中重新安装 `1.20.1 + Forge 47.4.0`。BMCLAPI 版本接口正确返回 47.4.x；预取 71 个安装器库与 processor 依赖后官方 installer 退出码 0，生成 `1.20.1-forge-47.4.0`，任务日志无失败行。
 
 ### 6.5 整合包与模组
 
 - Modrinth：安装真实 `.mrpack`「FPS Modpack 1.8」（Fabric 0.15.10 / 1.20.1）成功，12 个模组与 overrides 就位；另通过 `/api/community/download` 安装真实 Sodium 模组并校验大小。
 - CurseForge：用官方 API Key 读取「Fabulously Optimized 5.4.1」（Fabric 0.14.23 / 1.20.1）；先验证 2 个作者禁止自动下载的文件会给出包含文件名与手动处理步骤的错误文案，再把手动取得的同 SHA-1 文件放入缓存，安装成功，46 个文件全部就位。
 - `tests/curseforge-pack.test.mjs` 同时覆盖「作者禁止下载」和「本地同 SHA-1 文件复用」两条路径。
+- 模组更新与前置补全：隔离实例放入真实 Cloth Config 11.1.106 + Iris 1.7.6（Fabric 1.20.1）。检查更新按 SHA-1 命中 Modrinth，识别 Cloth Config 11.1.136；单独更新后旧 JAR 删除、新 JAR 哈希正确。缺失前置识别 `sodium`，自动匹配 Sodium 0.5.13 并下载到实例 `mods/`，再次检查缺失列表为空。
+- 资源包/光影：Modrinth 搜索与 MC 版本筛选返回真实结果；通过界面完成一次光影安装，文件以原始文件名写入实例 `shaderpacks/`。
+- 下载中心：启动器任务与社区下载分区展示；普通下载显示「打开文件夹」，实例任务显示「打开实例」；侧栏徽标合并两类进行中任务。
 
 ### 6.6 回归检查
 
@@ -194,6 +200,7 @@ v1.8.0 在主菜单新增独立的 Minecraft 启动器。它和工作台是同�
 - 任务取消：安装 1.21.1 中途取消，任务状态 `cancelled`，无残留安装器进程。
 - 外部实例删除：导入临时 `.minecraft` 后删除启动器实例，`removed=false / external=true`，原目录与标记文件仍在。
 - 资源包 `options.txt` 写回：启用写入 `file/TestPack.zip`，禁用后移除，`version`、`lang` 等其他行保持不变。
+- 一键 JVM 优化：实例设置弹窗点击「一键优化」后写入 18 个 G1 参数，再次点击内容不变；`-Xms`/`-Xmx` 未被改动。
 - 全程结束 `tasklist` 无遗留 `java.exe`。
 
 ### 6.7 未做真实验收
@@ -203,11 +210,12 @@ v1.8.0 在主菜单新增独立的 Minecraft 启动器。它和工作台是同�
 
 ## 7. 截图
 
-暗色：总览、下载中心、Java 运行时、账户、启动器设置；亮色：总览。
+暗色：总览、新建实例、下载中心、Java、账户、启动器设置；亮色：总览。
 
 ![启动器总览](screenshots/launcher/01-overview.png)
-![下载中心](screenshots/launcher/02-install-center.png)
-![Java 运行时](screenshots/launcher/03-java.png)
+![新建实例](screenshots/launcher/02-new-instance.png)
+![下载中心](screenshots/launcher/07-downloads.png)
+![Java](screenshots/launcher/03-java.png)
 ![账户](screenshots/launcher/04-accounts.png)
 ![启动器设置](screenshots/launcher/05-settings.png)
 ![亮色主题](screenshots/launcher/06-overview-light.png)
