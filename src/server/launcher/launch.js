@@ -592,18 +592,40 @@ async function ensureSessionLog(session) {
   }
 }
 
+/**
+ * 游戏进程的 spawn 选项。
+ *
+ * `detached: true` 不是样式选择，而是「启动器退出不能带走游戏」的前提：
+ * Windows 上 Node/libuv 会把**非 detached** 的子进程与父进程一起放进同一个
+ * kill-on-close 作业对象（实测：node 进程第一次 spawn 非 detached 子进程后，
+ * IsProcessInJob 立刻从 false 变成 true）。启动器退出（关窗、一键更新替换 exe、
+ * 重启）时该作业句柄关闭，作业内进程全部被 TerminateProcess —— 正在玩的 MC
+ * 会跟着消失（表现为 latest.log 没有 Stopping、只停在上一条日志）。
+ * detached 的子进程不会再进这个作业（实测 IsProcessInJob=false），父进程退出后
+ * java 继续运行；stdout/stderr 管道会在父进程退出时断开，但 log4j2 的 Console
+ * appender 遇到断开的管道只会写失败，不会终止 JVM（实测父进程退出后 JVM 继续
+ * 运行、文件日志继续增长）。
+ *
+ * @param {string} gameDir 游戏目录（实例的 gameDir）
+ */
+export function gameSpawnOptions(gameDir) {
+  return {
+    cwd: gameDir,
+    env: { ...process.env, MC_TOOLBOX_LAUNCHER: '1' },
+    // GUI 子系统进程启动 java.exe（控制台程序）时，false 会额外弹出一个
+    // 空白 cmd 窗口；true 让 Windows 使用 CREATE_NO_WINDOW，日志仍通过
+    // stdout/stderr 管道回传。
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    // 让游戏进程独立于启动器的作业对象存活，见上方说明。
+    detached: true
+  }
+}
+
 async function spawnGame(session, plan, paths) {
   let child
   try {
-    child = spawn(plan.java.path, [...plan.jvmArgs, plan.mainClass, ...plan.gameArgs], {
-      cwd: paths.gameDir,
-      env: { ...process.env, MC_TOOLBOX_LAUNCHER: '1' },
-      // GUI 子系统进程启动 java.exe（控制台程序）时，false 会额外弹出一个
-      // 空白 cmd 窗口；true 让 Windows 使用 CREATE_NO_WINDOW，日志仍通过
-      // stdout/stderr 管道回传。
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
+    child = spawn(plan.java.path, [...plan.jvmArgs, plan.mainClass, ...plan.gameArgs], gameSpawnOptions(paths.gameDir))
   } catch (e) {
     throw createLaunchError('SPAWN_FAILED', {
       detail: `系统未能创建 Java 进程：${e.message}\n命令：${plan.preview}`,

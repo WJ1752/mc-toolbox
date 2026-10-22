@@ -162,6 +162,7 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - 异常退出：非用户停止且 code ≠ 0 时 session `failed`，launch `failed`，错误码为 `GAME_CRASHED`（有 crash-report）或 `GAME_EXITED`，附崩溃诊断、日志文件和 `open-logs` / `copy` 操作。
 - 错误码：`NO_ACCOUNT`、`NO_JAVA`、`JAVA_TOO_OLD`、`VERSION_JSON_MISSING`、`MISSING_FILES`、`EXTERNAL_DIR_UNWRITABLE`、`ALREADY_RUNNING`、`SPAWN_FAILED`、`GAME_CRASHED`、`GAME_EXITED`。`src/server/api.js` 把 `code/detail/missing/missingCount/paths/actions/crash` 一并返回，前端 `core/api.js` 附加到 `Error` 上。
 - 外部实例的 `versionsDir`/`librariesDir`/`assetsDir` 指向 `baseDir`，`nativesDir`/`logsDir` 仍在启动器实例目录；`ensureInstanceDirs` 不会在外部 gameDir 创建 mods/saves 等目录；客户端 JAR 按 `jarVersion` / `versionId` / `mc` 候选顺序取第一个真实存在的文件。
+- 游戏进程用 `gameSpawnOptions()`（`detached: true`）启动：Windows 上 Node/libuv 会把非 detached 的子进程与启动器放进同一个 kill-on-close 作业对象，启动器退出（关窗、「启动后关闭启动器」、一键更新替换 exe 后重启）时作业句柄关闭，作业内的 MC 会被一起 `TerminateProcess` —— 表现是 `latest.log` 没有 `Stopping!`，直接停在上一条日志。detached 子进程不进入该作业，启动器退出后游戏继续运行；stdout/stderr 管道断开后 log4j2 的 Console appender 只写失败，游戏自己的文件日志与崩溃诊断不受影响（验证见 §6.11）。
 
 ### 4.4 账户
 
@@ -211,6 +212,7 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - 检查结果缓存 10 分钟，`force=1` 绕过缓存。找不到仓库/发布、Token 失效、API 限额、网络错误都返回中文可操作提示；私有仓库或限额问题在「设置 → 启动器 → 更新」填 Token（只保存在本机，接口不回显）。
 - 资产优先选 `mc-toolbox.exe`，其次其它 `.exe`；下载复用 `download.js` 的 `fetchToFile`（代理、重试、30 秒无数据中止），下载后按 `size` 与 GitHub 返回的 `sha256` digest 校验。
 - 一键更新只允许 Windows 打包版（SEA）：服务端先把替换脚本写到临时目录并以独立进程启动；脚本等待旧进程退出（最长 180 秒）→ 目标 exe 改名 `.old` 备份 → 复制新 exe → 校验 → 删除备份 → 启动新版；任一步失败会回滚备份并拉回旧版。开发模式（`node server.js`）拒绝替换，只提示手动下载。
+- 更新只结束启动器自身：游戏进程以 `detached: true` 启动、不在启动器的作业对象里（§4.3），所以替换脚本等待旧进程退出、重启新版时，正在运行的游戏不会被连带关闭。
 - 前端在启动器加载后按设置自动检查一次；发现新版本时右下角显示常驻卡片（立即更新 / 稍后），弹窗展示版本号、发布时间、发布说明与下载进度；替换成功后通过 WebView2 `close` 消息（或 shutdown beacon）关闭窗口，由脚本重启。命令面板「检查启动器更新」、设置 → 关于、设置 → 启动器 → 更新都可手动触发。
 
 ## 5. 接口
@@ -325,7 +327,7 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - 版本比较：`tests/launcher-update.test.mjs` 覆盖 `v1.9.2` / 预发布标签解析、数值比较（1.9.2 < 1.9.10）、草稿/预发布过滤、资产优先级（`mc-toolbox.exe` 优先）、替换脚本的路径转义、参数保留与回滚分支。
 - 检查与下载：1.9.2 打包版匿名访问 `releases/latest` 发现 1.9.3；下载 86.7 MB 资产后按 `size` + GitHub `sha256` digest 校验通过（`/api/launcher/update/state` 从 downloading → ready）。
 - 一键更新：界面点「立即更新 → 下载并更新」，弹窗显示下载进度并走到「更新完成，启动器正在重启…」；独立脚本日志依次出现 `update start → replace ok → relaunched`，目标 exe 的 SHA-256 变为 1.9.3，重启后的实例 `/api/bootstrap` 返回 `version: 1.9.3`，再次检查更新返回 `updateAvailable: false`。
-- 关键回归：Windows 作业对象会在父进程退出时连带结束普通子进程（实测 `taskkill` 后替换脚本消失），因此替换脚本改用 WMI（`Invoke-CimMethod Win32_Process Create`）在作业外启动；`detached: true` 会让 PowerShell 5.1 静默退出，已避免；重启时空参数不能传给 `Start-Process -ArgumentList`，已按 `$argList.Count` 分支处理。
+- 关键回归：Windows 作业对象会在父进程退出时连带结束普通子进程（实测 `taskkill` 后替换脚本消失），因此替换脚本改用 WMI（`Invoke-CimMethod Win32_Process Create`）在作业外启动；`detached: true` 会让 PowerShell 5.1 静默退出，已避免；重启时空参数不能传给 `Start-Process -ArgumentList`，已按 `$argList.Count` 分支处理。游戏进程同样受这个作业对象影响，见 §6.11。
 - 开发模式（`node server.js`）只检查/下载，`update/apply` 返回可操作提示，不替换进程。
 - 更新源（`owner/repo`、Token、是否接受预发布、忽略版本）可在「设置 → 启动器 → 更新」修改；Token 不随接口回显。
 
@@ -338,6 +340,17 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - 网络重试：安装器输出中的 `SocketException` / `Connect timed out` / `Connection reset` / HTTP 5xx 会触发最多 3 次自动重试；非网络错误（如 Java class 版本）不会重试。
 - 拖拽遮罩：headless CDP 模拟 `dragenter`/`dragover` 后遮罩出现；`dragend` 后 60ms 内清除；停止 `dragover` 1.5 秒后看门狗自动清除，不再卡死页面。
 - UI 回归：`node tools/launcher-ui-smoke.mjs` 27/27（新增拖放遮罩、下载中心安装入口、吸顶进度坞检查）。
+
+### 6.11 更新启动器不再关闭正在运行的游戏
+
+验证环境：Windows 10 x64、Node 22.18、Java 21.0.5、log4j2 2.19（MC 1.20.1 同版本）、真实 Forge 1.20.1 实例日志；日期 2026-10-23。
+
+- 现场：`versions/BattleArmory TACZ/logs/latest.log` 停在 `[03:22:30] [Render thread/WARN]: Game took 34.744 seconds to start`，**没有 `Stopping!`**；`%TEMP%\mc-toolbox-update\1.9.5\apply-update.log` 显示 `03:23:31 update start → 03:23:35 replace ok → 03:23:36 relaunched`，即替换脚本等待旧启动器退出的那一刻，正在玩的 MC 被一起结束。
+- 根因：Windows 上 Node/libuv 第一次 spawn 非 detached 子进程后，会把父进程和子进程一起放进 kill-on-close 作业对象。探针（WMI 启动、不在其它作业里的 node 父进程）：spawn 前 `IsProcessInJob=false`，spawn 后立刻变成 `true`；父进程 `process.exit(0)` 后普通子进程 4 秒内在进程表里消失（`stdio: 'ignore'` 同样）。游戏正是这种普通子进程，所以「启动器退出 → 作业关闭 → java 被 `TerminateProcess`」。
+- 修复：`spawnGame` 改用 `gameSpawnOptions()`（`detached: true`，日志仍走 stdout/stderr 管道）。探针：伪启动器先 spawn 一个普通 helper（作业已成立），再以 detached 拉起 java，`IsProcessInJob(java)=false`；父进程退出 4 秒后 java 仍存活（`gameAlive=True`），而 helper 随作业结束。
+- 管道断开不影响游戏：用 log4j2 2.19 + Console(`SYSTEM_OUT`) + File appender 复现 MC 的日志配置，detached 拉起后结束父进程，JVM 仍存活，文件 appender 的 `log4jtest.log` 在父进程退出后继续从 16,533 字节增长到 23,057 字节。也就是说控制台回显会断，游戏本身和 `latest.log` 不受影响。
+- 回归：`tests/launcher-game-detached.test.mjs` 2 项（选项含 `detached`；伪启动器退出后伪游戏仍存活）；把 `detached` 改回 `false` 时该测试失败，能抓住回退。
+- 已知边界：启动器重启后内存里的 session 已丢失，实例卡片不会自动显示「运行中」（游戏进程仍在跑）。这是后续「接管已运行进程」的独立需求，不影响本次「更新不再关游戏」。
 
 ## 7. 截图
 

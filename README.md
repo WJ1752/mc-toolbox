@@ -1,5 +1,11 @@
 # Minecraft 工具箱
 
+### v1.9.6 更新启动器不再关闭正在运行的游戏
+
+- 修复「一键更新启动器时，正在玩的 MC 被一起关掉」：Windows 上 Node/libuv 会把非 detached 的子进程与启动器放进同一个 kill-on-close 作业对象，替换脚本等待旧进程退出的那一刻作业关闭，游戏被 `TerminateProcess` —— 表现是 `latest.log` 没有 `Stopping!`，直接断在最后一行。游戏进程改为 `detached: true` 启动（`gameSpawnOptions`），启动器关窗 / 一键更新 / 重启都不再影响游戏；游戏自己的日志、崩溃报告与「停止游戏」不变。
+- 顺带修复「启动后关闭启动器」：关闭启动器后游戏继续运行，设置文案与实际行为一致。
+- 回归与验证：新增 `tests/launcher-game-detached.test.mjs`（把 `detached` 改回 `false` 即失败）；`node --test tests/*.test.mjs` 187 项通过；`node build.mjs` 生成 82.8 MB EXE 并通过隔离冒烟。根因、探针数据与验证记录见 [启动器说明 · 6.11](docs/launcher.md#611-更新启动器不再关闭正在运行的游戏)。
+
 ### v1.9.5 实例目录可读化、稳定性与全功能体检修复
 
 - 实例目录改为 `versions/<实例名>/`，重命名实例实时同步文件夹名；旧版 `instances/<id>/game` 在首次启动时自动迁移，文件被占用则保留旧布局下次重试，不会丢档。版本 JSON / `libraries` / `assets` 仍共享，不重复占盘。
@@ -224,6 +230,8 @@ node build.mjs
 5. 冒烟测试：启动产物 → 验证 `/api/bootstrap` + 首页能正常返回
 
 技术细节：见 `build.mjs` 内注释、`src/server/paths.js` 的 SEA 兼容层。
+
+发布到 GitHub（启动器「一键更新」依赖 Release 资产与更新说明）的固定流程见 [发布流程](docs/release.md)：定版本号 → 写 README 更新日志 → 跑测试与构建 → 提交推送 → `gh release create` 上传 `mc-toolbox.exe` → 用旧版检查更新自检。
 
 数据全部存放在 `data/` 目录（settings.json / monitors.json / clientmods.json / history.json），删掉即恢复初始状态。
 
