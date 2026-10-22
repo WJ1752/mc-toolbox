@@ -125,12 +125,44 @@ async function main() {
 
   // 下载中心（独立视图，验证任务列表与社区下载模块可加载）
   await evaluate(`document.querySelector('.lp-navbtn[data-nav="downloads"]')?.click()`)
-  const downloadsOk = await waitFor(`!!document.querySelector('#launcherPage .lp-view-downloads')`, 15000)
+  const downloadsOk = await waitFor(`!!document.querySelector('#launcherPage .lp-view-downloads .lp-downloads')`, 15000)
   check('下载中心可打开', downloadsOk)
   if (downloadsOk) {
-    const text = await evaluate(`document.querySelector('#launcherPage .lp-view-downloads').innerText.slice(0, 300)`)
+    const text = await evaluate(`document.querySelector('#launcherPage .lp-downloads').innerText.slice(0, 300)`)
     check('下载中心内容非空', text.length > 0, text.replace(/\s+/g, ' ').slice(0, 80))
+    check('下载中心提供「安装整合包」入口', await evaluate(`[...document.querySelectorAll('#launcherPage .lp-view-downloads button')].some(b => b.textContent.includes('安装整合包'))`))
+    // 拖放遮罩：dragenter 显示；dragend 立即清除；停止 dragover 后看门狗自愈。
+    // 旧版在拖拽取消时遮罩会永久卡住，这一项就是防回归。
+    const drag = await evaluate(`(async () => {
+      const wait = (ms) => new Promise(r => setTimeout(r, ms))
+      const root = document.getElementById('launcherPage')
+      const dt = new DataTransfer()
+      dt.items.add(new File(['x'], 'pack.mrpack', { type: 'application/zip' }))
+      const fire = (type, target = root) => target.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }))
+      fire('dragenter'); fire('dragover', root.querySelector('.lp-downloads-head'))
+      const shown = root.classList.contains('is-drop')
+      window.dispatchEvent(new DragEvent('dragend', { bubbles: true, cancelable: true, dataTransfer: dt }))
+      await wait(60)
+      const afterDragEnd = root.classList.contains('is-drop')
+      fire('dragenter'); fire('dragover', root.querySelector('.lp-downloads-head'))
+      await wait(1700)
+      const afterWatchdog = root.classList.contains('is-drop')
+      return { shown, afterDragEnd, afterWatchdog }
+    })()`)
+    check('拖拽文件显示整页拖放遮罩', drag.shown, JSON.stringify(drag))
+    check('拖拽结束遮罩立即清除', !drag.afterDragEnd, JSON.stringify(drag))
+    check('拖拽取消后遮罩自动消失（不会卡住页面）', !drag.afterWatchdog, JSON.stringify(drag))
     await screenshot('04b-downloads')
+    // 下载中心 → 新建实例：点击入口后应切到「整合包」页，并提供吸顶进度坞。
+    await evaluate(`[...document.querySelectorAll('#launcherPage .lp-view-downloads button')].find(b => b.textContent.includes('安装整合包'))?.click()`)
+    const installOk = await waitFor(`!!document.querySelector('#launcherPage .lp-job-dock')`, 15000)
+    const installInfo = await evaluate(`(() => {
+      const dock = document.querySelector('#launcherPage .lp-job-dock')
+      const activeTab = [...document.querySelectorAll('#launcherPage .lp-view-body .seg button')].find(b => b.classList.contains('active'))
+      return { dock: !!dock, sticky: dock ? getComputedStyle(dock).position : '', tab: activeTab?.textContent || '' }
+    })()`)
+    check('下载中心可直接进入整合包安装', installOk && installInfo.tab.includes('整合包'), JSON.stringify(installInfo))
+    check('安装进度坞固定在页面上方', installInfo.sticky === 'sticky', JSON.stringify(installInfo))
     await evaluate(`document.querySelector('.lp-back')?.click()`)
     await sleep(300)
   }

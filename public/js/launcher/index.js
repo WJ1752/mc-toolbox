@@ -105,6 +105,8 @@ const state = {
   installController: null,
   javaController: null,
   downloadsController: null,
+  // 下载中心 → 新建实例 的一次性请求：{ path, auto, token }，由安装页消费后清空。
+  pendingPackInstall: null,
   contentHandle: null,
   contentToken: 0,
   heroRefs: null,
@@ -130,6 +132,11 @@ let navWrapEl = null
 let searchInputEl = null
 let lastPollAt = 0
 let lastLaunchPollAt = 0
+// 整页拖放遮罩：外部文件拖入时显示「松开以安装整合包」。
+// 浏览器在拖拽取消、拖出窗口或窗口失焦时不保证触发 dragleave，因此除了
+// 事件计数，还用看门狗定时器自愈，避免遮罩永久卡住页面。
+let dropOverlayTimer = null
+const DROP_OVERLAY_TTL = 1500
 
 const moduleCache = new Map()
 function loadModule(name) {
@@ -480,6 +487,22 @@ function pageCtx() {
     reloadInstance: () => refreshSelectedDetail(),
     showInstance: async (id) => { await selectInstance(id) },
     showView: async (view) => { await showView(view) },
+    // 下载中心：已完成整合包 → 安装页（自动载入并开始安装）；仅打开安装页时 path 为空。
+    installPackFromDownload: async (job, path) => {
+      const target = String(path || job?.path || '').trim()
+      if (!target) { toast('没有找到已下载的整合包文件', 'warn'); return }
+      state.pendingPackInstall = { path: target, auto: true, token: Date.now() }
+      await showView('install')
+    },
+    openPackInstaller: async () => {
+      state.pendingPackInstall = { path: '', auto: false, token: Date.now() }
+      await showView('install')
+    },
+    takePendingPackInstall: () => {
+      const pending = state.pendingPackInstall
+      state.pendingPackInstall = null
+      return pending
+    },
     openAccounts: () => openAccounts(),
     openSettings: (section = 'launcher-root') => openLauncherSettings(section),
     setTab: (tab) => setTab(tab)
@@ -905,6 +928,8 @@ async function renderDownloadsView() {
 }
 
 async function showView(view) {
+  // 切页时一定收掉拖放遮罩，避免 ESC 取消拖拽后遮罩跟着新页面一起出现。
+  hideDropOverlay()
   const previous = state.view
   if (previous === 'downloads' && view !== 'downloads') {
     state.downloadsController?.destroy?.()
@@ -2484,6 +2509,7 @@ async function activate() {
 
 function deactivate() {
   state.active = false
+  hideDropOverlay()
   stopPolling()
   destroyContent()
   startBackgroundStatus()
@@ -2544,19 +2570,31 @@ function bindKeys() {
     if (isRunningSession(sessionOf(inst.id))) stopSelected()
     else launchSelected()
   })
-  rootEl.addEventListener('dragover', (e) => {
-    if (![...e.dataTransfer.types].includes('Files')) return
+  rootEl.addEventListener('dragenter', (e) => {
+    if (!hasFileDrag(e)) return
     e.preventDefault()
-    rootEl.classList.add('is-drop')
+    if (isOwnDropZone(e.target)) { hideDropOverlay(); return }
+    showDropOverlay()
+  })
+  rootEl.addEventListener('dragover', (e) => {
+    if (!hasFileDrag(e)) return
+    e.preventDefault()
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+    // 安装页有自己的拖放区：那里由 dropEl 显示高亮，不能再叠一层整页遮罩。
+    if (isOwnDropZone(e.target)) hideDropOverlay()
+    else showDropOverlay()
   })
   rootEl.addEventListener('dragleave', (e) => {
-    if (e.target === rootEl) rootEl.classList.remove('is-drop')
+    // relatedTarget 为空表示指针离开了窗口；内部元素之间移动不应关闭遮罩。
+    if (!e.relatedTarget) hideDropOverlay()
   })
   rootEl.addEventListener('drop', async (e) => {
+    // 安装页 dropEl 已经处理了这个文件；阻止冒泡失败时也不能重复上传。
+    if (isOwnDropZone(e.target)) return
     const files = [...(e.dataTransfer.files || [])]
     if (!files.length) return
     e.preventDefault()
-    rootEl.classList.remove('is-drop')
+    hideDropOverlay()
     const file = files[0]
     if (!/\.(mrpack|zip)$/i.test(file.name)) { toast('请拖入 .mrpack 或整合包 ZIP', 'warn'); return }
     try {
@@ -2569,6 +2607,34 @@ function bindKeys() {
       toast('整合包上传失败：' + err.message, 'err')
     }
   })
+  // 这三种情况不会稳定触发 dragleave：拖拽被 Esc 取消、窗口失焦、标签页隐藏。
+  window.addEventListener('dragend', hideDropOverlay)
+  window.addEventListener('blur', hideDropOverlay)
+  document.addEventListener('visibilitychange', () => { if (document.hidden) hideDropOverlay() })
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideDropOverlay() }, true)
+}
+
+function hasFileDrag(event) {
+  const types = event?.dataTransfer?.types
+  if (!types) return false
+  try { return [...types].includes('Files') } catch { return false }
+}
+
+function isOwnDropZone(target) {
+  return !!(target && typeof target.closest === 'function' && target.closest('.lp-drop'))
+}
+
+function hideDropOverlay() {
+  if (dropOverlayTimer) { clearTimeout(dropOverlayTimer); dropOverlayTimer = null }
+  rootEl?.classList.remove('is-drop')
+}
+
+function showDropOverlay() {
+  if (!rootEl) return
+  rootEl.classList.add('is-drop')
+  if (dropOverlayTimer) clearTimeout(dropOverlayTimer)
+  // dragover 在指针静止时仍会周期性触发，每次都会续期；停止拖拽后 1.5 秒自动清除。
+  dropOverlayTimer = setTimeout(hideDropOverlay, DROP_OVERLAY_TTL)
 }
 
 export { pageCtx, state }

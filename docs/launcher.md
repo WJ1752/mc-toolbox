@@ -129,9 +129,11 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 `src/server/launcher/install.js`：
 
 1. 取版本清单与版本 JSON，写 `versions/<mc>/<mc>.json`，下载客户端 JAR 与日志配置。
-2. Fabric/Quilt：取 profile JSON，改写 `id` 为自定义版本 ID；Forge/NeoForge：下载官方 installer，写 `launcher_profiles.json`，优先使用本机较高的兼容 Java 运行安装器，读取 `version.json` 确定生成的版本 ID。
+2. Fabric/Quilt：取 profile JSON，改写 `id` 为自定义版本 ID；Forge/NeoForge：下载官方 installer，写 `launcher_profiles.json`，**优先使用最接近要求的兼容 Java** 运行安装器（1.20.1 用 Java 17，不再挑 Java 25），读取 `version.json` 确定生成的版本 ID。
    - NeoForge 1.20.1 发布在 `net.neoforged:forge` 坐标（版本形如 `1.20.1-47.1.106`）；1.20.2+ 才使用 `net.neoforged:neoforge`；`forgeInstaller()` 会按 MC 版本选择正确坐标与 `expectedId`。
-   - 非官方源时安装器本身从 BMCLAPI 下载，并预取 `version.json` / `install_profile.json` 中声明的库、processor 的 `jar`/`classpath` 以及 `data` 里的 mappings/binpatch；`mirrorUrl()` 同时把 `maven.neoforged.net` / `maven.minecraftforge.net` 映射到 BMCLAPI。
+   - 非官方源时安装器本身从 BMCLAPI 下载，并预取 `version.json` / `install_profile.json` 中声明的库与 processor 的 `jar`/`classpath`；`mirrorUrl()` 同时把 `maven.neoforged.net` / `maven.minecraftforge.net` 映射到 BMCLAPI。`MOJMAPS` / `MERGED_MAPPINGS` / `MC_UNPACKED` 等 processor 生成物不再被误当成 Maven 包预取。
+   - `DOWNLOAD_MOJMAPS` 会直连 Mojang，不受下载源设置影响。v1.9.4 起先用镜像链预取 `client_mappings`（校验 SHA-1/长度），再用 `jar-patch.js` 给安装器 profile 补 `--skipIfExists` 并生成 `*.patched.jar`，安装器日志会显示 `Skipping as output file exists`。
+   - 安装器网络类失败（Connection reset / Connect timed out / HTTP 5xx）自动重试 3 次；最终错误会带上最后的异常行，而不是只有「退出码 1」。
 3. `loadVersionChain` 合并继承链，按当前 OS 规则下载全部 libraries（含 natives）；asset index 与 objects 按 SHA-1 校验，支持镜像回退。
 4. 写 `.mc-toolbox-installed` 标记并更新实例 `installedAt`；修复任务复用同一套文件检查/下载逻辑。
 5. 任务由 `InstallJob` 管理：真实进度、日志环形缓冲、取消（AbortController + 杀安装器进程）、失败清理、完成后刷新实例。
@@ -320,6 +322,16 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - 关键回归：Windows 作业对象会在父进程退出时连带结束普通子进程（实测 `taskkill` 后替换脚本消失），因此替换脚本改用 WMI（`Invoke-CimMethod Win32_Process Create`）在作业外启动；`detached: true` 会让 PowerShell 5.1 静默退出，已避免；重启时空参数不能传给 `Start-Process -ArgumentList`，已按 `$argList.Count` 分支处理。
 - 开发模式（`node server.js`）只检查/下载，`update/apply` 返回可操作提示，不替换进程。
 - 更新源（`owner/repo`、Token、是否接受预发布、忽略版本）可在「设置 → 启动器 → 更新」修改；Token 不随接口回显。
+
+### 6.10 Forge 安装失败与拖拽遮罩（v1.9.4，真实环境）
+
+验证环境：Windows 10 x64、Node 22.18、Java 17.0.2 / Java 21.0.5 / 官方启动器 Java 25.0.1、真实 Forge 1.20.1-47.4.22 安装器；日期 2026-10-22。
+
+- 现场失败：安装器在 `DOWNLOAD_MOJMAPS` 阶段访问 `launchermeta.mojang.com` 时 `java.net.SocketException: Connection reset`，退出码 1；同时日志首行显示安装器被 Java 25 启动（`JVM info: Microsoft - 25.0.1`）。
+- 修复后真实安装：自动选择 Java 17；预取 `client_mappings`（8,001,795 字节 / SHA-1 校验通过），安装器日志出现 `--skipIfExists` 与 `Skipping as output file exists`；安装器成功输出 `Successfully installed client into launcher.`，实例 `1.20.1-forge-47.4.22` 标记为已安装。
+- 网络重试：安装器输出中的 `SocketException` / `Connect timed out` / `Connection reset` / HTTP 5xx 会触发最多 3 次自动重试；非网络错误（如 Java class 版本）不会重试。
+- 拖拽遮罩：headless CDP 模拟 `dragenter`/`dragover` 后遮罩出现；`dragend` 后 60ms 内清除；停止 `dragover` 1.5 秒后看门狗自动清除，不再卡死页面。
+- UI 回归：`node tools/launcher-ui-smoke.mjs` 27/27（新增拖放遮罩、下载中心安装入口、吸顶进度坞检查）。
 
 ## 7. 截图
 

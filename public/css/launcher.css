@@ -870,6 +870,43 @@
 .lp-job.ok { border-color: color-mix(in srgb, var(--emerald) 28%, var(--line)); }
 .lp-job.bad { border-color: color-mix(in srgb, var(--redstone) 32%, var(--line)); }
 
+/* 安装进度坞：固定在页头下方，滚动安装设置时也不会把进度/失败原因滚出视野。 */
+.lp-job-dock {
+  position: sticky;
+  top: 4px;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 44%, var(--line));
+  border-left-width: 3px;
+  border-radius: var(--r-1);
+  background: color-mix(in srgb, var(--surface-2) 94%, var(--accent) 6%);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, .34);
+}
+.lp-job-dock[hidden] { display: none; }
+.lp-job-dock .lp-job {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  gap: 6px;
+}
+.lp-job-dock .lp-job + .lp-job { margin-top: 0; padding-top: 7px; border-top: 1px solid var(--line); }
+.lp-job-dock .lp-job-bar { height: 8px; border-radius: 3px; }
+.lp-job-dock .lp-job-head b { font-size: 12.5px; }
+.lp-job-dock .lp-job-actions { margin-top: 1px; }
+.lp-job-pct {
+  flex: none;
+  min-width: 38px;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
 .lp-bar { height: 6px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
 .lp-bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width var(--t); }
 .lp-bar.indeterminate > i { width: 35%; animation: lp-bar-slide 1.15s ease-in-out infinite; }

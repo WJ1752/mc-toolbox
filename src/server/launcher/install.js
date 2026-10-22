@@ -39,8 +39,11 @@ import {
   BMCL_MAVEN
 } from './meta.js'
 import { collectLibraries, normalizeOs, requiredJavaMajor } from './launch-plan.js'
-import { downloadFromMirrors, runPool } from './download.js'
+import { downloadFromMirrors, runPool, sha1File } from './download.js'
 import { pickJava } from './java.js'
+import {
+  isSeedableMojmapsProfile, patchJarEntry, patchMojmapsProcessor, readJarJson, resolveMojmapsCoordinate
+} from './jar-patch.js'
 import { readZipIndex, extractZip } from '../pack-converter.js'
 import { hydrateCurseForgeFiles } from '../curseforge-pack.js'
 import { resolveOnlinePack } from './pack-online.js'
@@ -404,6 +407,12 @@ function mavenRelativePath(coordinate, defaultExt = 'jar') {
   return `${group.replace(/\./g, '/')}/${artifact}/${version}/${artifact}-${version}${suffix}.${ext}`
 }
 
+// Forge/NeoForge install_profile 中由 processor 生成、不能从 Maven 预取的 data 键。
+const GENERATED_PROFILE_DATA = new Set([
+  'MOJMAPS', 'MAPPINGS', 'MERGED_MAPPINGS', 'MC_UNPACKED', 'MC_SLIM',
+  'MC_EXTRA', 'MC_SRG', 'PATCHED', 'BINPATCH'
+])
+
 function looksLikeZip(file) {
   try {
     const fd = fs.openSync(file, 'r')
@@ -460,7 +469,11 @@ async function prefillInstallerLibraries(job, installerFile, root, { source }) {
         if (coord) coordinates.add(String(coord))
       }
     }
-    for (const value of Object.values(profile?.data || {})) {
+    // data 里混着两类值：真实 Maven 坐标（如 mcp_config）和安装器自己生成的
+    // 产物（MOJMAPS / MERGED_MAPPINGS / MC_UNPACKED / PATCHED…）。后者在
+    // Maven 上不存在，预取只会得到 404 或超时；它们必须由 processor 生成。
+    for (const [key, value] of Object.entries(profile?.data || {})) {
+      if (GENERATED_PROFILE_DATA.has(key)) continue
       const spec = value && typeof value === 'object' ? value.client : value
       if (typeof spec === 'string' && /^\[.+/.test(spec.trim())) coordinates.add(spec.trim())
     }
@@ -519,11 +532,96 @@ async function prefillInstallerLibraries(job, installerFile, root, { source }) {
   job.log(`安装器依赖准备完成（${missing.length - failed} 个成功${failed ? `，${failed} 个交给安装器重试` : ''}）`, 'ok')
 }
 
-async function runInstaller(job, javaPath, installerFile, root) {  const args = [...proxyJvmArgs(), '-jar', installerFile, '--installClient', root]
+const INSTALLER_ATTEMPTS = 3
+const TRANSIENT_INSTALLER_ERROR = /SocketException|Connect timed out|Connection reset|Read timed out|timed out|Temporary failure|Broken pipe|SSLException|EOFException|HTTP (?:5\d\d|429)/i
+
+/** 安装器输出是否属于可重试的网络错误（TLS 重置、连接超时、CDN 5xx）。 */
+export function isTransientInstallerError(output) {
+  return TRANSIENT_INSTALLER_ERROR.test(String(output || ''))
+}
+
+/** 安装器失败的可见原因：优先给出网络判断和最后一条错误行，而不是只报退出码。 */
+export function installerFailureMessage(code, output, attempts = 1) {
+  const text = String(output || '')
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  // 优先取真正的异常行；安装器最后总会补一句 "There was an error during
+  // installation"，没有信息量，不能让它覆盖 Connection reset 这类原因。
+  const last = [...lines].reverse().find((line) =>
+    /(Exception|Error:|Failed to run processor|Unable to|Could not|Unsupported|错误|失败)/i.test(line)) || ''
+  const network = isTransientInstallerError(text)
+  const cause = network ? '安装器访问 Mojang / Forge 服务器时网络中断' : '安装器返回非零退出码'
+  const retried = attempts > 1 ? `，已自动重试 ${attempts - 1} 次` : ''
+  const detail = last ? `：${last.slice(0, 220)}` : ''
+  return `${cause}（退出码 ${code}）${retried}${detail}。请检查网络，或在设置中把下载源切换为 BMCLAPI 后重试。`
+}
+
+/**
+ * 官方安装器的 DOWNLOAD_MOJMAPS 会直连 Mojang 下载 client mappings，不受启动器
+ * 下载源设置影响。国内线路常见 Connection reset，导致安装器退出码 1。
+ *
+ * 这里先用启动器的镜像链预取 mappings，再给安装器 profile 打上 --skipIfExists，
+ * 生成一个只改了一个条目的 patched JAR；安装器便会跳过那次直连下载。
+ * 返回 patched JAR 路径；任何一步失败都回退到原始安装器。
+ */
+async function prepareInstallerMappings(job, installerFile, root, meta, { source }) {
+  let profile = null
+  try { profile = await readJarJson(installerFile, 'install_profile.json') } catch (e) {
+    job.log('读取安装器配置失败，跳过映射预取：' + e.message, 'warn')
+    return ''
+  }
+  if (!profile) return ''
+  if (!isSeedableMojmapsProfile(profile)) {
+    job.log('安装器会改写映射表格式，跳过预取（交给安装器自行下载）', 'warn')
+    return ''
+  }
+  const coordinate = resolveMojmapsCoordinate(profile, 'client')
+  if (!coordinate) return ''
+  const relative = mavenRelativePath(coordinate)
+  if (!relative) return ''
+  const mappings = meta?.downloads?.client_mappings
+  if (!mappings?.url) {
+    job.log('版本清单没有 client_mappings，交给安装器自行下载', 'warn')
+    return ''
+  }
+  const dest = path.join(root, 'libraries', ...relative.replace(/\\/g, '/').split('/'))
+  const expectedSize = Number(mappings.size) || 0
+  const expectedSha1 = String(mappings.sha1 || '').toLowerCase()
+  const existing = await fsp.stat(dest).catch(() => null)
+  let valid = !!existing?.isFile() && existing.size > 0
+    && (!expectedSize || existing.size === expectedSize)
+  if (valid && expectedSha1) valid = (await sha1File(dest).catch(() => '')) === expectedSha1
+  if (!valid) {
+    job.log('预取 Mojang 映射表（安装器直连 Mojang 经常被重置）…')
+    await downloadFromMirrors(candidateUrls(mappings.url, { source }), dest, {
+      sha1: mappings.sha1 || '',
+      size: expectedSize,
+      signal: job.signal,
+      verify: true,
+      retries: Math.max(2, Number(getSettings().retries) || 0)
+    })
+    job.log('Mojang 映射表已就绪', 'ok')
+  } else {
+    job.log('复用已校验的 Mojang 映射表')
+  }
+  if (!patchMojmapsProcessor(profile)) return ''
+  const patched = `${installerFile}.patched.jar`
+  const result = await patchJarEntry(installerFile, 'install_profile.json', (raw) => {
+    let next = null
+    try { next = JSON.parse(raw.toString('utf8')) } catch { return null }
+    if (!patchMojmapsProcessor(next)) return null
+    return Buffer.from(JSON.stringify(next))
+  }, patched)
+  if (!result.changed) return ''
+  job.log('安装器已配置为复用预取的映射表，跳过 DOWNLOAD_MOJMAPS 直连', 'ok')
+  return patched
+}
+
+async function runInstallerOnce(job, javaPath, installerFile, root) {
+  const args = [...proxyJvmArgs(), '-jar', installerFile, '--installClient', root]
   job.phaseLabel('安装加载器', '正在运行官方安装器（下载并处理 libraries）…')
   job.set(null, '安装器正在工作…（此阶段耗时取决于网络）', { indeterminate: true })
   job.log(`执行安装器：${path.basename(installerFile)}`)
-  await new Promise((resolve, reject) => {
+  return await new Promise((resolve, reject) => {
     let child
     try {
       child = spawn(javaPath, args, { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -570,10 +668,28 @@ async function runInstaller(job, javaPath, installerFile, root) {  const args = 
       job.child = null
       if (pending) job.log(pending)
       if (job.signal.aborted) reject(new Error('已取消'))
-      else if (code !== 0) reject(new Error(`安装器退出码 ${code}；请查看日志中的报错行`))
-      else resolve()
+      else resolve({ code: Number.isFinite(code) ? code : 1, output })
     })
   })
+}
+
+async function runInstaller(job, javaPath, installerFile, root) {
+  let last = null
+  let attempts = 0
+  for (let attempt = 1; attempt <= INSTALLER_ATTEMPTS; attempt++) {
+    attempts = attempt
+    if (attempt > 1) {
+      job.log(`安装器网络请求失败，正在重试（${attempt}/${INSTALLER_ATTEMPTS}）…`, 'warn')
+      job.phaseLabel('安装加载器', `安装器重试 ${attempt}/${INSTALLER_ATTEMPTS}`)
+      await new Promise((resolve) => setTimeout(resolve, 1500 * (attempt - 1)))
+      job.signal.throwIfAborted()
+    }
+    last = await runInstallerOnce(job, javaPath, installerFile, root)
+    if (last.code === 0) return last.output
+    // 只有网络类错误才值得原样重跑；Java 版本 / profile 错误重试也不会变好。
+    if (!isTransientInstallerError(last.output)) break
+  }
+  throw new Error(installerFailureMessage(last?.code ?? 1, last?.output || '', attempts))
 }
 
 /* ------------------------------------------------------------------ */
@@ -872,14 +988,25 @@ async function installForgeLike(job, inst, loader, mc, loaderVersion, root, { so
 
   const meta = await getVersionMeta(mc, { source, signal: job.signal })
   const required = requiredJavaMajor(meta, mc)
-  // Installers perform their own TLS downloads; newer Java versions are more
-  // reliable with modern CDNs than the exact runtime the game itself needs.
-  const java = await pickJava({ required, preferred: inst.javaPath, preferHighest: true })
+  // 优先使用最接近要求的 Java（1.20.1 要求 17 就用 17）。旧实现 preferHighest
+  // 会挑到官方启动器附带的 Java 25：Forge 1.20.1 安装器/游戏都不支持 25，
+  // 而且安装器进程和后续启动会给出完全无关的报错。
+  const java = await pickJava({ required, preferred: inst.javaPath })
   if (!java) throw new Error(`安装 ${loader} 需要至少 64 位 Java ${required}，但没有找到。请先在“Java 运行时”里下载或指定。`)
   job.log(`使用 Java ${java.version || java.major}（${java.path}）运行安装器`)
 
+  // 预取 Mojang mappings 并给安装器打补丁；失败不阻断安装，安装器会走原流程。
+  let runFile = installerFile
+  try {
+    const patched = await prepareInstallerMappings(job, installerFile, root, meta, { source })
+    if (patched) runFile = patched
+  } catch (e) {
+    if (job.signal.aborted) throw e
+    job.log('映射表预取失败，继续使用原始安装器：' + e.message, 'warn')
+  }
+
   const started = Date.now()
-  await runInstaller(job, java.path, installerFile, root)
+  await runInstaller(job, java.path, runFile, root)
   job.signal.throwIfAborted()
 
   let versionId = expectedId

@@ -209,18 +209,34 @@ function buildView(ctx, container) {
     } catch (e) { notify('取消失败：' + e.message, 'err') }
   }
   // ---------------- 内联进度卡 ----------------
+  // 安装进度固定在页头下方（sticky），不再埋在「安装设置」卡片底部：
+  // 用户滚动到内存/分组字段时，进度和失败原因仍然可见。
+  const jobDock = h('div', { class: 'lp-job-dock', role: 'status', 'aria-live': 'polite', hidden: true })
   function createInlineJobCard(title) {
     let job = null
     const dotEl = h('span', { class: 'dot' })
     const titleEl = h('b', {})
+    const pctEl = h('span', { class: 'lp-job-pct mono' })
     const badgeEl = h('span', { class: 'badge' })
     const phaseEl = h('div', { class: 'lp-hint' })
     const bar = progress(null, { className: 'lp-job-bar' })
     const metaEl = h('div', { class: 'lp-hint mono' })
-    const errEl = h('div', { class: 'lp-hint bad', style: { display: 'none' } })
+    const errEl = h('div', { class: 'lp-hint bad', role: 'alert', style: { display: 'none' } })
+    const cancelBtn = btn('取消任务', {
+      size: 'xs', variant: 'danger',
+      onClick: async () => {
+        if (!job?.id) return
+        try { await ctx.api.cancelJob(job.id); notify('已请求取消任务', 'info') } catch (e) { notify('取消失败：' + e.message, 'err') }
+      }
+    })
+    const logBtn = btn('查看日志', { size: 'xs', iconName: 'terminal', onClick: () => ctx.showView?.('downloads') })
+    const openBtn = btn('打开实例', { size: 'xs', variant: 'primary', iconName: 'arrow-right', onClick: () => { if (job?.instanceId) void openInstance(job.instanceId) } })
+    const actionRow = h('div', { class: 'lp-job-actions' }, cancelBtn, logBtn, openBtn)
     const el = h('div', { class: 'lp-job', style: { display: 'none' } },
       h('div', { class: 'lp-job-head' }, dotEl,
-        h('div', { style: { flex: '1 1 auto', minWidth: '0' } }, titleEl, phaseEl), badgeEl), bar.el, metaEl, errEl)
+        h('div', { style: { flex: '1 1 auto', minWidth: '0' } }, titleEl, phaseEl), pctEl, badgeEl),
+      bar.el, metaEl, errEl, actionRow)
+    jobDock.appendChild(el)
     function render() {
       if (!job) return
       const meta = STATUS[job.status] || STATUS.running
@@ -235,15 +251,27 @@ function buildView(ctx, container) {
       phaseEl.title = text
       // 服务端可能把 progress 置为 null（indeterminate）：统一交给 jobProgress 判断，
       // 只有它返回 null 时才显示不确定动画。
-      bar.set(jobProgress(job))
+      const pct = jobProgress(job)
+      bar.set(pct)
       bar.state(job.status === 'done' ? 'ok' : job.status === 'failed' ? 'bad' : '')
+      pctEl.textContent = pct === null ? '' : Math.round(pct) + '%'
+      pctEl.title = pct === null ? '进度未知' : `安装进度 ${Math.round(pct)}%`
       metaEl.textContent = installJobSummary(job)
       show(errEl, !!job.error)
       errEl.textContent = job.error || ''
+      const active = ['queued', 'running', 'installing', 'cancelling'].includes(job.status)
+      show(cancelBtn, active)
+      show(logBtn, !active)
+      show(openBtn, !active && !!job.instanceId)
     }
     const cardObj = {
-      el, show(next) { if (!next) return; job = next; el.style.display = ''; render() },
-      update(next) { if (!next) return; job = next; render() }, id: () => job?.id || ''
+      el,
+      show(next) {
+        if (!next) return
+        job = next; el.style.display = ''; jobDock.hidden = false; render()
+      },
+      update(next) { if (!next) return; job = next; render() },
+      id: () => job?.id || ''
     }
     inlineCards.push(cardObj)
     return cardObj
@@ -330,7 +358,7 @@ function buildView(ctx, container) {
         fld('初始内存（MB）', minInput), fld('最大内存（MB）', maxInput), fld('分组', groupInput), javaField,
         optimizeJvmRow),
       hint('初始内存应小于或等于最大内存；留空 Java 路径时由启动器自动选择。'),
-      rootNote, formError, row('row', installBtn), inlineInstall.el))
+      rootNote, formError, row('row', installBtn)))
   async function loadVersions(type, preferId = '') {
     form.versionType = type
     versionTypeSeg.setValue?.(type)
@@ -524,10 +552,16 @@ function buildView(ctx, container) {
     onkeydown: (e) => { if ((e.key === 'Enter' || e.key === ' ') && !pack.busy) { e.preventDefault(); packFileInput.click() } }
   }, icon('upload', { size: 22 }), h('b', {}, '拖入整合包，或点击选择'),
   h('span', { class: 'lp-hint' }, '支持 Modrinth .mrpack 与 CurseForge .zip，最大 4 GB'), packFileInput)
-  dropEl.addEventListener('dragover', (e) => { e.preventDefault(); if (!pack.busy) dropEl.classList.add('over') })
-  dropEl.addEventListener('dragleave', () => dropEl.classList.remove('over'))
+  // 安装页的拖放区由自己处理，必须阻止冒泡，否则根节点的整页拖放处理器
+  // 会把同一个文件再上传一次，最终创建两个安装任务。
+  dropEl.addEventListener('dragenter', (e) => { e.preventDefault(); e.stopPropagation() })
+  dropEl.addEventListener('dragover', (e) => {
+    e.preventDefault(); e.stopPropagation()
+    if (!pack.busy) dropEl.classList.add('over')
+  })
+  dropEl.addEventListener('dragleave', (e) => { e.stopPropagation(); dropEl.classList.remove('over') })
   dropEl.addEventListener('drop', (e) => {
-    e.preventDefault(); dropEl.classList.remove('over')
+    e.preventDefault(); e.stopPropagation(); dropEl.classList.remove('over')
     const file = e.dataTransfer?.files?.[0]
     if (file) uploadPack(file)
   })
@@ -610,8 +644,7 @@ function buildView(ctx, container) {
       fld('分组', packGroupInput)),
     packOpenRow,
     hint('初始内存应小于或等于最大内存。在线安装会先把整合包下载到启动器缓存，任务结束（成功 / 失败 / 取消）后自动清理临时文件。'),
-    hint('CurseForge 整合包需要 API Key 才能补齐文件；缺少 Key 时搜索区域会显示设置引导。'),
-    inlinePack.el)
+    hint('CurseForge 整合包需要 API Key 才能补齐文件；缺少 Key 时搜索区域会显示设置引导。'))
   const packPane = h('div', { style: { ...paneStyle, display: 'none' } },
     row('row wrap', packModeSeg, h('span', { class: 'spacer' }), packModeHint),
     packSearchPane, packLocalPane, packSettingsCard)
@@ -1449,7 +1482,7 @@ function buildView(ctx, container) {
     h('span', { class: 'spacer' }),
     h('div', { class: 'row wrap', style: { gap: '5px' } }, latestRelease, latestSnapshot,
       btn('下载中心', { size: 'sm', iconName: 'download', onClick: () => ctx.showView?.('downloads') })))
-  const root = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } }, header, tabs,
+  const root = h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } }, header, jobDock, tabs,
     h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px', maxWidth: '980px' } },
       createPane, packPane, importPane))
   container.appendChild(root)
@@ -1460,6 +1493,28 @@ function buildView(ctx, container) {
   refreshCfGuide()
   refreshJobs()
   jobsTimer = setInterval(refreshJobs, JOBS_POLL_MS)
+
+  // 下载中心 → 新建实例：载入已下载的本地整合包；auto 时直接开始安装。
+  const pending = ctx.takePendingPackInstall?.() || null
+  if (pending) {
+    // 有文件时先切到本地模式再切页，避免 switchTab('pack') 顺手发起一次在线搜索。
+    if (pending.path) switchPackMode('local')
+    tabs.setValue?.('pack')
+    switchTab('pack')
+    if (pending.path) {
+      pack.path = pending.path
+      packPathInput.value = pending.path
+      packPathInput.title = pending.path
+      setHint(packInspectHint, '正在解析下载中心载入的整合包…')
+      void inspectPack(pending.path).then(() => {
+        if (disposed || !pack.meta) return
+        if (pending.auto) void installPack()
+        else notify('已载入整合包，确认安装设置后点击「安装整合包」', 'ok')
+      })
+    } else {
+      packQueryInput.focus?.()
+    }
+  }
   return {
     dispose() {
       if (disposed) return

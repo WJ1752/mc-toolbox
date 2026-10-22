@@ -31,6 +31,29 @@ export function launcherTypeLabel(type) {
   return LAUNCHER_TYPE[type] || '任务'
 }
 
+const PACK_FILE = /\.(mrpack|zip)$/i
+
+/**
+ * 社区下载任务能否直接交给「新建实例 → 整合包」安装：
+ * 已完成、类型是整合包、文件为 .mrpack / .zip。
+ */
+export function isInstallablePackJob(job) {
+  if (!job || job.status !== 'done') return false
+  if (String(job.meta?.type || '') !== 'modpack') return false
+  return PACK_FILE.test(String(job.filename || job.path || ''))
+}
+
+/** 已下载整合包的绝对路径；缺少路径时用 dir + filename 拼出来，失败返回 ''。 */
+export function packDownloadPath(job) {
+  if (!isInstallablePackJob(job)) return ''
+  const direct = String(job.path || '').trim()
+  if (direct) return direct
+  const dir = String(job.dir || '').trim().replace(/[\\/]+$/, '')
+  const name = String(job.filename || '').trim()
+  if (!dir || !name || /[\\/]$/.test(dir)) return ''
+  return dir + (dir.includes('\\') ? '\\' : '/') + name
+}
+
 /** 导出任务完成后可打开的位置：优先输出目录，其次文件本身；非导出任务返回 ''。 */
 export function exportJobTarget(job) {
   if (!job || job.type !== 'export') return ''
@@ -167,6 +190,7 @@ function buildView(ctx, container) {
     ),
     h('div', { class: 'lp-downloads-actions' },
       finishSwitch,
+      btn('安装整合包', { size: 'sm', iconName: 'archive', onClick: () => ctx.openPackInstaller?.() }),
       btn('清理已完成', { size: 'sm', iconName: 'trash', onClick: () => clearFinished() }),
       btn('刷新', { size: 'sm', iconName: 'refresh', onClick: () => refresh(true) })
     )
@@ -316,9 +340,18 @@ function buildView(ctx, container) {
   function communityRow(job) {
     const tone = toneOf(job)
     const bar = progressNode(job)
+    const installPath = packDownloadPath(job)
     const actions = h('div', { class: 'lp-row-actions' })
     if (isActiveJob(job)) actions.appendChild(btn('取消', { size: 'xs', variant: 'danger', onClick: () => cancelCommunity(job) }))
-    if (job.status === 'done') actions.appendChild(btn('打开文件夹', { size: 'xs', variant: 'primary', iconName: 'folder-open', onClick: () => openFolder(job) }))
+    // 整合包下载完成后可以直接部署：带着本地文件跳到「新建实例 → 整合包」并自动开始安装。
+    if (installPath) {
+      actions.appendChild(btn('安装到新实例', {
+        size: 'xs', variant: 'primary', iconName: 'archive',
+        title: '用这个整合包创建独立实例',
+        onClick: () => ctx.installPackFromDownload?.(job, installPath)
+      }))
+    }
+    if (job.status === 'done') actions.appendChild(btn('打开文件夹', { size: 'xs', variant: installPath ? 'ghost' : 'primary', iconName: 'folder-open', onClick: () => openFolder(job) }))
     actions.appendChild(iconBtn('info', { size: 13, label: '下载详情', onClick: () => openCommunityLog(job) }))
     return h('div', { class: 'lp-row lp-download-row' },
       h('span', { class: 'lp-mod-icon' }, icon('download', { size: 15 })),
