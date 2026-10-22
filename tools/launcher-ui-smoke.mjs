@@ -77,10 +77,24 @@ async function main() {
   await waitFor(`document.readyState === 'complete'`)
   const loaded = await waitFor(`!!document.querySelector('#launcherPage:not([hidden]) .lp-hero, #launcherPage:not([hidden]) .lp-welcome, #launcherPage .lp-main-error')`, 25000)
   check('启动器页面渲染完成', loaded)
+  // 首次运行会弹出「选择游戏目录」；冒烟测试只关闭它，不写用户目录。
+  await sleep(600)
+  await evaluate(`document.querySelector('.modal-head .btn-icon')?.click()`)
   check('默认页为启动器', await evaluate(`document.body.dataset.page === 'launcher'`))
   const hero = await evaluate(`(() => { const el = document.querySelector('#launcherPage .lp-hero, #launcherPage .lp-welcome'); return el ? el.innerText.slice(0, 200) : '' })()`)
   check('实例/欢迎区内容非空', hero.length > 0, hero.replace(/\s+/g, ' ').slice(0, 80))
+  const sheets = await evaluate(`[...document.styleSheets].map(s => s.href || '').filter(Boolean)`)
+  check('v1.9 版本选择/启动样式已加载', sheets.some((h) => h.includes('launcher-versions.css')) && sheets.some((h) => h.includes('launcher-launch.css')), sheets.filter((h) => /launcher-/.test(h)).join(', '))
   await screenshot('01-launcher')
+
+  // 1280×820 常见窗口：无横向溢出
+  await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 820, deviceScaleFactor: 1, mobile: false })
+  await sleep(500)
+  const standard = await evaluate(`({ overflow: document.documentElement.scrollWidth - window.innerWidth, main: document.querySelector('.lp-main')?.getBoundingClientRect().width || 0 })`)
+  check('1280×820 无横向溢出', standard.overflow <= 1, JSON.stringify(standard))
+  await screenshot('01b-launcher-1280')
+  await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false })
+  await sleep(300)
 
   // 页面切换
   await evaluate(`document.querySelector('.page-switch [data-page="workbench"]').click()`)
@@ -90,23 +104,24 @@ async function main() {
   await evaluate(`document.querySelector('.page-switch [data-page="launcher"]').click()`)
   check('切回启动器', await waitFor(`document.body.dataset.page === 'launcher' && !document.getElementById('launcherPage').hidden`))
 
-  // 启动器设置读取
+  // 启动器设置（已并入整页设置，数据仍来自 /api/launcher/settings）
   await evaluate(`document.querySelector('.lp-navbtn[data-nav="settings"]').click()`)
-  const modalOk = await waitFor(`[...document.querySelectorAll('.modal')].some(m => m.innerText.includes('启动器设置'))`, 10000)
-  check('启动器设置弹窗打开', modalOk)
-  if (modalOk) {
+  const settingsOk = await waitFor(`!document.getElementById('settingsPage').hidden && document.getElementById('settingsContent').innerText.includes('游戏目录')`, 10000)
+  check('启动器设置页打开', settingsOk)
+  if (settingsOk) {
+    await evaluate(`[...document.querySelectorAll('#settingsNav button')].find(b => b.textContent.includes('启动与 Java'))?.click()`)
+    await waitFor(`document.getElementById('settingsContent').innerText.includes('最大内存')`, 8000)
     const values = await evaluate(`(() => {
-      const m = [...document.querySelectorAll('.modal')].find(x => x.innerText.includes('启动器设置'))
-      const nums = [...m.querySelectorAll('input')].map(i => i.value).filter(Boolean)
-      return { text: m.innerText, nums }
+      const c = document.getElementById('settingsContent')
+      return { text: c.innerText, nums: [...c.querySelectorAll('input')].map(i => i.value).filter(Boolean) }
     })()`)
     check('设置读取到默认内存 4096', values.text.includes('4096') || values.nums.includes('4096'), values.nums.slice(0, 8).join(','))
     check('设置含 Microsoft OAuth 客户端 ID 字段', values.text.includes('OAuth 客户端 ID') || values.text.includes('Client ID'))
     await screenshot('03-settings')
-    await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 })
-    await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 })
+    await evaluate(`document.getElementById('btnCloseSettings').click()`)
     await sleep(300)
   }
+  check('启动器导航不再出现“返回工作台”', await evaluate(`!document.querySelector('.lp-navbtn[data-nav="workspace"]')?.innerText.includes('返回')`))
 
   // 下载中心（独立视图，验证任务列表与社区下载模块可加载）
   await evaluate(`document.querySelector('.lp-navbtn[data-nav="downloads"]')?.click()`)

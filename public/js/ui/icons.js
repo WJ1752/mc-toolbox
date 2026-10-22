@@ -6,6 +6,7 @@ const NS = 'http://www.w3.org/2000/svg'
 // '#' = secondary (dimmed), '~' = filled with currentColor
 const PATHS = {
   workspace: ['M3 3h6v6H3z', 'M11 3h6v6h-6z', 'M3 11h6v6H3z', '~M11 11h6v6h-6z'],
+  home: ['M2.5 9.5L10 3l7.5 6.5', 'M4.5 9v8h11V9', '#M8 17v-4h4v4'],
   add: ['M10 4v12', 'M4 10h12'],
   minus: ['M4 10h12'],
   collapse: ['M8 3v5H3', 'M17 8h-5V3', 'M12 17v-5h5', 'M3 12h5v5'],

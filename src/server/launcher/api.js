@@ -15,7 +15,8 @@ import {
   duplicateInstance,
   setSelectedInstance,
   getSelectedInstanceId,
-  launcherRoot
+  launcherRoot,
+  defaultRoot
 } from './state.js'
 import {
   listGameVersions,
@@ -27,6 +28,7 @@ import {
   startInstall,
   startRepair,
   startPackInstall,
+  startOnlinePackInstall,
   startModUpdates,
   getJob,
   getJobDelta,
@@ -35,12 +37,21 @@ import {
   clearFinishedJobs,
   readPackSummary
 } from './install.js'
+import {
+  startPackExport,
+  listExportJobs,
+  getExportJob,
+  cancelExport,
+  defaultExportDir
+} from './pack-export.js'
 import { findModUpdates, resolveMissingDependencies } from './updates.js'
 import {
   prepareLaunch,
   startInstance,
   stopInstance,
   getSessionSnapshot,
+  getLaunchState,
+  cancelLaunch,
   launchStatus,
   readLog,
   readSavedLog,
@@ -54,7 +65,17 @@ import * as content from './content.js'
 import { scanExisting, importExisting, defaultMinecraftDirs } from './import.js'
 import { getNews } from './news.js'
 import { receiveUploadedPack } from '../pack-converter.js'
-import { RUNTIME_DIR } from '../paths.js'
+import { RUNTIME_DIR, isSEA } from '../paths.js'
+import {
+  checkForUpdate,
+  getDownloadState,
+  resetDownloadState,
+  startDownload,
+  applyUpdate,
+  markSkipped,
+  publicUpdateConfig,
+  currentVersion
+} from './app-update.js'
 
 const MIME = {
   '.png': 'image/png',
@@ -78,11 +99,24 @@ function safeInt(value, fallback = 0) {
 }
 
 function filterSettings(settings) {
+  const root = launcherRoot()
+  const update = settings.update || {}
   return {
     ...settings,
-    root: launcherRoot(),
+    root,
+    defaultRoot: defaultRoot(),
+    needsSetup: settings.rootConfigured !== true,
     java: {
       default: settings.defaultJava || ''
+    },
+    // Token 不回传给前端：只告诉它是否已经设置过。
+    update: {
+      autoCheck: update.autoCheck !== false,
+      includePrerelease: update.includePrerelease === true,
+      repo: update.repo || '',
+      token: '',
+      tokenSet: !!update.token,
+      skippedVersion: update.skippedVersion || ''
     }
   }
 }
@@ -124,15 +158,67 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
   on('PUT', '/api/launcher/settings', async (req) => {
     const body = await readBody(req)
     const allowed = [
-      'root', 'source', 'concurrency', 'retries', 'verify', 'defaultMemory', 'defaultMinMemory',
+      'root', 'rootConfigured', 'source', 'concurrency', 'retries', 'verify', 'defaultMemory', 'defaultMinMemory',
       'defaultJava', 'jvmArgs', 'gameArgs', 'closeOnLaunch', 'showLog', 'msClientId', 'downloadAssets',
       'defaultWidth', 'defaultHeight', 'defaultGroup'
     ]
     const patch = {}
     for (const key of allowed) if (body[key] !== undefined) patch[key] = body[key]
+    if (body.update && typeof body.update === 'object') {
+      const current = getSettings().update || {}
+      const next = { ...current }
+      if (body.update.autoCheck !== undefined) next.autoCheck = body.update.autoCheck !== false
+      if (body.update.includePrerelease !== undefined) next.includePrerelease = body.update.includePrerelease === true
+      if (body.update.repo !== undefined) next.repo = String(body.update.repo || '').trim()
+      if (body.update.skippedVersion !== undefined) next.skippedVersion = String(body.update.skippedVersion || '').trim()
+      // token 省略 = 保留原值；空串 = 清除；其他 = 覆盖。
+      if (typeof body.update.token === 'string') next.token = body.update.token.trim()
+      patch.update = next
+    }
     const settings = updateSettings(patch)
     return filterSettings(settings)
   })
+
+  /* ---------------- 启动器自身更新（GitHub Releases） ---------------- */
+  on('GET', '/api/launcher/update/check', async (_req, _params, query) => {
+    const result = await checkForUpdate({ force: query.force === '1' })
+    return {
+      ...result,
+      autoCheck: publicUpdateConfig().autoCheck,
+      canApply: isSEA && process.platform === 'win32'
+    }
+  })
+  on('GET', '/api/launcher/update/config', async () => publicUpdateConfig())
+  on('PUT', '/api/launcher/update/config', async (req) => {
+    const body = await readBody(req)
+    const current = getSettings().update || {}
+    const next = { ...current }
+    if (body.autoCheck !== undefined) next.autoCheck = body.autoCheck !== false
+    if (body.includePrerelease !== undefined) next.includePrerelease = body.includePrerelease === true
+    if (body.repo !== undefined) next.repo = String(body.repo || '').trim()
+    if (body.skippedVersion !== undefined) next.skippedVersion = String(body.skippedVersion || '').trim()
+    if (typeof body.token === 'string') next.token = body.token.trim()
+    updateSettings({ update: next })
+    return { ok: true, config: publicUpdateConfig() }
+  })
+  on('GET', '/api/launcher/update/state', async () => ({
+    ...getDownloadState(),
+    current: currentVersion(),
+    canApply: isSEA && process.platform === 'win32'
+  }))
+  on('POST', '/api/launcher/update/download', async () => ({
+    ...startDownload(),
+    current: currentVersion()
+  }))
+  on('POST', '/api/launcher/update/apply', async () => await applyUpdate())
+  on('POST', '/api/launcher/update/skip', async (req) => {
+    const body = await readBody(req)
+    return { ok: true, config: markSkipped(body.version) }
+  })
+  on('POST', '/api/launcher/update/reset', async () => ({
+    ...resetDownloadState(),
+    current: currentVersion()
+  }))
 
   /* ---------------- status / sessions ---------------- */
   on('GET', '/api/launcher/status', async () => await launcherStatusPayload())
@@ -176,7 +262,11 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
   on('POST', '/api/launcher/instances/:id/launch', async (req, params) => {
     const body = await readBody(req)
     const session = await startInstance(params.id, { accountId: body.accountId || '' })
-    return { ok: true, session }
+    return { ok: true, session, launch: getLaunchState(params.id) }
+  })
+  on('POST', '/api/launcher/instances/:id/launch/cancel', async (_req, params) => {
+    instanceOf(params.id)
+    return await cancelLaunch(params.id)
   })
   on('POST', '/api/launcher/instances/:id/stop', async (req, params) => {
     const body = await readBody(req)
@@ -431,7 +521,8 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
       dir: body.dir,
       versionId: body.versionId,
       name: body.name || '',
-      group: body.group || ''
+      group: body.group || '',
+      mc: body.mc || ''
     })
   })
 
@@ -473,6 +564,52 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
       await fsp.rm(uploaded.dir, { recursive: true, force: true }).catch(() => {})
       throw e
     }
+  })
+  on('POST', '/api/launcher/packs/install-online', async (req) => {
+    const body = await readBody(req)
+    return startOnlinePackInstall({
+      source: body.source,
+      projectId: body.projectId || body.id || '',
+      versionId: body.versionId || body.fileId || '',
+      name: body.name || '',
+      memory: body.memory || {},
+      minMemory: body.minMemory,
+      javaPath: body.javaPath || '',
+      group: body.group || '',
+      openWhenDone: body.openWhenDone === true,
+      apiKey: body.apiKey || ''
+    })
+  })
+
+  /* ---------------- export instance as modpack ---------------- */
+  on('GET', '/api/launcher/exports/config', async () => ({
+    defaultDir: defaultExportDir(),
+    formats: [
+      { id: 'mrpack', label: 'Modrinth 整合包', ext: '.mrpack' },
+      { id: 'zip', label: '通用整合包', ext: '.zip' }
+    ]
+  }))
+  on('POST', '/api/launcher/instances/:id/export', async (req, params) => {
+    instanceOf(params.id)
+    const body = await readBody(req)
+    return startPackExport(params.id, {
+      format: body.format || 'mrpack',
+      includeSaves: body.includeSaves === true,
+      includeScreenshots: body.includeScreenshots === true,
+      outputDir: body.outputDir || '',
+      name: body.name || ''
+    })
+  })
+  on('GET', '/api/launcher/exports', async () => ({ items: listExportJobs() }))
+  on('GET', '/api/launcher/exports/:id', async (_req, params, query) => {
+    const job = getExportJob(params.id, safeInt(query.after))
+    if (!job) throw new Error('导出任务不存在')
+    return job
+  })
+  on('POST', '/api/launcher/exports/:id/cancel', async (_req, params) => {
+    const ok = cancelExport(params.id)
+    if (!ok) throw new Error('导出任务不存在或已经结束')
+    return { ok }
   })
 
   /* ---------------- news ---------------- */

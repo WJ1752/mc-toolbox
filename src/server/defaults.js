@@ -4,7 +4,8 @@ export const DEFAULT_SETTINGS = {
   general: {
     theme: 'dark',              // dark | light
     accent: '#5ec96a',          // 主题强调色
-    tileColumns: 1,             // 每行磁贴数（1 = 一行一个）
+    tileColumns: 1,             // 最大列数（1 = 一行一个；窗口变窄会自动减少）
+    adaptiveTiles: false,       // 自适应磁贴：false = 手动按列摆放（默认），true = 自动排到最短列
     animations: true,           // 磁贴拖拽/展开动画
     confirmDanger: true,        // 危险操作二次确认
     timeFormat: '24h',          // 24h | 12h
@@ -69,7 +70,7 @@ export const DEFAULT_SETTINGS = {
     mcDir: ''     // .minecraft 目录（留空自动检测 %APPDATA%\.minecraft）
   },
   features: {},                 // { featureId: { enabled, visible } }
-  layout: []                    // [{ id, w, h }]
+  layout: []                    // [{ id, w, h, collapsed, col }]；col 为 0 基列位
 }
 
 // 内置「仅客户端 mod」库（按 modid 匹配），用户可在 GUI 中增删

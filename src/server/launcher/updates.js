@@ -13,7 +13,7 @@ import { instancePaths } from './state.js'
 import { listMods } from './content.js'
 
 const MODRINTH = 'https://api.modrinth.com/v2'
-const UA = 'MC-Toolbox/1.8.0 (local launcher)'
+const UA = 'MC-Toolbox/1.9.0 (local launcher)'
 const HASH_TTL = 30 * 60 * 1000
 const UPDATE_TTL = 5 * 60 * 1000
 const DEP_TTL = 10 * 60 * 1000

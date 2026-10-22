@@ -1,28 +1,136 @@
-// 下载中心：新建实例 / 整合包 / 导入已有 / 任务队列。
+// 新建实例 / 整合包（在线搜索 + 本地文件）/ 导入已有 / 任务提示。
 // 所有外部文本走 textContent；轮询定时器只在 render 后启动，destroy 时清空。
-import { h, clear, fmtBytes, fmtDuration, fmtAgo } from '../core/dom.js'
+import { h, clear, fmtBytes, fmtAgo } from '../core/dom.js'
+import { jobProgress, jobStatusLabel, jobMetaText } from '../core/jobs.js'
+import { api as coreApi } from '../core/api.js'
 import { icon } from '../ui/icons.js'
 import { btn, input, seg, progress, spinner, badge, toggle } from '../ui/kit.js'
 import { loaderInfo, sectionCard, emptyBlock } from './ui.js'
 import { optimizedJvmArgs } from './jvm.js'
+import {
+  versionCombo, partitionVersions, compatibleVersion, isMinecraftVersion, filterSummary, versionRowShell
+} from './version-picker.js'
 const FINISHED = new Set(['done', 'failed', 'cancelled'])
 const STATUS = {
   queued: { label: '排队中', tone: 'warn', dot: 'warn' }, running: { label: '进行中', tone: 'info', dot: 'loading' },
   cancelling: { label: '取消中', tone: 'warn', dot: 'warn' }, done: { label: '已完成', tone: 'ok', dot: 'ok' },
   failed: { label: '失败', tone: 'bad', dot: 'bad' }, cancelled: { label: '已取消', tone: '', dot: '' }
 }
-const TYPE_LABEL = { install: '安装', pack: '整合包', repair: '修复', update: '更新' }
+const TYPE_LABEL = { install: '安装', pack: '整合包', repair: '修复', update: '更新', export: '导出整合包' }
 const VERSION_TYPES = [['release', '正式版'], ['snapshot', '快照'], ['all', '全部']]
 const LOADERS = ['vanilla', 'fabric', 'quilt', 'forge', 'neoforge']
 const JOBS_POLL_MS = 1200
 const MEM_MIN = 256
 const MAX_PACK_BYTES = 4 * 1024 ** 3
+const PACK_MODES = [['search', '搜索下载'], ['local', '本地文件']]
+const MODPACK_SOURCES = [['modrinth', 'Modrinth'], ['curseforge', 'CurseForge']]
+const MODPACK_SOURCE_LABEL = { modrinth: 'Modrinth', curseforge: 'CurseForge' }
+const PACK_SEARCH_LIMIT = 20
+// 版本列表接口不可用时的内置常用版本（与内容安装弹窗保持一致）。
+const PACK_VERSION_FALLBACK = [
+  '26.2', '26.1', '1.21.11', '1.21.8', '1.21.4', '1.21.1', '1.20.1',
+  '1.20', '1.19.4', '1.18.2', '1.17.1', '1.16.5', '1.12.2', '1.8.9'
+]
+const LOADER_IDS = new Set(['vanilla', 'fabric', 'quilt', 'forge', 'neoforge'])
+const MC_SOURCE_LABEL = {
+  inheritsFrom: '继承识别',
+  jar: 'JAR 识别',
+  clientVersion: '客户端版本识别',
+  assetIndex: '资源索引识别',
+  assets: '资源索引识别',
+  versionDir: '版本目录识别'
+}
 const paneStyle = { display: 'flex', flexDirection: 'column', gap: '10px' }
+
+function versionTime(value) {
+  const ts = typeof value === 'number' ? value : Date.parse(String(value || ''))
+  return Number.isFinite(ts) ? ts : 0
+}
+
+/** 导入扫描项的 mcSource → 中文说明；未知来源返回空串。 */
+export function mcSourceLabel(source) {
+  return MC_SOURCE_LABEL[String(source || '')] || ''
+}
+
+/** 该扫描项是否需要手动填写 MC 版本（自动识别失败或识别结果不合法）。 */
+export function needsManualMc(item) {
+  if (!item) return false
+  if (item.needsMc === true) return true
+  return !isMinecraftVersion(item.mc || '')
+}
+
+/** 导入前校验手动填写的 MC 版本；失败时返回中文原因。 */
+export function validateImportMc(value) {
+  const mc = String(value || '').trim()
+  if (!mc) return { ok: false, mc: '', error: '请填写该版本对应的 Minecraft 版本，例如 1.21.8。' }
+  if (!isMinecraftVersion(mc)) {
+    return { ok: false, mc, error: `「${mc}」不是有效的 MC 版本号，请输入类似 1.21.8 / 26.3 / 24w14a 的版本。` }
+  }
+  return { ok: true, mc, error: '' }
+}
+
+/**
+ * 内联安装卡摘要：与下载中心共用 core/jobs.js 的 jobMetaText（内部即 jobBytesText /
+ * jobElapsedText 的语义）。排队「已排队 X」/ 运行「已进行 X」/ 完成「用时 X」；
+ * 失败或取消不再显示「已进行」。
+ */
+export function installJobSummary(job, now = Date.now()) {
+  if (!job) return ''
+  const text = jobMetaText(job, now)
+  if (text && text !== jobStatusLabel(job)) return text
+  return STATUS[job.status]?.label || jobStatusLabel(job)
+}
+
+/**
+ * 在线整合包版本分组：兼容版本优先并标注推荐，其余折叠。
+ * mc 为空或非法时视为「全部版本」，不做兼容过滤。
+ */
+export function packVersionGroups(versions, { mc = '' } = {}) {
+  const list = (Array.isArray(versions) ? versions : []).filter(Boolean)
+  const target = String(mc || '').trim()
+  if (!target || !isMinecraftVersion(target)) {
+    const sorted = [...list].sort((a, b) => versionTime(b?.date) - versionTime(a?.date))
+    const recommended = sorted.find((item) => {
+      const type = String(item?.type || '').toLowerCase()
+      return !type || type === 'release'
+    }) || sorted[0]
+    return { compatible: sorted, others: [], recommendedId: String(recommended?.id || ''), mc: '', loader: '' }
+  }
+  // 整合包自带加载器，这里只按 MC 版本判断兼容（kind = modpack）。
+  return partitionVersions(list, { mc: target, loader: '', kind: 'modpack' })
+}
+
+/** 社区搜索 / 版本接口错误 → UI 文案；识别 CurseForge 未配置 API Key。 */
+export function describeCommunityError(error) {
+  const raw = String(error?.message || error || '未知错误')
+  const cfKey = error?.code === 'CURSEFORGE_API_KEY' || /(API\s*Key|API\s*密钥|未配置.{0,24}密钥|未配置.{0,24}Key)/i.test(raw)
+  return {
+    raw,
+    cfKey,
+    message: cfKey
+      ? '未配置 CurseForge API Key：请在「设置 → 社区资源」填写 CurseForge API Key，或改用 Modrinth 搜索整合包。'
+      : raw
+  }
+}
+
+/** 在线安装接口错误 → UI 文案；额外识别服务端尚未接入路由的情况。 */
+export function describeOnlineInstallError(error) {
+  const info = describeCommunityError(error)
+  if (info.cfKey) return info
+  if (/404|not found|返回内容不是 JSON|未知的接口|接口不存在/i.test(info.raw)) {
+    return {
+      ...info,
+      message: '在线安装接口暂不可用（服务端未接入 /api/launcher/packs/install-online）；请改用「本地文件」安装，或更新启动器服务端。'
+    }
+  }
+  return info
+}
 /**
  * Install / download center view (not a modal).
  * @param {{ api: import('./api.js').launcherApi, ui: import('./ui.js'), toast: Function,
  *   confirm: Function, openModal: Function, pickFile: Function, openPath: Function,
- *   getState: Function, reload: Function, showInstance: Function }} ctx
+ *   getState: Function, reload: Function, showInstance: Function, showView: Function,
+ *   openSettings: Function }} ctx
  * @returns {{ render(container: HTMLElement): void, destroy(): void }}
  */
 export function createInstallCenter(ctx) {
@@ -61,14 +169,21 @@ function buildView(ctx, container) {
   })
   const jobName = (job) => (job?.name || TYPE_LABEL[job?.type] || '任务')
   const basename = (p) => String(p || '').split(/[\\/]/).pop() || ''
-  function jobMetaText(job) {
-    const parts = []
-    if (job.total > 0) parts.push(`${fmtBytes(job.received)} / ${fmtBytes(job.total)}`)
-    else if (job.received > 0) parts.push(fmtBytes(job.received))
-    if (job.total > 0 && job.progress != null && !FINISHED.has(job.status)) parts.push(Math.round(job.progress) + '%')
-    if (job.status === 'done' && job.startedAt && job.finishedAt) parts.push('用时 ' + fmtDuration((job.finishedAt - job.startedAt) / 1000))
-    if (!parts.length) parts.push((STATUS[job.status] || STATUS.running).label)
-    return parts.join(' · ')
+  const agoOf = (value) => {
+    const ts = typeof value === 'number' ? value : Date.parse(String(value || ''))
+    return Number.isFinite(ts) ? fmtAgo(ts) : '未知'
+  }
+  function currentInstance() {
+    const state = stateOf()
+    const list = Array.isArray(state.instances) ? state.instances : []
+    const raw = state.selectedInstance
+    if (raw && typeof raw === 'object') return raw
+    const id = (typeof raw === 'string' && raw) || state.selectedId || ''
+    return list.find((item) => item.id === id) || null
+  }
+  function currentInstanceMc() {
+    const mc = String(currentInstance()?.mc || '').trim()
+    return isMinecraftVersion(mc) ? mc : ''
   }
   async function openInstance(id) {
     if (!id || typeof ctx.showInstance !== 'function') return
@@ -118,9 +233,11 @@ function buildView(ctx, container) {
       const text = [job.phase, job.detail].filter(Boolean).join(' · ')
       phaseEl.textContent = text || '准备中…'
       phaseEl.title = text
-      bar.set(job.indeterminate || job.progress == null ? null : job.progress)
+      // 服务端可能把 progress 置为 null（indeterminate）：统一交给 jobProgress 判断，
+      // 只有它返回 null 时才显示不确定动画。
+      bar.set(jobProgress(job))
       bar.state(job.status === 'done' ? 'ok' : job.status === 'failed' ? 'bad' : '')
-      metaEl.textContent = jobMetaText(job)
+      metaEl.textContent = installJobSummary(job)
       show(errEl, !!job.error)
       errEl.textContent = job.error || ''
     }
@@ -227,6 +344,7 @@ function buildView(ctx, container) {
       form.versions = Array.isArray(data?.items) ? data.items : []
       if (data?.latest) form.latest = data.latest
       updateLatest()
+      syncPackInstance()
       applyVersionFilter(preferId)
     } catch (e) {
       if (disposed || epoch !== versionEpoch) return
@@ -381,9 +499,18 @@ function buildView(ctx, container) {
       installBtn.classList.remove('loading')
     }
   }
-  // ---------------- B. 整合包 ----------------
-  const pack = { source: '', meta: null, busy: false }
+  // ---------------- B. 整合包（在线搜索 / 本地文件） ----------------
+  const pack = {
+    mode: 'search', path: '', meta: null, busy: false, nameDirty: false,
+    versionTouched: false, instanceMc: ''
+  }
   let packEpoch = 0
+  let packVersionOptions = PACK_VERSION_FALLBACK.slice()
+  const packJobWatches = new Map()
+  const packModeHint = hint('从 Modrinth / CurseForge 在线搜索并安装整合包')
+  const packModeSeg = seg(PACK_MODES, pack.mode, (value) => switchPackMode(value), { title: '整合包来源' })
+
+  /* --- 本地文件节点（行为与改造前一致） --- */
   const packPathInput = input({ readonly: true, mono: true, placeholder: '尚未选择整合包文件', title: '整合包路径' })
   const packChooseBtn = btn('选择文件', { size: 'sm', iconName: 'folder', onClick: () => choosePackFile() })
   const packInspectHint = hint('选择本机整合包后，会先解析名称与运行时再安装。')
@@ -408,25 +535,91 @@ function buildView(ctx, container) {
   const uploadBar = progress(0, { className: 'lp-job-bar' })
   const uploadText = h('div', { class: 'lp-hint mono' })
   uploadWrap.append(uploadBar.el, uploadText)
+
+  /* --- 两种模式共用的安装设置 --- */
   const packNameInput = input({ placeholder: '实例名称（默认使用整合包名称）', onInput: () => { pack.nameDirty = true } })
   const packMinInput = input({ type: 'number', min: String(MEM_MIN), step: '256', value: String(defaultMin), title: '初始内存（MB）' })
   const packMaxInput = input({ type: 'number', min: String(MEM_MIN), step: '256', value: String(defaultMax), title: '最大内存（MB）' })
+  const packGroupInput = input({ value: String(settings.defaultGroup || ''), placeholder: '分组（可选）' })
+  const packOpenWhenDone = toggle(true, () => {}, { title: '安装完成后自动打开实例' })
+  const packOpenRow = h('div', { class: 'lp-switch-row lp-span-2' },
+    h('div', {}, h('b', {}, '完成后打开实例'),
+      hint('安装完成后自动切换到新实例；在线与本地整合包都生效。默认开启。')),
+    packOpenWhenDone)
+  const packOpenChecked = () => !!packOpenWhenDone.querySelector('input')?.checked
   const packInstallBtn = btn('安装整合包', { variant: 'primary', iconName: 'download', disabled: true, onClick: () => installPack() })
   const inlinePack = createInlineJobCard('整合包安装')
-  const packPane = h('div', { style: { ...paneStyle, display: 'none' } },
-    card('选择整合包', 'Modrinth / CurseForge 整合包',
+
+  /* --- 在线搜索状态 --- */
+  const search = {
+    source: 'modrinth', query: '', view: 'search', project: null,
+    results: [], total: 0, notice: '', error: '', loaded: false, loading: false,
+    versions: [], versionNotice: '', versionError: '', versionLoading: false,
+    showOthers: false, cfKey: false, cfOk: false, busy: false, jobId: '', seq: 0
+  }
+  const initialPackMc = currentInstanceMc()
+  const packSourceSeg = seg(MODPACK_SOURCES, search.source, (value) => setPackSource(value), { title: '整合包来源' })
+  const packQueryInput = input({
+    placeholder: '搜索整合包名称，回车开始搜索',
+    class: 'grow', title: '搜索整合包',
+    onKeyDown: (event) => { if (event.key === 'Enter') { event.preventDefault(); void searchPacks() } }
+  })
+  packQueryInput.setAttribute('aria-label', '搜索整合包')
+  const packSearchBtn = btn('搜索', { size: 'sm', variant: 'primary', iconName: 'search', onClick: () => void searchPacks() })
+  const packVersionCombo = versionCombo({
+    value: initialPackMc,
+    instanceMc: initialPackMc,
+    versions: packVersionOptions,
+    title: '按 Minecraft 版本筛选整合包',
+    onChange: () => {
+      pack.versionTouched = true
+      search.showOthers = false
+      updatePackFilterLine()
+      if (search.view === 'versions') paintPackVersions()
+      else if (search.loaded) void searchPacks()
+    }
+  })
+  const packFilterLine = h('div', { class: 'lp-filter-line' })
+  const packSearchStatus = hint('')
+  const packSearchNotice = h('div', { class: 'lp-hint warnc', role: 'status', style: { display: 'none' } })
+  const packSearchError = h('div', { class: 'lp-hint bad', role: 'alert', style: { display: 'none' } })
+  const packCfHint = h('div', { class: 'lp-hint warnc', style: { display: 'none' } })
+  const packCfGuide = h('div', { class: 'lp-form-note lp-danger-note', style: { display: 'none' } },
+    h('b', {}, 'CurseForge 需要 API Key'),
+    h('p', { style: { margin: '2px 0 0' } },
+      '当前未配置 CurseForge API Key，搜索与在线安装都会失败。请到「设置 → 社区资源 → CurseForge API Key」填写 Eternal API Key 后重试，或改用 Modrinth。'),
+    h('div', { class: 'lp-row-actions', style: { marginTop: '6px' } },
+      btn('前往设置', { size: 'sm', variant: 'primary', iconName: 'settings', onClick: () => openPackSettings() }),
+      btn('改用 Modrinth', { size: 'sm', onClick: () => setPackSource('modrinth') })))
+  const packResults = h('div', { class: 'lp-list', style: { maxHeight: '440px', overflowY: 'auto', paddingRight: '2px' } })
+
+  /* --- 页面组装 --- */
+  const packSearchPane = h('div', { style: paneStyle },
+    card('搜索下载', '从 Modrinth / CurseForge 在线安装整合包',
+      row('row wrap', packSourceSeg, h('div', { class: 'grow' }, packQueryInput), packSearchBtn),
+      row('row wrap', h('span', { class: 'lp-hint', style: { flex: 'none' } }, 'MC 版本'), packVersionCombo.el, packFilterLine),
+      packCfHint, packCfGuide, packSearchNotice, packSearchStatus, packSearchError, packResults))
+  const packLocalPane = h('div', { style: { ...paneStyle, display: 'none' } },
+    card('选择本地整合包', 'Modrinth / CurseForge / 本工具导出的整合包',
       row('row wrap', h('div', { class: 'grow' }, packPathInput), packChooseBtn),
       packInspectHint, packMetaRow, h('div', { class: 'hr', style: { margin: '2px 0' } }),
-      dropEl, uploadWrap, packError),
-    card('安装设置', '整合包会创建独立实例',
-      h('div', { class: 'lp-form-grid' }, fld('实例名称', packNameInput, null, true),
-        fld('初始内存（MB）', packMinInput), fld('最大内存（MB）', packMaxInput)),
-      hint('从本机路径安装前需要先解析成功；拖入 / 选择文件会先上传到启动器缓存，再由服务端安装。'),
-      hint('CurseForge 整合包需要设置中的 CurseForge API Key 才能补齐文件；缺少 Key 时部分内容可能下载失败。'),
-      row('row', packInstallBtn), inlinePack.el))
+      dropEl, uploadWrap, packError, row('row', packInstallBtn)))
+  const packSettingsCard = card('安装设置', '整合包会创建独立实例',
+    h('div', { class: 'lp-form-grid' }, fld('实例名称', packNameInput, null, true),
+      fld('初始内存（MB）', packMinInput), fld('最大内存（MB）', packMaxInput),
+      fld('分组', packGroupInput)),
+    packOpenRow,
+    hint('初始内存应小于或等于最大内存。在线安装会先把整合包下载到启动器缓存，任务结束（成功 / 失败 / 取消）后自动清理临时文件。'),
+    hint('CurseForge 整合包需要 API Key 才能补齐文件；缺少 Key 时搜索区域会显示设置引导。'),
+    inlinePack.el)
+  const packPane = h('div', { style: { ...paneStyle, display: 'none' } },
+    row('row wrap', packModeSeg, h('span', { class: 'spacer' }), packModeHint),
+    packSearchPane, packLocalPane, packSettingsCard)
+
+  /* --- 本地文件行为 --- */
   function setPackError(text) { packError.textContent = text || ''; show(packError, !!text) }
   function updatePackBtn() {
-    packInstallBtn.disabled = pack.busy || !pack.source || !pack.meta
+    packInstallBtn.disabled = pack.busy || !pack.path || !pack.meta
     packChooseBtn.disabled = pack.busy
     dropEl.style.pointerEvents = pack.busy ? 'none' : ''; dropEl.style.opacity = pack.busy ? '.6' : ''
     packInstallBtn.classList.toggle('loading', pack.busy)
@@ -443,7 +636,7 @@ function buildView(ctx, container) {
   }
   async function inspectPack(path) {
     const epoch = ++packEpoch
-    pack.source = ''; pack.meta = null
+    pack.path = ''; pack.meta = null
     show(packMetaRow, false); setPackError('')
     setHint(packInspectHint, '正在解析整合包…')
     updatePackBtn()
@@ -451,8 +644,10 @@ function buildView(ctx, container) {
       const meta = await ctx.api.packInspect(path)
       if (disposed || epoch !== packEpoch) return
       pack.meta = meta || {}
-      pack.source = path
-      const kind = meta?.kind === 'modrinth' ? 'Modrinth' : meta?.kind === 'curseforge' ? 'CurseForge' : '未知格式'
+      pack.path = path
+      const kind = meta?.kind === 'modrinth' ? 'Modrinth'
+        : meta?.kind === 'curseforge' ? 'CurseForge'
+          : meta?.kind === 'toolbox' ? '本工具导出的整合包' : '未知格式'
       clear(packMetaRow)
       packMetaRow.append(badge(kind, meta?.kind === 'modrinth' ? 'info' : 'accent'),
         badge(meta?.mc || '未声明 MC 版本', meta?.mc ? '' : 'warn'),
@@ -473,7 +668,7 @@ function buildView(ctx, container) {
   }
   async function installPack() {
     setPackError('')
-    if (!pack.source || !pack.meta) { setPackError('请先选择并解析整合包文件'); return }
+    if (!pack.path || !pack.meta) { setPackError('请先选择并解析整合包文件'); return }
     const memory = readMemory(packMinInput, packMaxInput)
     if (memory.error) { setPackError(memory.error); packMinInput.focus?.(); return }
     if (pack.busy) return
@@ -481,8 +676,9 @@ function buildView(ctx, container) {
     updatePackBtn()
     try {
       const result = await ctx.api.packInstall({
-        source: pack.source, name: packNameInput.value.trim(),
-        memory: { min: memory.min, max: memory.max }, minMemory: memory.min
+        source: pack.path, name: packNameInput.value.trim(),
+        memory: { min: memory.min, max: memory.max }, minMemory: memory.min,
+        group: packGroupInput.value.trim()
       })
       if (disposed) return
       const job = result?.job
@@ -490,6 +686,7 @@ function buildView(ctx, container) {
       inlinePack.show(job)
       inlinePack.el.scrollIntoView?.({ block: 'nearest' })
       notify('已开始安装整合包：' + (job.name || pack.meta.name || ''), 'ok')
+      watchPackJob(job, { openWhenDone: packOpenChecked() })
       refreshJobs()
     } catch (e) {
       if (!disposed) { setPackError('安装失败：' + e.message); notify('安装失败：' + e.message, 'err') }
@@ -521,11 +718,519 @@ function buildView(ctx, container) {
       if (!job?.id) throw new Error('服务端没有返回安装任务')
       uploadBar.set(100); uploadText.textContent = '上传完成，已开始安装：' + file.name
       inlinePack.show(job); inlinePack.el.scrollIntoView?.({ block: 'nearest' })
-      notify('整合包已上传，开始安装', 'ok'); refreshJobs()
+      notify('整合包已上传，开始安装', 'ok')
+      watchPackJob(job, { openWhenDone: packOpenChecked() })
+      refreshJobs()
     } catch (e) {
       if (disposed) return
       setPackError('上传失败：' + e.message); notify('上传失败：' + e.message, 'err'); show(uploadWrap, false)
     } finally { pack.busy = false; updatePackBtn() }
+  }
+
+  /* --- 在线搜索与安装 --- */
+  function updatePackFilterLine() {
+    clear(packFilterLine)
+    const mc = packVersionCombo.getValue()
+    packFilterLine.append(h('span', {}, filterSummary({ mc, loader: '', kind: 'modpack' })), h('span', { class: 'spacer' }),
+      h('span', { class: 'lp-vc-badge' }, MODPACK_SOURCE_LABEL[search.source] || search.source))
+  }
+  function ensurePackVersionValue() {
+    if (packVersionCombo.getValue() || pack.versionTouched) return
+    const next = currentInstanceMc() || String(form.latest?.release || '')
+    if (next) packVersionCombo.setValue(next, { silent: true })
+  }
+  function syncPackInstance() {
+    const mc = currentInstanceMc()
+    const before = packVersionCombo.getValue()
+    packVersionCombo.setInstanceMc(mc)
+    if (pack.versionTouched) {
+      if (pack.instanceMc && packVersionCombo.getValue() === pack.instanceMc && mc && mc !== pack.instanceMc) {
+        packVersionCombo.setValue(mc, { silent: true })
+      }
+    } else if (mc) {
+      if (packVersionCombo.getValue() !== mc) packVersionCombo.setValue(mc, { silent: true })
+    } else {
+      ensurePackVersionValue()
+    }
+    pack.instanceMc = mc
+    updatePackFilterLine()
+    // 当前实例变化导致筛选版本被跟随更新时，同步刷新已展示的结果/版本列表。
+    if (before !== packVersionCombo.getValue()) {
+      if (search.view === 'versions' && search.project) paintPackVersions()
+      else if (search.loaded && !search.loading) void searchPacks()
+    }
+  }
+  async function loadPackVersionOptions() {
+    try {
+      const data = await ctx.api.versions({ type: 'all', limit: 400 })
+      if (disposed) return
+      const ids = (Array.isArray(data?.items) ? data.items : []).map((item) => String(item?.id || '')).filter(Boolean)
+      if (ids.length) {
+        packVersionOptions = ids
+        packVersionCombo.setVersions(ids)
+      }
+      ensurePackVersionValue()
+      updatePackFilterLine()
+    } catch {
+      // 版本列表获取失败时保留内置常用版本，不阻断搜索。
+    }
+  }
+  function openPackSettings() {
+    if (typeof ctx.openSettings === 'function') {
+      try {
+        const result = ctx.openSettings('community')
+        if (result && typeof result.catch === 'function') result.catch((e) => notify('打开设置失败：' + e.message, 'err'))
+        return
+      } catch (e) { notify('打开设置失败：' + e.message, 'err'); return }
+    }
+    notify('请在左侧「设置 → 社区资源」中填写 CurseForge API Key', 'info')
+  }
+  function refreshCfGuide() {
+    const cf = search.source === 'curseforge'
+    show(packCfHint, cf)
+    const community = stateOf().settings?.community
+    const known = community && typeof community.cfApiKey === 'string' ? !!community.cfApiKey.trim() : null
+    const configured = known === true || search.cfOk
+    show(packCfGuide, cf && (search.cfKey || known === false))
+    packCfHint.textContent = configured
+      ? 'CurseForge 已配置 API Key；如果搜索仍失败，请到「设置 → 社区资源」检查 Key 是否有效。'
+      : 'CurseForge 需要 API Key：请在「设置 → 社区资源 → CurseForge API Key」填写后再搜索或安装。'
+  }
+  function setPackSource(value) {
+    if (search.source !== value) {
+      search.source = value
+      search.view = 'search'
+      search.project = null
+      search.loaded = false
+      search.loading = false
+      search.error = ''
+      search.results = []
+      search.total = 0
+      search.notice = ''
+      search.versions = []
+      search.showOthers = false
+      search.seq++
+    }
+    packSourceSeg.setValue(value)
+    refreshCfGuide()
+    paintPackResults()
+    void searchPacks()
+  }
+  function setSearchError(text) {
+    packSearchError.textContent = text || ''
+    show(packSearchError, !!text)
+  }
+  /** 社区接口错误：CurseForge 的 401/403 也按 Key 问题引导。 */
+  function communityErrorMessage(error) {
+    const info = describeCommunityError(error)
+    if (search.source === 'curseforge' && /HTTP (401|403)/i.test(info.raw)) {
+      return { ...info, cfKey: true, message: 'CurseForge API Key 无效或没有权限：请在「设置 → 社区资源」重新填写后重试。' }
+    }
+    return info
+  }
+  function onlinePackErrorMessage(error) {
+    const info = describeOnlineInstallError(error)
+    if (search.source === 'curseforge' && /HTTP (401|403)/i.test(info.raw)) {
+      return { ...info, cfKey: true, message: 'CurseForge API Key 无效或没有权限：请在「设置 → 社区资源」重新填写后重试。' }
+    }
+    return info
+  }
+  async function searchPacks() {
+    ensurePackVersionValue()
+    updatePackFilterLine()
+    setSearchError('')
+    const token = ++search.seq
+    search.query = packQueryInput.value.trim()
+    search.loading = true
+    search.error = ''
+    search.loaded = false
+    search.results = []
+    search.total = 0
+    search.notice = ''
+    search.view = 'search'
+    paintPackResults()
+    try {
+      const params = new URLSearchParams({
+        source: search.source,
+        type: 'modpack',
+        query: search.query,
+        gameVersion: packVersionCombo.getValue() || 'all',
+        loader: 'none',
+        limit: String(PACK_SEARCH_LIMIT)
+      })
+      const data = await coreApi.get('/api/community/search?' + params)
+      if (disposed || token !== search.seq) return
+      search.results = Array.isArray(data?.items) ? data.items : []
+      search.total = Number(data?.total) || search.results.length
+      search.notice = String(data?.gameVersionNotice || '')
+      search.loaded = true
+      if (search.source === 'curseforge') { search.cfKey = false; search.cfOk = true; refreshCfGuide() }
+    } catch (e) {
+      if (disposed || token !== search.seq) return
+      const info = communityErrorMessage(e)
+      if (info.cfKey) { search.cfKey = true; search.cfOk = false; refreshCfGuide() }
+      search.error = info.message
+      search.loaded = true
+    } finally {
+      if (!disposed && token === search.seq) {
+        search.loading = false
+        paintPackResults()
+      }
+    }
+  }
+  function packIcon(hit) {
+    if (hit?.icon) {
+      return h('img', {
+        class: 'lp-mod-result-icon', src: hit.icon, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer',
+        onerror: (event) => event.target.replaceWith(h('span', { class: 'lp-mod-result-icon' }, icon('archive', { size: 16 })))
+      })
+    }
+    return h('span', { class: 'lp-mod-result-icon' }, icon('archive', { size: 16 }))
+  }
+  function packLoaderIds(hit) {
+    const raw = Array.isArray(hit?.loaders) && hit.loaders.length
+      ? hit.loaders
+      : (Array.isArray(hit?.categories) ? hit.categories : [])
+    return [...new Set(raw.map((item) => String(item || '').toLowerCase()).filter((id) => LOADER_IDS.has(id)))]
+  }
+  function gameVersionText(list) {
+    const versions = [...new Set((Array.isArray(list) ? list : []).map(String).filter((item) => isMinecraftVersion(item)))]
+    if (!versions.length) return ''
+    return versions.slice(0, 6).join(' / ') + (versions.length > 6 ? ` 等 ${versions.length} 个版本` : '')
+  }
+  function packHitRow(hit) {
+    const open = () => void openPackProject(hit)
+    const loaders = packLoaderIds(hit)
+    const gameVersions = gameVersionText(hit?.gameVersions || hit?.versions)
+    const categories = (Array.isArray(hit?.categories) ? hit.categories : [])
+      .map(String)
+      .filter((item) => item && !LOADER_IDS.has(item.toLowerCase()))
+      .slice(0, 4)
+    return h('div', {
+      class: 'lp-row lp-mod-result', role: 'button', tabindex: '0', title: '查看可用版本',
+      onclick: open,
+      onkeydown: (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open() } }
+    },
+    packIcon(hit),
+    h('div', { class: 'lp-mod-main', style: { gap: '2px' } },
+      h('div', { class: 'lp-mod-title' },
+        h('b', { title: hit?.title || '' }, hit?.title || '未命名整合包'),
+        loaders.map((id) => badge(loaderInfo(id).label, 'info'))),
+      hit?.author ? h('div', { class: 'lp-hint' }, hit.author) : null,
+      h('p', { class: 'lp-hint', style: { margin: 0 } }, hit?.summary || ''),
+      h('div', { class: 'lp-mod-meta mono' },
+        [`${Number(hit?.downloads || 0).toLocaleString()} 次下载`,
+          hit?.updated ? '更新于 ' + agoOf(hit.updated) : '',
+          gameVersions ? '支持 ' + gameVersions : ''].filter(Boolean).join(' · ')),
+      categories.length ? h('div', { class: 'lp-hint' }, categories.join(' · ')) : null),
+    h('span', { class: 'lp-chip' }, '查看版本'))
+  }
+  function paintPackResults() {
+    updatePackFilterLine()
+    show(packSearchNotice, !!search.notice)
+    if (search.notice) packSearchNotice.textContent = search.notice
+    clear(packResults)
+    if (search.loading) {
+      packSearchStatus.textContent = '正在搜索整合包…'
+      packResults.appendChild(emptyBlock('正在搜索', `正在从 ${MODPACK_SOURCE_LABEL[search.source]} 获取整合包列表…`, spinner(14), 'search'))
+      return
+    }
+    if (search.error) {
+      packSearchStatus.textContent = ''
+      packResults.appendChild(emptyBlock('搜索失败', search.error,
+        btn('重试', { size: 'sm', iconName: 'refresh', onClick: () => void searchPacks() }), 'warning'))
+      return
+    }
+    if (!search.loaded) {
+      packSearchStatus.textContent = ''
+      packResults.appendChild(emptyBlock('搜索并安装整合包',
+        '输入名称后按回车搜索，也可以直接搜索热门整合包；安装会创建独立实例。',
+        btn('搜索热门整合包', { size: 'sm', variant: 'primary', iconName: 'search', onClick: () => void searchPacks() }), 'archive'))
+      return
+    }
+    if (!search.results.length) {
+      packSearchStatus.textContent = '没有找到整合包'
+      packResults.appendChild(emptyBlock('没有搜索结果',
+        '换个关键词，或把 MC 版本切到「全部版本」再试；CurseForge 未配置 API Key 时会搜索失败。', null, 'search'))
+      return
+    }
+    packSearchStatus.textContent = `共 ${search.total || search.results.length} 个结果 · 点击查看可用版本`
+    for (const hit of search.results) packResults.appendChild(packHitRow(hit))
+  }
+  async function openPackProject(hit) {
+    if (!hit?.id) return
+    search.view = 'versions'
+    search.project = hit
+    search.versions = []
+    search.versionError = ''
+    search.versionNotice = ''
+    search.showOthers = false
+    setSearchError('')
+    const token = ++search.seq
+    search.versionLoading = true
+    paintPackVersions()
+    try {
+      const params = new URLSearchParams({ source: search.source, id: String(hit.id), withMeta: '1' })
+      const data = await coreApi.get('/api/community/versions?' + params)
+      if (disposed || token !== search.seq) return
+      const items = Array.isArray(data) ? data : (Array.isArray(data?.items) ? data.items : [])
+      search.versions = items.filter((item) => item && item.id)
+      search.versionNotice = Array.isArray(data)
+        ? ''
+        : String(data?.notice || data?.gameVersionNotice || '')
+      if (search.source === 'curseforge') { search.cfKey = false; search.cfOk = true; refreshCfGuide() }
+      if (!search.versions.length && !search.versionNotice) search.versionError = '该项目没有返回可下载的整合包版本。'
+    } catch (e) {
+      if (disposed || token !== search.seq) return
+      const info = communityErrorMessage(e)
+      if (info.cfKey) { search.cfKey = true; search.cfOk = false; refreshCfGuide() }
+      search.versionError = info.message
+    } finally {
+      if (!disposed && token === search.seq && search.view === 'versions') {
+        search.versionLoading = false
+        paintPackVersions()
+      }
+    }
+  }
+  function packVersionRow(version, recommendedId) {
+    const file = (version.files || []).find((item) => item.primary) || (version.files || [])[0]
+    const action = btn(search.busy ? '提交中…' : '下载并安装', {
+      size: 'sm', variant: 'primary', iconName: 'download', disabled: search.busy,
+      onClick: (event) => void installPackOnline(version, event.currentTarget)
+    })
+    const mc = packVersionCombo.getValue()
+    const row = versionRowShell({
+      version,
+      mc,
+      loader: '',
+      kind: 'modpack',
+      recommended: !!recommendedId && String(version.id) === String(recommendedId),
+      action,
+      extraBadges: file ? [] : [badge('缺少下载文件', 'warn')]
+    })
+    if (compatibleVersion(version, { mc, loader: '', kind: 'modpack' })) row.classList.add('is-compatible')
+    return row
+  }
+  function versionGroup(label, versions, { collapsed = false, toggleText = '', onToggle = null, recommendedId = '' } = {}) {
+    return h('div', { class: 'lp-version-group' },
+      label ? h('div', { class: 'lp-version-group-head' }, h('span', {}, label), badge(String(versions.length))) : null,
+      collapsed
+        ? h('button', {
+          class: 'lp-version-group-toggle', type: 'button', 'aria-expanded': 'false',
+          onclick: () => onToggle?.()
+        }, icon('chevron-right', { size: 12 }), h('span', {}, toggleText || `其他版本（${versions.length}）`))
+        : h('div', { class: 'lp-version-list' },
+          ...versions.map((version) => packVersionRow(version, recommendedId))))
+  }
+  function paintPackVersions() {
+    updatePackFilterLine()
+    clear(packResults)
+    const project = search.project
+    if (!project) { search.view = 'search'; paintPackResults(); return }
+    const back = h('div', { class: 'lp-toolbar', style: { border: '0', padding: '0', marginBottom: '4px' } },
+      btn('返回搜索结果', {
+        size: 'sm', iconName: 'arrow-left',
+        onClick: () => {
+          search.seq++
+          search.versionLoading = false
+          search.view = 'search'
+          paintPackResults()
+        }
+      }),
+      h('div', { class: 'lp-mod-main', style: { flex: '1 1 auto' } },
+        h('b', { style: { fontSize: '12px' } }, project.title || '整合包'),
+        h('div', { class: 'lp-hint' },
+          [MODPACK_SOURCE_LABEL[search.source], project.author, project.slug].filter(Boolean).join(' · '))))
+    packResults.appendChild(back)
+    const notice = search.versionNotice || search.notice
+    show(packSearchNotice, !!notice)
+    if (notice) packSearchNotice.textContent = notice
+    if (search.versionLoading) {
+      packSearchStatus.textContent = '正在读取版本列表…'
+      packResults.appendChild(emptyBlock('正在读取版本', '正在从社区接口读取该整合包的全部版本…', spinner(14), 'archive'))
+      return
+    }
+    if (search.versionError) {
+      packSearchStatus.textContent = ''
+      packResults.appendChild(emptyBlock('读取版本失败', search.versionError,
+        btn('重试', { size: 'sm', iconName: 'refresh', onClick: () => void openPackProject(project) }), 'warning'))
+      return
+    }
+    if (!search.versions.length) {
+      packSearchStatus.textContent = ''
+      packResults.appendChild(emptyBlock('没有可用版本', '这个项目没有可下载的整合包文件。', null, 'archive'))
+      return
+    }
+    const mc = packVersionCombo.getValue()
+    const group = packVersionGroups(search.versions, { mc })
+    packSearchStatus.textContent = `${project.title || '整合包'} · ${search.versions.length} 个版本`
+      + (mc ? ` · 适配 ${mc} 的 ${group.compatible.length} 个` : '')
+    if (!mc) {
+      packResults.appendChild(versionGroup(`全部版本（${group.compatible.length}）`, group.compatible, {
+        recommendedId: group.recommendedId
+      }))
+      return
+    }
+    if (group.compatible.length) {
+      packResults.appendChild(versionGroup(`适配 Minecraft ${mc} 的版本（${group.compatible.length}）`, group.compatible, {
+        recommendedId: group.recommendedId
+      }))
+    } else {
+      packResults.appendChild(h('div', { class: 'lp-version-empty' },
+        h('b', {}, `该整合包没有适配 ${mc} 的版本`),
+        h('p', {}, '可以查看全部版本，或把 MC 版本切换成该整合包支持的游戏版本后再试。'),
+        h('div', { class: 'lp-row-actions' },
+          btn('查看全部版本', {
+            size: 'sm', variant: 'primary', iconName: 'arrow-down',
+            onClick: () => { search.showOthers = true; paintPackVersions() }
+          }),
+          btn('切换 MC 版本', { size: 'sm', iconName: 'filter', onClick: () => packVersionCombo.focus?.() }))))
+    }
+    if (group.others.length) {
+      if (search.showOthers) {
+        packResults.appendChild(versionGroup(`其他版本（${group.others.length}）`, group.others))
+        packResults.appendChild(h('div', { class: 'lp-row-actions', style: { marginTop: '4px' } },
+          btn('只看适配版本', {
+            size: 'sm', iconName: 'filter',
+            onClick: () => { search.showOthers = false; paintPackVersions() }
+          })))
+      } else {
+        packResults.appendChild(versionGroup('', group.others, {
+          collapsed: true,
+          toggleText: `其他版本（${group.others.length}）· 默认收起，点击展开`,
+          onToggle: () => { search.showOthers = true; paintPackVersions() }
+        }))
+      }
+    }
+  }
+  async function installPackOnline(version, button) {
+    if (search.busy) return
+    setSearchError('')
+    if (!search.project?.id || !version?.id) { setSearchError('缺少整合包项目或版本信息，请返回并重新加载版本列表。'); return }
+    const memory = readMemory(packMinInput, packMaxInput)
+    if (memory.error) { setSearchError(memory.error); packMinInput.focus?.(); return }
+    if (!pack.nameDirty) packNameInput.value = search.project.title || ''
+    const openWhenDone = packOpenChecked()
+    const payload = {
+      source: search.source,
+      projectId: String(search.project.id),
+      versionId: String(version.id),
+      name: packNameInput.value.trim(),
+      memory: { min: memory.min, max: memory.max },
+      minMemory: memory.min,
+      group: packGroupInput.value.trim(),
+      openWhenDone
+    }
+    search.busy = true
+    if (button) { button.disabled = true; button.classList.add('loading') }
+    try {
+      const request = typeof ctx.api.packOnlineInstall === 'function'
+        ? ctx.api.packOnlineInstall(payload)
+        : coreApi.post('/api/launcher/packs/install-online', payload)
+      const result = await request
+      if (disposed) return
+      const job = result?.job
+      if (!job?.id) throw new Error('服务端没有返回在线安装任务')
+      search.jobId = job.id
+      inlinePack.show(job)
+      inlinePack.el.scrollIntoView?.({ block: 'nearest' })
+      notify('已开始下载并安装整合包：' + (job.name || payload.name || search.project.title || ''), 'ok')
+      watchPackJob(job, { openWhenDone })
+      refreshJobs()
+    } catch (e) {
+      if (disposed) return
+      const info = onlinePackErrorMessage(e)
+      if (info.cfKey) { search.cfKey = true; search.cfOk = false; refreshCfGuide() }
+      setSearchError('在线安装失败：' + info.message)
+      notify('在线安装失败：' + info.message, 'err')
+      if (button) { button.disabled = false; button.classList.remove('loading') }
+    } finally {
+      search.busy = false
+      if (!disposed) {
+        for (const node of packResults.querySelectorAll('.lp-mod-actions .btn')) {
+          node.disabled = false
+          node.classList.remove('loading')
+          if (node.textContent === '提交中…') node.textContent = '下载并安装'
+        }
+      }
+    }
+  }
+  function stopPackJobWatch(id) {
+    const timer = packJobWatches.get(id)
+    if (timer) clearTimeout(timer)
+    packJobWatches.delete(id)
+  }
+  function stopPackWatches() {
+    for (const timer of packJobWatches.values()) clearTimeout(timer)
+    packJobWatches.clear()
+  }
+  function watchPackJob(job, { openWhenDone = false } = {}) {
+    if (!job?.id) return
+    stopPackJobWatch(job.id)
+    // 完成提示由这里统一发送，避免与下载中心的全量任务轮询重复 toast。
+    notified.add(job.id + '|done')
+    notified.add(job.id + '|failed')
+    notified.add(job.id + '|cancelled')
+    let misses = 0
+    const tick = async () => {
+      if (disposed) return
+      try {
+        const data = await ctx.api.job(job.id, 0)
+        if (disposed) return
+        if (!data) {
+          stopPackJobWatch(job.id)
+          notify('安装任务已结束，请到实例列表或下载中心查看结果', 'info')
+          void reloadState()
+          return
+        }
+        misses = 0
+        inlinePack.update(data)
+        if (data.status === 'done') {
+          stopPackJobWatch(job.id)
+          notify('整合包安装完成：' + (data.name || job.name || '新实例'), 'ok')
+          await reloadState()
+          if (disposed) return
+          void refreshJobs()
+          const id = data.instanceId || job.instanceId
+          if (openWhenDone) {
+            if (id) await openInstance(id)
+            else notify('安装完成，但服务端没有返回实例 ID，请到实例列表查看', 'warn')
+          }
+          return
+        }
+        if (data.status === 'failed' || data.status === 'cancelled') {
+          stopPackJobWatch(job.id)
+          if (data.status === 'failed') notify('整合包安装失败：' + (data.error || '未知原因'), 'err')
+          else notify('整合包安装已取消', 'info')
+          void reloadState()
+          return
+        }
+        packJobWatches.set(job.id, setTimeout(tick, 1200))
+      } catch (e) {
+        if (disposed) return
+        misses++
+        if (misses >= 4) {
+          stopPackJobWatch(job.id)
+          notify('无法获取安装任务状态：' + e.message, 'err')
+          return
+        }
+        packJobWatches.set(job.id, setTimeout(tick, 1600))
+      }
+    }
+    packJobWatches.set(job.id, setTimeout(tick, 700))
+  }
+  function switchPackMode(value) {
+    pack.mode = value
+    packSearchPane.style.display = value === 'search' ? 'flex' : 'none'
+    packLocalPane.style.display = value === 'local' ? 'flex' : 'none'
+    packModeHint.textContent = value === 'search'
+      ? '从 Modrinth / CurseForge 在线搜索并安装整合包'
+      : '从本机选择 .mrpack / .zip（含本工具导出的整合包）'
+    if (value === 'search') {
+      syncPackInstance()
+      refreshCfGuide()
+      if (!search.loaded && !search.loading && !search.error) void searchPacks()
+    }
   }
   // ---------------- C. 导入已有 ----------------
   const imp = { dir: '', loading: false, scanned: false, roots: [], items: [] }
@@ -540,6 +1245,8 @@ function buildView(ctx, container) {
         btn('扫描', { size: 'sm', iconName: 'refresh', onClick: () => scanImport(scanDirInput.value.trim()) })),
       h('div', { class: 'lp-hint' }, icon('warning', { size: 12 }),
         ' 只引用原目录，不复制游戏文件；原启动器的版本目录必须完整（版本 JSON、客户端 JAR），否则导入后无法启动。'),
+      h('div', { class: 'lp-hint' },
+        '自动识别失败时不会用文件夹名或实例名冒充 MC 版本；这类条目会标记「需要手动选择 MC 版本」，填写后才能导入。'),
       importHint, importError, importResults))
   async function scanImport(dir = '') {
     const epoch = ++importEpoch
@@ -580,7 +1287,14 @@ function buildView(ctx, container) {
       }
     }
     const available = imp.items.filter((item) => !item.imported).length
+    const needsMcCount = imp.items.filter((item) => !item.imported && needsManualMc(item)).length
     importResults.appendChild(h('div', { class: 'lp-subhead' }, `可导入版本 · ${available} 个可用 / 共 ${imp.items.length} 个`))
+    importResults.appendChild(h('div', { class: 'lp-hint' },
+      '自动识别失败不会静默使用实例名：需要手动填写的条目会显示「需要手动选择 MC 版本」，填写正确后才会导入。'))
+    if (needsMcCount) {
+      importResults.appendChild(h('div', { class: 'lp-hint warnc' },
+        `有 ${needsMcCount} 个版本的 MC 版本无法自动识别，请在对应行填写，例如 1.21.8。`))
+    }
     if (!imp.items.length) {
       importResults.appendChild(emptyBlock('没有可导入的版本', '确认所选目录下的 versions 文件夹里存在完整的版本 JSON。'))
       return
@@ -590,28 +1304,80 @@ function buildView(ctx, container) {
     importResults.appendChild(listEl)
   }
   function importRow(item) {
-    const meta = [item.mc || '未知版本']
+    const manual = needsManualMc(item)
+    const inputNeeded = manual && !item.imported
+    const sourceNote = mcSourceLabel(item.mcSource)
+    const meta = []
     if (item.loader && item.loader !== 'vanilla') meta.push(loaderInfo(item.loader).label + (item.loaderVersion ? ' ' + item.loaderVersion : ''))
     if (item.lastModified) meta.push(fmtAgo(item.lastModified))
+    const mcText = isMinecraftVersion(item.mc || '')
+      ? `MC ${String(item.mc).trim()}${sourceNote ? '（' + sourceNote + '）' : ''}`
+      : (item.mc ? `MC ${item.mc}` : 'MC 未识别')
+    const mcInput = inputNeeded ? input({
+      value: String(item.mcManual || '').trim(),
+      placeholder: '例如 1.21.8', mono: true, title: '该版本对应的 Minecraft 版本',
+      onInput: () => {
+        item.mcManual = mcInput.value.trim()
+        mcError.textContent = ''
+        show(mcError, false)
+      }
+    }) : null
+    if (mcInput) {
+      mcInput.style.width = '150px'
+      mcInput.setAttribute('aria-label', '该版本对应的 Minecraft 版本')
+    }
+    const mcError = h('div', { class: 'lp-hint bad', role: 'alert', style: { display: 'none' } })
     const button = btn(item.imported ? '已导入' : '导入', {
       size: 'sm', variant: item.imported ? 'ghost' : 'primary', disabled: item.imported,
-      iconName: item.imported ? 'check' : 'download', onClick: () => doImport(item, button)
+      iconName: item.imported ? 'check' : 'download',
+      onClick: () => void doImport(item, button, mcInput, mcError)
     })
     return h('div', { class: 'lp-import-row', title: item.gameDir || item.root || '' },
-      h('div', { class: 'grow', style: { minWidth: '0' } },
-        h('b', { style: { display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, item.name || item.versionId),
-        h('div', { class: 'lp-hint' }, `${item.versionId} · ${meta.join(' · ')}`)),
-      badge(item.source || '本地'),
-      item.isolated ? h('span', { class: 'badge info', title: '该版本自带 mods / saves，将使用版本目录作为游戏目录' }, '隔离目录') : null,
-      item.hasJar ? null : h('span', { class: 'badge warn', title: '版本目录中缺少客户端 JAR，可能无法启动' }, '缺少 JAR'),
-      item.imported ? h('span', { class: 'badge ok' }, '已导入') : null, button)
+      h('div', { class: 'lp-import-main' },
+        h('b', { style: { display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }, title: item.name || item.versionId },
+          item.name || item.versionId),
+        h('div', { class: 'lp-hint' },
+          `${item.versionId} · ${[mcText, ...meta].join(' · ')}`),
+        inputNeeded
+          ? h('div', { class: 'lp-hint warnc', style: { display: 'flex', alignItems: 'center', gap: '4px' } },
+            icon('warning', { size: 12 }), ' 需要手动选择 MC 版本')
+          : null,
+        inputNeeded ? h('div', { class: 'row', style: { gap: '6px', marginTop: '3px' } }, mcInput) : null,
+        mcError),
+      h('div', { class: 'lp-import-actions', style: { flexWrap: 'wrap', justifyContent: 'flex-end' } },
+        badge(item.source || '本地'),
+        item.isolated ? h('span', { class: 'badge info', title: '该版本自带 mods / saves，将使用版本目录作为游戏目录' }, '隔离目录') : null,
+        item.hasJar ? null : h('span', { class: 'badge warn', title: '版本目录中缺少客户端 JAR，可能无法启动' }, '缺少 JAR'),
+        manual
+          ? h('span', { class: 'badge warn', title: item.imported ? '已导入实例，但扫描时未能自动识别 MC 版本' : '导入前必须手动填写 MC 版本' }, item.imported ? 'MC 未识别' : '需要手动选择 MC 版本')
+          : h('span', { class: 'badge ok', title: sourceNote ? '自动识别来源：' + sourceNote : '已识别真实 MC 版本' }, `MC ${String(item.mc).trim()}`),
+        item.imported ? h('span', { class: 'badge ok' }, '已导入') : null,
+        button))
   }
-  async function doImport(item, button) {
+  async function doImport(item, button, mcInput, mcError) {
     if (!item || item.imported) return
     show(importError, false)
+    if (mcError) { mcError.textContent = ''; show(mcError, false) }
+    let mc = isMinecraftVersion(item.mc || '') ? String(item.mc).trim() : ''
+    if (mcInput) {
+      const checked = validateImportMc(mcInput.value)
+      if (!checked.ok) {
+        if (mcError) { mcError.textContent = checked.error; show(mcError, true) }
+        notify(checked.error, 'warn')
+        mcInput.focus?.()
+        return
+      }
+      mc = checked.mc
+    }
     button.disabled = true; button.classList.add('loading')
     try {
-      const result = await ctx.api.importVersion({ dir: item.root, versionId: item.versionId })
+      const result = await ctx.api.importVersion({
+        dir: item.root,
+        versionId: item.versionId,
+        name: '',
+        group: '',
+        mc
+      })
       if (disposed) return
       item.imported = true
       const instance = result?.instance
@@ -622,6 +1388,8 @@ function buildView(ctx, container) {
     } catch (e) {
       if (disposed) return
       importError.textContent = '导入失败：' + e.message; show(importError, true)
+      if (mcError && e.code === 'INVALID_MC_VERSION') { mcError.textContent = e.message; show(mcError, true) }
+      if (mcInput && e.code === 'MC_VERSION_REQUIRED') mcInput.focus?.()
       notify('导入失败：' + e.message, 'err')
       button.disabled = false; button.classList.remove('loading')
     }
@@ -667,6 +1435,11 @@ function buildView(ctx, container) {
   function switchTab(id) {
     for (const [key, pane] of Object.entries(panes)) pane.style.display = key === id ? 'flex' : 'none'
     if (id === 'import' && !imp.scanned && !imp.loading) scanImport(imp.dir)
+    if (id === 'pack') {
+      syncPackInstance()
+      refreshCfGuide()
+      if (pack.mode === 'search' && !search.loaded && !search.loading && !search.error) void searchPacks()
+    }
   }
   const tabs = seg([['create', '新建实例'], ['pack', '整合包'], ['import', '导入已有']], 'create', switchTab, { title: '安装方式' })
   tabs.setAttribute('aria-label', '新建实例')
@@ -682,6 +1455,9 @@ function buildView(ctx, container) {
   container.appendChild(root)
   toggleLoaderFields()
   loadVersions(form.versionType)
+  loadPackVersionOptions()
+  updatePackFilterLine()
+  refreshCfGuide()
   refreshJobs()
   jobsTimer = setInterval(refreshJobs, JOBS_POLL_MS)
   return {
@@ -690,6 +1466,8 @@ function buildView(ctx, container) {
       disposed = true
       if (jobsTimer) clearInterval(jobsTimer)
       jobsTimer = null
+      stopPackWatches()
+      try { packVersionCombo.destroy() } catch {}
       root.remove()
     }
   }

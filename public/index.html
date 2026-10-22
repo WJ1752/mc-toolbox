@@ -12,11 +12,13 @@
 <link rel="stylesheet" href="/css/shell.css" />
 <link rel="stylesheet" href="/css/features.css" />
 <link rel="stylesheet" href="/css/launcher.css" />
+<link rel="stylesheet" href="/css/launcher-versions.css" />
+<link rel="stylesheet" href="/css/launcher-launch.css" />
 </head>
 <body>
   <div class="app-shell">
     <header class="titlebar" id="titlebar">
-      <div class="brand">
+      <div class="brand" id="brandHome" role="button" tabindex="0" title="回到启动器主页">
         <span class="brand-mark" aria-hidden="true"><i></i></span>
         <div class="brand-text">
           <span class="brand-name">Minecraft 工具箱</span>
@@ -48,6 +50,7 @@
 
     <div class="app-body">
       <nav class="rail" id="rail" aria-label="功能导航">
+        <button class="rail-btn" id="btnHome" type="button" title="启动器主页" aria-label="启动器主页"></button>
         <button class="rail-btn" id="btnWorkspace" type="button" title="工作台" aria-label="工作台"></button>
         <div class="rail-sep"></div>
         <div class="rail-features" id="railFeatures"></div>
@@ -65,7 +68,8 @@
               <h1>工作台 <span class="ws-count" id="wsCount"></span></h1>
             </div>
             <div class="ws-tools">
-              <div id="colSegWrap" class="row" title="每行磁贴数"></div>
+              <button class="btn btn-sm" id="btnLayoutMode" type="button" aria-pressed="false" title="当前：手动列布局（拖动只影响目标列）">手动</button>
+              <div id="colSegWrap" class="row" title="最大列数"></div>
               <span class="ws-divider"></span>
               <button class="btn btn-sm" id="btnCollapseAll" type="button">全部折叠</button>
               <button class="btn btn-sm" id="btnAddTile" type="button">添加磁贴</button>

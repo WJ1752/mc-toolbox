@@ -69,7 +69,8 @@ export async function fetchToFile(url, target, {
   let lastError = null
   for (let attempt = 0; attempt <= Math.max(0, Number(retries) || 0); attempt++) {
     signal?.throwIfAborted()
-    if (attempt > 0) await sleep(Math.min(4000, 350 * attempt), signal)
+    // 逐次拉长等待：跨境线路的短暂重置通常 1–3 秒内恢复，固定 350ms 太短。
+    if (attempt > 0) await sleep(Math.min(10000, 700 * 2 ** (attempt - 1)), signal)
     const partial = `${target}.part-${crypto.randomUUID()}`
     let handle = null
     let controller = null

@@ -28,6 +28,9 @@
 .titlebar button, .titlebar .win-controls, .titlebar a, .titlebar input { -webkit-app-region: no-drag; }
 
 .brand { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.brand[role="button"] { cursor: pointer; border-radius: var(--r-1); }
+.brand[role="button"]:hover .brand-name { color: var(--accent); }
+.brand[role="button"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .brand-mark {
   position: relative;
   width: 22px;
@@ -216,7 +219,10 @@
   padding: 16px 20px 48px;
   scroll-behavior: smooth;
 }
-.workspace-inner { width: 100%; max-width: 1440px; margin: 0 auto; }
+/* The bench fills the window: the old 1440px cap left tiles narrower than the
+   available width on 1920/2560 screens. Only this container is unconstrained;
+   the launcher and settings pages keep their own widths. */
+.workspace-inner { width: 100%; margin: 0 auto; }
 .workspace-head {
   display: flex;
   align-items: flex-end;
@@ -651,6 +657,9 @@ body.dragging-tile * { cursor: grabbing !important; }
 .setting-row .ctrl .ctrl-wide { width: 300px; max-width: 100%; }
 .setting-row .ctrl .ctrl-wide .input,
 .setting-row .ctrl .ctrl-wide .input.mono { width: 100%; }
+.setting-row .ctrl .ctrl-wide-lg { width: min(420px, 46vw); max-width: 100%; }
+.setting-row .ctrl .ctrl-wide-lg .input,
+.setting-row .ctrl .ctrl-wide-lg .input.mono { width: 100%; }
 .setting-row .ctrl .row { gap: 6px; }
 .setting-row .ctrl .row .input { width: 100px; }
 .setting-row .ctrl .row .input.mono { width: 240px; }

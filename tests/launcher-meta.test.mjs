@@ -10,7 +10,7 @@ test('BMCLAPI mirror mapping covers manifest, version JSON, assets and libraries
   )
   assert.equal(
     mirrorUrl('https://piston-meta.mojang.com/v1/packages/abc/1.20.1.json'),
-    'https://bmclapi2.bangbang93.com/version/abc/json'
+    'https://bmclapi2.bangbang93.com/v1/packages/abc/1.20.1.json'
   )
   const hash = '0123456789abcdef0123456789abcdef01234567'
   assert.equal(mirrorUrl(`https://piston-data.mojang.com/v1/objects/${hash}`), `https://bmclapi2.bangbang93.com/assets/01/${hash}`)

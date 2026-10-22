@@ -10,7 +10,7 @@ import { launcherApi } from './api.js'
 import * as launcherUi from './ui.js'
 
 const ADD_TYPES = [['offline', '离线'], ['microsoft', '微软'], ['authlib', '第三方']]
-const MS_HINT = '默认使用内置公共客户端（与 PCL/HMCL 相同的微软设备码登录），无需注册 Azure 应用。也可以在启动器设置 → 账户中填写自己的 Azure 客户端 ID 覆盖。'
+const MS_HINT = '默认使用内置公共客户端（与 PCL/HMCL 相同的微软设备码登录），无需注册 Azure 应用。也可以在「设置 → 启动与 Java」中填写自己的 Azure 客户端 ID 覆盖。'
 
 const helpers = (ctx) => Object.assign({}, launcherUi, ctx?.ui || {})
 const apiOf = (ctx) => ctx?.api || launcherApi

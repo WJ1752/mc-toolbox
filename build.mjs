@@ -608,7 +608,7 @@ async function genAssetVersion() {
     console.log(`  运行数据 → %LOCALAPPDATA%\\MC Toolbox\\data\\                  （history.json、日志）`)
     console.log(`  前端资源 → %LOCALAPPDATA%\\MC Toolbox\\runtime\\               （解压后的 public）`)
     console.log(`  窗口宿主 → %LOCALAPPDATA%\\MC Toolbox\\runtime\\host\\           （WebView2 无边框窗口）`)
-    console.log(`  exe 旁的文件夹已不再生成，目录里只剩这一个 .exe。`)
+    console.log(`  游戏目录 → <exe 同级>\\.minecraft\\                            （首次进入启动器时选择，可在设置里更换）`)
   } catch (e) {
     console.error('\n✗ 构建失败：', e.message)
     process.exit(1)

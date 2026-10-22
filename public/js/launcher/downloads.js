@@ -1,41 +1,104 @@
 // 下载中心：只展示启动器任务与社区资源下载，不与安装表单混在一起。
 // 每个条目都能定位到对应内容：普通文件打开所在文件夹，实例任务跳转实例页。
-import { h, clear, fmtBytes, fmtDuration } from '../core/dom.js'
+import { h, clear, fmtBytes } from '../core/dom.js'
+import {
+  isActiveJob, isFinishedJob, jobProgress, jobPercentText, jobBytesText, jobElapsedText,
+  jobSpeedText, jobIdleText, jobStatusLabel, jobMetaText
+} from '../core/jobs.js'
 import { icon } from '../ui/icons.js'
 import { btn, iconBtn, progress, spinner, badge } from '../ui/kit.js'
 import { emptyBlock, sectionCard } from './ui.js'
 import { api as coreApi } from '../core/api.js'
 
-const STATUS = {
-  queued: { label: '排队中', tone: 'warn', dot: 'warn' },
-  running: { label: '下载中', tone: 'info', dot: 'loading' },
-  installing: { label: '安装中', tone: 'info', dot: 'loading' },
-  cancelling: { label: '取消中', tone: 'warn', dot: 'warn' },
-  done: { label: '已完成', tone: 'ok', dot: 'ok' },
-  failed: { label: '失败', tone: 'bad', dot: 'bad' },
-  cancelled: { label: '已取消', tone: '', dot: '' }
+// 状态标签与进度统一由 core/jobs.js 提供，这里只保留徽章配色。
+const STATUS_TONE = {
+  queued: { tone: 'warn', dot: 'warn' },
+  running: { tone: 'info', dot: 'loading' },
+  installing: { tone: 'info', dot: 'loading' },
+  cancelling: { tone: 'warn', dot: 'warn' },
+  done: { tone: 'ok', dot: 'ok' },
+  failed: { tone: 'bad', dot: 'bad' },
+  cancelled: { tone: '', dot: '' }
 }
-const ACTIVE = new Set(['queued', 'running', 'installing', 'cancelling'])
-const FINISHED = new Set(['done', 'failed', 'cancelled'])
-const LAUNCHER_TYPE = { install: '安装实例', pack: '整合包', repair: '修复文件', update: '更新模组' }
+const LAUNCHER_TYPE = {
+  install: '安装实例', pack: '整合包', repair: '修复文件', update: '更新模组', export: '导出整合包'
+}
+const EXPORT_FORMAT = { mrpack: 'Modrinth · .mrpack', zip: '通用 · .zip' }
 const COMMUNITY_TYPE = { mod: '模组', resourcepack: '资源包', shader: '光影', modpack: '整合包', datapack: '数据包', servercore: '服务端核心' }
 
-function statusOf(job) {
-  return STATUS[job?.status] || STATUS.running
+/** 任务类型 → 中文标签（导出任务由服务端 pack-export 提供 type: 'export'）。 */
+export function launcherTypeLabel(type) {
+  return LAUNCHER_TYPE[type] || '任务'
 }
 
-function timeText(job) {
-  if (job.finishedAt && job.startedAt) return fmtDuration(Math.max(0, (job.finishedAt - job.startedAt) / 1000))
-  if (job.startedAt) return '已进行 ' + fmtDuration(Math.max(0, Date.now() - job.startedAt))
-  return ''
+/** 导出任务完成后可打开的位置：优先输出目录，其次文件本身；非导出任务返回 ''。 */
+export function exportJobTarget(job) {
+  if (!job || job.type !== 'export') return ''
+  return String(job.output || job.file || '')
 }
 
-function bytesText(job) {
-  const received = Number(job.received) || 0
-  const total = Number(job.total) || 0
-  if (total > 0) return `${fmtBytes(received)} / ${fmtBytes(total)}`
-  if (received > 0) return fmtBytes(received)
-  return ''
+/** 导出任务的格式 / 大小说明（其它任务返回 ''）。 */
+export function exportJobSummary(job) {
+  if (!job || job.type !== 'export') return ''
+  const parts = []
+  if (job.format) parts.push(EXPORT_FORMAT[job.format] || String(job.format))
+  const size = Number(job.size) || 0
+  if (size > 0) parts.push(fmtBytes(size))
+  return parts.join(' · ')
+}
+
+/**
+ * 合并启动器任务与独立导出任务：按 id 去重，导出任务统一标记 type: 'export'。
+ * hiddenExports 用于「清理已完成」后本地隐藏导出任务。
+ */
+export function mergeLauncherJobs(jobs = [], exports = [], { hiddenExports = new Set() } = {}) {
+  const merged = new Map()
+  for (const job of Array.isArray(jobs) ? jobs : []) {
+    if (job?.id) merged.set(job.id, job)
+  }
+  for (const job of Array.isArray(exports) ? exports : []) {
+    if (!job?.id || merged.has(job.id) || hiddenExports.has(job.id)) continue
+    merged.set(job.id, { ...job, type: 'export' })
+  }
+  return [...merged.values()]
+}
+
+/**
+ * 进度条的取值与配色（纯函数）。
+ * value 为 0–100，null 表示服务端没有真实进度，只有这时才显示不确定动画。
+ */
+export function jobProgressView(job) {
+  const value = jobProgress(job)
+  const state = job?.status === 'done' ? 'ok' : job?.status === 'failed' ? 'bad' : ''
+  return { value, state }
+}
+
+/**
+ * 下载行底部摘要（纯函数）：字节、百分比、速度、耗时统一走 core/jobs.js。
+ * - 运行中：字节 + 百分比 + 速度 + 已进行；
+ * - 完成：字节 + 100% + 用时；
+ * - 失败 / 取消：字节 + 终态百分比 + 用时/终态，绝不再出现「已进行」。
+ */
+export function jobRowSummary(job, now = Date.now()) {
+  if (!job) return ''
+  const parts = []
+  const bytes = jobBytesText(job)
+  if (bytes) parts.push(bytes)
+  const pctText = jobPercentText(job)
+  if (pctText) parts.push(pctText)
+  const speed = jobSpeedText(job)
+  if (speed) parts.push(speed)
+  const elapsed = jobElapsedText(job, now)
+  if (elapsed) parts.push(elapsed)
+  const idle = jobIdleText(job, now)
+  if (idle) parts.push(idle)
+  if (isFinishedJob(job) && job.status !== 'done') parts.push(jobStatusLabel(job))
+  if (!parts.length) return jobMetaText(job, now) || jobStatusLabel(job)
+  return parts.join(' · ')
+}
+
+function toneOf(job) {
+  return STATUS_TONE[job?.status] || STATUS_TONE.running
 }
 
 function communityLabel(job) {
@@ -67,6 +130,11 @@ function buildView(ctx, container) {
   let communityJobs = []
   let errorText = ''
   let showFinished = true
+  // 导出任务可能由独立接口 /api/launcher/exports 提供；记录本地清理过的导出任务，
+  // 避免「清理已完成」后它们又从独立接口回来。
+  const clearedExports = new Set()
+  // 服务端尚未接入导出接口时（404）停止重复请求，避免轮询刷错误。
+  let exportsSupported = typeof ctx.api.exports === 'function'
 
   const launcherList = h('div', { class: 'lp-list lp-download-list' })
   const communityList = h('div', { class: 'lp-list lp-download-list' })
@@ -74,7 +142,7 @@ function buildView(ctx, container) {
   const communityCount = h('span', { class: 'lp-hint' })
   const launcherSection = sectionCard({
     title: '启动器任务',
-    subtitle: '实例安装、整合包、文件修复与模组更新',
+    subtitle: '实例安装、整合包、导出、文件修复与模组更新',
     actions: h('div', { class: 'lp-row-actions' }, launcherCount, iconBtn('refresh', { size: 13, label: '刷新', onClick: () => refresh(true) })),
     body: launcherList
   })
@@ -122,8 +190,11 @@ function buildView(ctx, container) {
   }
 
   function progressNode(job) {
-    const bar = progress(job.indeterminate || job.progress == null ? null : job.progress, { className: 'lp-job-bar' })
-    bar.state(job.status === 'done' ? 'ok' : job.status === 'failed' ? 'bad' : '')
+    const view = jobProgressView(job)
+    // jobProgress 已经处理了 done / installProgress / progress / received-total 的优先级；
+    // 只有它返回 null 时才用 indeterminate 动画条。
+    const bar = progress(view.value, { className: 'lp-job-bar' })
+    bar.state(view.state)
     return bar
   }
 
@@ -132,10 +203,14 @@ function buildView(ctx, container) {
     let after = 0
     let logTimer = null
     let closed = false
+    // 导出任务的日志走 /api/launcher/exports/:id，其余任务仍走 /api/launcher/jobs/:id。
+    const fetchJob = job.type === 'export' && typeof ctx.api.exportJob === 'function'
+      ? (since) => ctx.api.exportJob(job.id, since)
+      : (since) => ctx.api.job(job.id, since)
     const tick = async () => {
       if (closed) return
       try {
-        const data = await ctx.api.job(job.id, after)
+        const data = await fetchJob(after)
         if (!data || closed) return
         const lines = (data.logs || []).map((line) => `[${line.t || ''}] ${line.text}`)
         if (lines.length) {
@@ -143,7 +218,7 @@ function buildView(ctx, container) {
           pre.textContent = (pre.textContent === '正在读取任务日志…' ? '' : pre.textContent + '\n') + lines.join('\n')
           pre.scrollTop = pre.scrollHeight
         }
-        if (FINISHED.has(data.status) && logTimer) { clearInterval(logTimer); logTimer = null }
+        if (isFinishedJob(data) && logTimer) { clearInterval(logTimer); logTimer = null }
       } catch (error) {
         pre.textContent = '读取日志失败：' + error.message
         if (logTimer) { clearInterval(logTimer); logTimer = null }
@@ -157,7 +232,8 @@ function buildView(ctx, container) {
       onClose: () => { closed = true; if (logTimer) clearInterval(logTimer) }
     })
     await tick()
-    if (!FINISHED.has(job.status)) logTimer = setInterval(tick, 1000)
+    // 首次 tick 期间用户可能已经关闭弹窗；此时不能再创建 interval。
+    if (!closed && !isFinishedJob(job)) logTimer = setInterval(tick, 1000)
     return modal
   }
 
@@ -185,9 +261,19 @@ function buildView(ctx, container) {
     ctx.openPath(target)
   }
 
+  function openExportFolder(job) {
+    const target = exportJobTarget(job)
+    if (!target) { ctx.toast('没有可打开的导出位置，请到启动器 exports 目录查看', 'warn'); return }
+    ctx.openPath(target)
+  }
+
   async function cancelLauncher(job) {
     if (!(await ctx.confirm(`取消「${job.name || job.id}」？已下载完成的文件会保留。`, { title: '取消任务', danger: true, okText: '取消任务' }))) return
-    try { await ctx.api.cancelJob(job.id); await refresh(true) } catch (e) { ctx.toast('取消失败：' + e.message, 'err') }
+    try {
+      if (job.type === 'export' && typeof ctx.api.cancelExport === 'function') await ctx.api.cancelExport(job.id)
+      else await ctx.api.cancelJob(job.id)
+      await refresh(true)
+    } catch (e) { ctx.toast('取消失败：' + e.message, 'err') }
   }
 
   async function cancelCommunity(job) {
@@ -199,54 +285,63 @@ function buildView(ctx, container) {
   }
 
   function launcherRow(job) {
-    const meta = statusOf(job)
+    const tone = toneOf(job)
     const bar = progressNode(job)
     const actions = h('div', { class: 'lp-row-actions' })
-    if (ACTIVE.has(job.status)) actions.appendChild(btn('取消', { size: 'xs', variant: 'danger', onClick: () => cancelLauncher(job) }))
+    if (isActiveJob(job)) actions.appendChild(btn('取消', { size: 'xs', variant: 'danger', onClick: () => cancelLauncher(job) }))
+    if (job.type === 'export' && job.status === 'done' && exportJobTarget(job)) {
+      actions.appendChild(btn('打开所在文件夹', {
+        size: 'xs', variant: 'primary', iconName: 'folder-open', onClick: () => openExportFolder(job)
+      }))
+    }
     if (job.instanceId) actions.appendChild(btn('打开实例', { size: 'xs', variant: job.status === 'done' ? 'primary' : 'ghost', iconName: 'arrow-right', onClick: () => ctx.showInstance?.(job.instanceId) }))
     actions.appendChild(iconBtn('terminal', { size: 13, label: '查看任务日志', onClick: () => openLauncherLog(job) }))
     const sub = [job.phase, job.detail].filter(Boolean).join(' · ')
+    const iconName = job.type === 'update' ? 'refresh' : job.type === 'pack' ? 'archive' : job.type === 'export' ? 'save' : 'download'
+    const summary = [jobRowSummary(job), exportJobSummary(job)].filter(Boolean).join(' · ')
     return h('div', { class: 'lp-row lp-download-row' },
-      h('span', { class: 'lp-mod-icon' }, icon(job.type === 'update' ? 'refresh' : job.type === 'pack' ? 'archive' : 'download', { size: 15 })),
+      h('span', { class: 'lp-mod-icon' }, icon(iconName, { size: 15 })),
       h('div', { class: 'lp-mod-main' },
         h('div', { class: 'lp-mod-title' },
-          h('b', { title: job.name || job.id }, job.name || job.id),
-          badge(LAUNCHER_TYPE[job.type] || '任务', 'info'),
-          badge(meta.label, meta.tone)),
+          h('b', { title: job.file || job.name || job.id }, job.name || job.id),
+          badge(launcherTypeLabel(job.type), job.type === 'export' ? 'accent' : 'info'),
+          badge(jobStatusLabel(job), tone.tone)),
         h('div', { class: 'lp-hint' }, sub || '准备中…'),
+        job.status === 'failed' && job.error ? h('div', { class: 'lp-hint bad', title: job.error }, job.error) : null,
         bar.el,
-        h('div', { class: 'lp-hint mono' }, [bytesText(job), timeText(job)].filter(Boolean).join(' · ') || meta.label)),
+        h('div', { class: 'lp-hint mono' }, summary || jobStatusLabel(job))),
       actions)
   }
 
   function communityRow(job) {
-    const meta = statusOf(job)
+    const tone = toneOf(job)
     const bar = progressNode(job)
     const actions = h('div', { class: 'lp-row-actions' })
-    if (ACTIVE.has(job.status)) actions.appendChild(btn('取消', { size: 'xs', variant: 'danger', onClick: () => cancelCommunity(job) }))
+    if (isActiveJob(job)) actions.appendChild(btn('取消', { size: 'xs', variant: 'danger', onClick: () => cancelCommunity(job) }))
     if (job.status === 'done') actions.appendChild(btn('打开文件夹', { size: 'xs', variant: 'primary', iconName: 'folder-open', onClick: () => openFolder(job) }))
     actions.appendChild(iconBtn('info', { size: 13, label: '下载详情', onClick: () => openCommunityLog(job) }))
-    const speed = Number(job.speed) > 0 ? `${fmtBytes(job.speed)}/s` : ''
     return h('div', { class: 'lp-row lp-download-row' },
       h('span', { class: 'lp-mod-icon' }, icon('download', { size: 15 })),
       h('div', { class: 'lp-mod-main' },
         h('div', { class: 'lp-mod-title' },
           h('b', { title: job.title || job.filename || job.id }, job.title || job.filename || job.id),
           badge(communityLabel(job), 'accent'),
-          badge(meta.label, meta.tone)),
+          badge(jobStatusLabel(job), tone.tone)),
         h('div', { class: 'lp-hint mono', title: job.dir || '' }, job.filename || job.path || '—'),
+        job.status === 'failed' && job.error ? h('div', { class: 'lp-hint bad', title: job.error }, job.error) : null,
         bar.el,
-        h('div', { class: 'lp-hint mono' }, [bytesText(job), speed, job.status === 'done' ? '' : job.installProgress != null ? Math.round(job.installProgress) + '%' : ''].filter(Boolean).join(' · '))),
+        h('div', { class: 'lp-hint mono' }, jobRowSummary(job))),
       actions)
   }
 
   function paint() {
-    const launcher = showFinished ? launcherJobs : launcherJobs.filter((job) => ACTIVE.has(job.status))
-    const community = showFinished ? communityJobs : communityJobs.filter((job) => ACTIVE.has(job.status))
+    const activeFilter = (job) => isActiveJob(job)
+    const launcher = showFinished ? launcherJobs : launcherJobs.filter(activeFilter)
+    const community = showFinished ? communityJobs : communityJobs.filter(activeFilter)
     clear(launcherList)
     clear(communityList)
-    launcherCount.textContent = `${launcher.filter((job) => ACTIVE.has(job.status)).length} 进行中 · ${launcher.length} 个任务`
-    communityCount.textContent = `${community.filter((job) => ACTIVE.has(job.status)).length} 进行中 · ${community.length} 个下载`
+    launcherCount.textContent = `${launcher.filter(activeFilter).length} 进行中 · ${launcher.length} 个任务`
+    communityCount.textContent = `${community.filter(activeFilter).length} 进行中 · ${community.length} 个下载`
     if (!launcher.length) launcherList.appendChild(emptyBlock('没有启动器任务', '新建实例、安装整合包或修复文件后，任务会出现在这里。', null, 'download'))
     else for (const job of launcher) launcherList.appendChild(launcherRow(job))
     if (!community.length) communityList.appendChild(emptyBlock('没有资源下载', '在实例内容页或工作台下载模组、资源包、光影后，文件会出现在这里。', null, 'package-down'))
@@ -261,15 +356,27 @@ function buildView(ctx, container) {
       communityList.replaceChildren(h('div', { class: 'lp-tab-loading' }, spinner(12), '正在读取…'))
     }
     try {
-      const [launcherData, communityData] = await Promise.all([
+      const exportRequest = exportsSupported
+        ? Promise.resolve().then(() => ctx.api.exports()).catch((error) => {
+          if (error?.status === 404 || /404/.test(error?.message || '')) exportsSupported = false
+          return null
+        })
+        : Promise.resolve(null)
+      const [launcherData, communityData, exportData] = await Promise.all([
         ctx.api.jobs(),
-        coreApi.get('/api/community/jobs')
+        coreApi.get('/api/community/jobs'),
+        exportRequest
       ])
       if (disposed) return
-      launcherJobs = (Array.isArray(launcherData?.items) ? launcherData.items : [])
-        .slice().sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
+      const launcherItems = Array.isArray(launcherData?.items) ? launcherData.items : []
+      const exportItems = Array.isArray(exportData?.items) ? exportData.items : []
+      // 若服务端已把导出任务合并进 jobs，这里按 id 去重；否则补上独立导出接口的结果。
+      // 排队任务可能只有 createdAt，没有 startedAt：排序时两者都接受。
+      const jobTime = (job) => Number(job?.startedAt) || Number(job?.createdAt) || 0
+      launcherJobs = mergeLauncherJobs(launcherItems, exportItems, { hiddenExports: clearedExports })
+        .slice().sort((a, b) => jobTime(b) - jobTime(a))
       communityJobs = (Array.isArray(communityData?.items) ? communityData.items : [])
-        .slice().sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
+        .slice().sort((a, b) => jobTime(b) - jobTime(a))
       setError('')
       paint()
     } catch (error) {
@@ -280,11 +387,13 @@ function buildView(ctx, container) {
   }
 
   async function clearFinished() {
-    const finishedLauncher = launcherJobs.filter((job) => FINISHED.has(job.status)).length
-    const finishedCommunity = communityJobs.filter((job) => FINISHED.has(job.status)).length
+    const finishedJobs = launcherJobs.filter((job) => isFinishedJob(job))
+    const finishedLauncher = finishedJobs.length
+    const finishedCommunity = communityJobs.filter((job) => isFinishedJob(job)).length
     if (!finishedLauncher && !finishedCommunity) { ctx.toast('没有已完成的任务', 'info'); return }
     if (!(await ctx.confirm(`清理 ${finishedLauncher + finishedCommunity} 个已完成任务？下载的文件不会被删除。`, { title: '清理已完成', okText: '清理' }))) return
     try {
+      for (const job of finishedJobs) if (job.type === 'export') clearedExports.add(job.id)
       if (finishedLauncher) await ctx.api.clearJobs()
       if (finishedCommunity) await coreApi.post('/api/community/jobs/clear-finished', {})
       await refresh(true)

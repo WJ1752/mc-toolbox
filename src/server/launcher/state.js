@@ -1,12 +1,13 @@
 // 启动器状态：全局设置、实例清单、目录布局与实例 CRUD。
 //
-// 实例只保存元数据；游戏文件放在 launcher root（默认 data/minecraft）下，
+// 实例只保存元数据；游戏文件放在 launcher root（默认 <启动器目录>/.minecraft）下，
 // libraries / assets / versions 由所有实例共享，启动日志和 natives 按实例隔离。
+// 实例会记录创建时的 root，切换游戏目录不会让已有实例“消失”或指向新目录。
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { DATA_DIR } from '../paths.js'
+import { DATA_DIR, ROOT } from '../paths.js'
 import { store } from '../store.js'
 import { safeName } from './launch-plan.js'
 
@@ -21,7 +22,10 @@ export const LOADERS = [
 ]
 
 export const DEFAULT_LAUNCHER_SETTINGS = {
+  // root 为空表示还没选过游戏目录：启动器会先用默认位置（exe 同级 .minecraft）跑起来，
+  // 并在首次进入启动器时让用户确认。rootConfigured 记录用户是否已经确认过。
   root: '',
+  rootConfigured: false,
   source: 'auto',              // auto | official | bmclapi
   concurrency: 8,              // 并发下载数
   retries: 3,
@@ -37,15 +41,59 @@ export const DEFAULT_LAUNCHER_SETTINGS = {
   downloadAssets: true,
   defaultWidth: 1280,
   defaultHeight: 720,
-  defaultGroup: ''
+  defaultGroup: '',
+  // 启动器自身更新（GitHub Releases）。token 只保存在本地，用于私有仓库 / 提高 API 限额。
+  update: {
+    autoCheck: true,
+    includePrerelease: false,
+    repo: '',
+    token: '',
+    skippedVersion: ''
+  }
+}
+
+function normalizeUpdate(value) {
+  const raw = value && typeof value === 'object' ? value : {}
+  const repo = String(raw.repo || '').trim()
+  return {
+    autoCheck: raw.autoCheck !== false,
+    includePrerelease: raw.includePrerelease === true,
+    repo: /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) ? repo : '',
+    token: String(raw.token || '').trim(),
+    skippedVersion: String(raw.skippedVersion || '').trim()
+  }
 }
 
 function randomId() {
   return crypto.randomBytes(8).toString('hex')
 }
 
+/** 默认游戏目录：与 PCL / HMCL 一致，放在启动器旁边（dev 为项目根）。 */
 export function defaultRoot() {
+  return path.join(ROOT, '.minecraft')
+}
+
+/**
+ * 旧版默认目录（<data>/minecraft）。升级时如果 root 还停在这里，说明用户从没主动选过，
+ * 需要重新走一次「选择游戏目录」；已有实例会各自记住旧 root，不会丢。
+ */
+export function legacyDefaultRoot() {
   return path.join(DATA_DIR, 'minecraft')
+}
+
+function samePath(a, b) {
+  return !!a && !!b && path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase()
+}
+
+function isLegacyDefaultRoot(root) {
+  return samePath(root, legacyDefaultRoot())
+}
+
+/** 当前进程实际使用的启动器根目录（不读写 settings，供 getState 迁移使用）。 */
+function currentRootFor(data) {
+  const override = String(process.env.MC_TOOLBOX_LAUNCHER_ROOT || '').trim()
+  if (override) return path.resolve(override)
+  return path.resolve(data?.settings?.root || defaultRoot())
 }
 
 function mergeDefaults(value) {
@@ -59,6 +107,13 @@ function mergeDefaults(value) {
   out.verify = out.verify !== false
   out.downloadAssets = out.downloadAssets !== false
   out.source = ['auto', 'official', 'bmclapi'].includes(out.source) ? out.source : 'auto'
+  out.update = normalizeUpdate(out.update)
+  // 老配置没有 rootConfigured：只要 root 不是旧版默认值，就视为用户已经选过目录。
+  if (value && value.rootConfigured === undefined) {
+    out.rootConfigured = !!(out.root && !isLegacyDefaultRoot(out.root))
+  } else {
+    out.rootConfigured = out.rootConfigured === true
+  }
   return out
 }
 
@@ -69,6 +124,12 @@ export function getState() {
   const merged = mergeDefaults(data.settings)
   if (JSON.stringify(merged) !== JSON.stringify(data.settings)) { data.settings = merged; dirty = true }
   if (!Array.isArray(data.instances)) { data.instances = []; dirty = true }
+  // 给老实例补上创建时的 root：之后切换游戏目录时它们仍然指向原来的文件，
+  // 不会被“搬”到新目录（新目录只影响之后创建的实例）。
+  const legacyRoot = currentRootFor(data)
+  for (const inst of data.instances) {
+    if (inst && !inst.root) { inst.root = legacyRoot; dirty = true }
+  }
   if (dirty) store.set(STORE_KEY, data)
   return data
 }
@@ -79,12 +140,7 @@ export function saveState(data) {
 }
 
 export function getSettings() {
-  const data = getState()
-  if (!data.settings.root) {
-    data.settings.root = defaultRoot()
-    saveState(data)
-  }
-  return data.settings
+  return getState().settings
 }
 
 export function updateSettings(patch = {}) {
@@ -93,15 +149,40 @@ export function updateSettings(patch = {}) {
   if (patch.root !== undefined) {
     const root = String(patch.root || '').trim()
     if (root && !path.isAbsolute(root)) throw new Error('游戏目录必须是绝对路径')
-    next.root = root ? path.resolve(root) : defaultRoot()
+    next.root = root ? resolveGameRoot(root) : defaultRoot()
+    // 选择目录（哪怕是默认目录）都算完成首次设置。
+    next.rootConfigured = true
     fs.mkdirSync(next.root, { recursive: true })
+    // 与 PCL / HMCL 一致：选中文件夹后在那里准备标准的 .minecraft 结构。
+    for (const dir of ['versions', 'libraries', 'assets', 'instances']) {
+      fs.mkdirSync(path.join(next.root, dir), { recursive: true })
+    }
   }
   data.settings = next
   saveState(data)
   return next
 }
 
+/**
+ * 把用户选中的文件夹解析成真正的游戏根目录：
+ *   - 本身叫 .minecraft → 直接用
+ *   - 已经是游戏根（有 versions / libraries / assets）→ 直接用
+ *   - 其他 → 在所选文件夹里创建/使用 .minecraft
+ * 这样和 PCL / HMCL 的「选择启动器文件夹」习惯一致。
+ */
+export function resolveGameRoot(picked) {
+  const resolved = path.resolve(String(picked || ''))
+  if (path.basename(resolved).toLowerCase() === '.minecraft') return resolved
+  const looksLikeRoot = ['versions', 'libraries', 'assets']
+    .some((name) => fs.existsSync(path.join(resolved, name)))
+  if (looksLikeRoot) return resolved
+  return path.join(resolved, '.minecraft')
+}
+
 export function launcherRoot() {
+  // 测试/便携场景覆盖：不写入用户配置，直接指定本次进程的游戏根目录。
+  const override = String(process.env.MC_TOOLBOX_LAUNCHER_ROOT || '').trim()
+  if (override) return path.resolve(override)
   return path.resolve(getSettings().root || defaultRoot())
 }
 
@@ -110,38 +191,54 @@ export function launcherRoot() {
 /* ------------------------------------------------------------------ */
 
 export function instanceDir(id) {
-  return path.join(launcherRoot(), 'instances', id)
+  const inst = findInstance(id)
+  return path.join(inst?.root ? path.resolve(inst.root) : launcherRoot(), 'instances', id)
 }
 
 /**
  * Effective file-system layout for an instance.
  * Imported instances may point at an existing .minecraft (baseDir); shared
  * versions/libraries/assets are read from there, while our logs/natives stay
- * inside the launcher root.
+ * inside the instance's own launcher root.
  */
 export function instancePaths(inst) {
-  const root = launcherRoot()
+  const root = inst?.root ? path.resolve(inst.root) : launcherRoot()
   const baseDir = inst?.baseDir ? path.resolve(inst.baseDir) : root
   const ownDir = path.join(root, 'instances', inst.id)
   const external = !!inst?.baseDir
   const gameDir = inst?.gameDir
     ? path.resolve(inst.gameDir)
     : external ? baseDir : path.join(ownDir, 'game')
-  const jarVersion = inst?.jarVersion || inst?.versionId || inst?.mc || ''
+  const versionId = String(inst?.versionId || inst?.mc || '')
+  // jarVersion 只信任实例显式记录的值；缺失时用候选列表兜底，不再静默当成空串。
+  const jarVersion = String(inst?.jarVersion || '').trim()
+  const jarNames = []
+  for (const value of [jarVersion, inst?.clientJarVersion, versionId, inst?.mc]) {
+    const name = String(value || '').trim()
+    if (name && !jarNames.includes(name)) jarNames.push(name)
+  }
+  const versionsDir = path.join(baseDir, 'versions')
+  const nativeKey = (jarVersion || versionId || 'default').replace(/[^a-zA-Z0-9._-]/g, '_')
+  const versionDir = path.join(versionsDir, versionId)
   return {
     root,
     baseDir,
     external,
     ownDir,
     gameDir,
-    versionsDir: path.join(baseDir, 'versions'),
+    versionsDir,
     librariesDir: path.join(baseDir, 'libraries'),
     assetsDir: path.join(baseDir, 'assets'),
-    nativesDir: path.join(ownDir, 'natives', String(jarVersion).replace(/[^a-zA-Z0-9._-]/g, '_')),
+    nativesDir: path.join(ownDir, 'natives', nativeKey),
     logsDir: path.join(ownDir, 'logs'),
     crashDir: path.join(gameDir, 'crash-reports'),
-    versionDir: path.join(baseDir, 'versions', inst?.versionId || inst?.mc || ''),
-    versionJson: path.join(baseDir, 'versions', inst?.versionId || inst?.mc || '', `${inst?.versionId || inst?.mc || ''}.json`),
+    versionId,
+    versionDir,
+    versionJson: path.join(versionDir, `${versionId}.json`),
+    jarVersion,
+    // 外部版本可能用版本文件夹名 / jarVersion / mc 中的任意一个命名客户端 JAR，
+    // 启动时按顺序取第一个实际存在的文件。
+    clientJarCandidates: jarNames.map((name) => path.join(versionsDir, name, `${name}.jar`)),
     modsDir: path.join(gameDir, 'mods'),
     resourcePacksDir: path.join(gameDir, 'resourcepacks'),
     shaderPacksDir: path.join(gameDir, 'shaderpacks'),
@@ -153,7 +250,12 @@ export function instancePaths(inst) {
 
 export function ensureInstanceDirs(inst) {
   const p = instancePaths(inst)
-  for (const dir of [p.gameDir, p.nativesDir, p.logsDir, p.modsDir, p.resourcePacksDir, p.shaderPacksDir, p.savesDir]) {
+  // 外部实例只写启动器自己的目录（natives / logs），绝不在导入的 .minecraft 里
+  // 创建 mods、saves、resourcepacks 等目录，避免“只读导入”实际修改外部目录。
+  const dirs = p.external
+    ? [p.ownDir, p.nativesDir, p.logsDir]
+    : [p.gameDir, p.nativesDir, p.logsDir, p.modsDir, p.resourcePacksDir, p.shaderPacksDir, p.savesDir]
+  for (const dir of dirs) {
     fs.mkdirSync(dir, { recursive: true })
   }
   return p
@@ -178,6 +280,8 @@ export function normalizeInstance(input = {}) {
     name: String(input.name || '').trim() || (mc ? `${mc} ${loader === 'vanilla' ? '' : loader}`.trim() : '新实例'),
     group: String(input.group || '').trim(),
     mc,
+    // 外部实例的 MC 版本来源（inheritsFrom / jar / assetIndex ...），由版本识别写入。
+    mcSource: String(input.mcSource || ''),
     loader,
     loaderVersion: String(input.loaderVersion || ''),
     versionId: String(input.versionId || input.installedVersionId || mc),
@@ -185,6 +289,8 @@ export function normalizeInstance(input = {}) {
     baseDir: input.baseDir ? path.resolve(String(input.baseDir)) : '',
     gameDir: input.gameDir ? path.resolve(String(input.gameDir)) : '',
     external: !!input.baseDir,
+    // 实例记住自己创建时的启动器根目录；切换游戏目录后仍能找回原来的文件。
+    root: input.root ? path.resolve(String(input.root)) : launcherRoot(),
     created: Number(input.created) || Date.now(),
     updated: Number(input.updated) || Date.now(),
     lastPlayed: Number(input.lastPlayed) || 0,
@@ -238,13 +344,16 @@ export function isInstalled(inst) {
 export function publicInstance(inst) {
   const p = instancePaths(inst)
   const installed = isInstalled(inst)
-  return {
+  const result = {
     ...inst,
     installed,
     paths: {
       baseDir: p.baseDir,
       gameDir: p.gameDir,
+      versionDir: p.versionDir,
       versionJson: p.versionJson,
+      jarVersion: p.jarVersion,
+      clientJarCandidates: p.clientJarCandidates,
       nativesDir: p.nativesDir,
       logsDir: p.logsDir,
       librariesDir: p.librariesDir,
@@ -256,6 +365,8 @@ export function publicInstance(inst) {
       screenshotsDir: p.screenshotsDir
     }
   }
+  if (!result.mcSource) delete result.mcSource
+  return result
 }
 
 export function listInstances({ includePaths = true } = {}) {

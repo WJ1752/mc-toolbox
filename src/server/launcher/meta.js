@@ -18,15 +18,20 @@ export const QUILT_META = 'https://meta.quiltmc.org/v3'
 export const FORGE_MAVEN = 'https://maven.minecraftforge.net/net/minecraftforge/forge'
 export const NEOFORGE_MAVEN = 'https://maven.neoforged.net/releases/net/neoforged/neoforge'
 export const BMCL_MAVEN = 'https://bmclapi2.bangbang93.com/maven'
-const UA = 'MC-Toolbox/1.8.0 (local launcher)'
+const UA = 'MC-Toolbox/1.9.0 (local launcher)'
 const JSON_TIMEOUT = 25000
 
 const cache = new Map()
 function cached(key, ttl, loader) {
   const hit = cache.get(key)
   if (hit && Date.now() - hit.at < ttl) return hit.value
-  const value = loader()
+  const value = Promise.resolve().then(loader)
   cache.set(key, { at: Date.now(), value })
+  // 失败结果不能留在缓存里：一次网络抖动会让后续 10 分钟内的安装都复用它，
+  // 表现为「重试仍然立刻失败，错误一模一样」。失败后删掉，让下一次重新请求。
+  value.catch(() => {
+    if (cache.get(key)?.value === value) cache.delete(key)
+  })
   return value
 }
 
@@ -44,8 +49,10 @@ export function mirrorUrl(url) {
   if ((m = /^https?:\/\/(?:piston-meta|launchermeta)\.mojang\.com\/mc\/game\/version_manifest(?:_v2)?\.json(?:\?.*)?$/.exec(raw))) {
     return base + '/mc/game/version_manifest_v2.json'
   }
-  if ((m = /^https?:\/\/piston-meta\.mojang\.com\/v1\/packages\/([^/]+)\/[^/]+\.json(?:\?.*)?$/.exec(raw))) {
-    return `${base}/version/${encodeURIComponent(m[1])}/json`
+  if ((m = /^https?:\/\/piston-meta\.mojang\.com\/v1\/packages\/([^/]+)\/([^/?#]+)(?:\?.*)?$/.exec(raw))) {
+    // BMCLAPI 按原始路径镜像 packages（版本 JSON、资源索引都走这里）。
+    // 旧实现把哈希当成版本号拼 /version/<hash>/json，镜像端始终 404。
+    return `${base}/v1/packages/${m[1]}/${m[2]}`
   }
   if ((m = /^https?:\/\/piston-(?:meta|data)\.mojang\.com\/v1\/objects\/([0-9a-f]{40})(?:\?.*)?$/i.exec(raw))) {
     return `${base}/assets/${m[1].slice(0, 2)}/${m[1]}`
@@ -88,17 +95,29 @@ export async function fetchJson(url, { source, signal, timeout = JSON_TIMEOUT } 
   const urls = candidateUrls(url, { source })
   let lastError = null
   for (const target of urls) {
-    try {
-      const response = await httpFetch(target, {
-        headers: { 'User-Agent': UA, Accept: 'application/json' },
-        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout),
-        redirect: 'follow'
-      })
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      return await response.json()
-    } catch (e) {
-      if (signal?.aborted) throw e
-      lastError = e
+    // 每个地址最多尝试两次：跨境线路经常出现一次 ECONNRESET 后立即恢复，
+    // 立刻放弃会让整个安装任务在第一步就失败。4xx 不重试。
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await httpFetch(target, {
+          headers: { 'User-Agent': UA, Accept: 'application/json' },
+          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout),
+          redirect: 'follow'
+        })
+        if (!response.ok) {
+          const error = new Error(`HTTP ${response.status}`)
+          error.status = response.status
+          throw error
+        }
+        return await response.json()
+      } catch (e) {
+        if (signal?.aborted) throw e
+        lastError = e
+        if (e?.status && e.status >= 400 && e.status < 500) break
+        // 超时已经等满 25 秒，再重试只会让界面更久没有反馈。
+        if (e?.name === 'TimeoutError' || e?.name === 'AbortError') break
+        if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 500))
+      }
     }
   }
   throw new Error(`获取元数据失败：${lastError?.message || url}`)

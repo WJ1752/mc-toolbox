@@ -11,7 +11,7 @@ let cache = { at: 0, value: null }
 
 async function fetchList(url) {
   const response = await httpFetch(url, {
-    headers: { Accept: 'application/json', 'User-Agent': 'MC-Toolbox/1.8.0' },
+    headers: { Accept: 'application/json', 'User-Agent': 'MC-Toolbox/1.9.0' },
     signal: AbortSignal.timeout(20000)
   })
   if (!response.ok) throw new Error(`HTTP ${response.status}`)

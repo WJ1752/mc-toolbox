@@ -1,18 +1,21 @@
 // 启动器主页面：实例侧栏、实例主页、下载中心 / Java 视图切换。
 // 工作台仍然是独立页面，由 app.js 的页面切换控制；本模块只负责启动器。
+// v1.9：实例启动阶段进度、结构化失败面板（含概览崩溃诊断）与导出整合包入口。
 import {
   h, clear, debounce, escapeHtml, fmtBytes, fmtAgo, fmtDuration, fmtDateTime, copyText
 } from '../core/dom.js'
 import { toast } from '../core/toast.js'
 import { confirmDialog, openModal } from '../core/modal.js'
 import { pickDir, pickFile } from '../core/dirpicker.js'
-import { btn, field, input, select, toggle, spinner, iconBtn, openPath } from '../ui/kit.js'
+import { btn, field, input, select, toggle, progress, spinner, iconBtn, openPath } from '../ui/kit.js'
 import { icon } from '../ui/icons.js'
 import { openContextMenu, closeContextMenu } from '../ui/contextmenu.js'
 import { bus } from '../core/bus.js'
 import { launcherApi as api } from './api.js'
 import * as ui from './ui.js'
 import { optimizedJvmArgs, hasOptimizedJvm } from './jvm.js'
+import { openGameDirSetup } from './setup.js'
+import { initUpdateChecker, disposeUpdateChecker, checkForUpdates } from './update.js'
 
 const TABS = [
   ['overview', '概览'],
@@ -24,6 +27,57 @@ const TABS = [
   ['servers', '服务器'],
   ['logs', '日志']
 ]
+
+// 启动阶段中文文案与错误码映射：服务端会返回 phaseLabel，这里只做兜底与说明。
+const LAUNCH_PHASE_LABELS = {
+  account: '校验账户',
+  version: '解析版本与继承链',
+  java: '检查并选择 Java',
+  files: '校验客户端文件',
+  natives: '解压 natives',
+  spawn: '启动 Java 进程',
+  window: '等待游戏窗口出现'
+}
+
+const LAUNCH_ERROR_ACTIONS = {
+  NO_ACCOUNT: ['copy'],
+  NO_JAVA: ['select-java', 'open-logs', 'copy'],
+  JAVA_TOO_OLD: ['select-java', 'open-logs', 'copy'],
+  VERSION_JSON_MISSING: ['repair', 'open-game-dir', 'open-logs', 'copy'],
+  MISSING_FILES: ['repair', 'open-logs', 'copy'],
+  EXTERNAL_DIR_UNWRITABLE: ['open-game-dir', 'open-logs', 'copy'],
+  ALREADY_RUNNING: ['open-logs', 'copy'],
+  SPAWN_FAILED: ['select-java', 'open-logs', 'copy'],
+  GAME_CRASHED: ['open-logs', 'copy'],
+  GAME_EXITED: ['open-logs', 'copy']
+}
+
+const LAUNCH_ERROR_REASONS = {
+  NO_ACCOUNT: '启动前没有找到可用的账户。请先在账户管理中添加或选择一个账户。',
+  NO_JAVA: '没有找到可用的 Java 运行时。请安装当前版本要求的 Java，然后在实例设置中手动指定。',
+  JAVA_TOO_OLD: '本机 Java 版本低于当前 Minecraft 版本的要求。请安装更高版本的 Java，或在实例设置里选择兼容的运行时。',
+  VERSION_JSON_MISSING: '版本 JSON 缺失，或 inheritsFrom 继承链断开。可以重新安装该版本，或检查版本目录是否完整。',
+  MISSING_FILES: '客户端 JAR、libraries、assets 或 natives 不完整。点击“检查并修复文件”可以重新下载缺失内容。',
+  EXTERNAL_DIR_UNWRITABLE: '外部游戏目录不可写。启动器需要写入日志、natives 等运行文件，请检查目录权限，或改用启动器管理的实例。',
+  ALREADY_RUNNING: '这个实例已经在启动或运行中，请先停止当前游戏。',
+  SPAWN_FAILED: 'Java 进程没有成功启动，常见原因是 Java 路径错误、内存参数过大或系统权限限制。',
+  GAME_CRASHED: '游戏进程异常退出并留下了崩溃报告。请查看日志与崩溃诊断，优先检查模组冲突或内存不足。',
+  GAME_EXITED: '游戏进程启动后异常退出（退出码非 0）。请查看日志末尾的错误信息。'
+}
+
+// 导出任务状态与格式文案（与后端 pack-export 的任务字段对应）。
+const EXPORT_FORMATS = { mrpack: 'Modrinth 整合包', zip: '通用整合包' }
+const EXPORT_ACTIVE = new Set(['queued', 'running', 'installing', 'cancelling'])
+const EXPORT_FINISHED = new Set(['done', 'failed', 'cancelled'])
+const EXPORT_STATUS = {
+  queued: { label: '排队中', tone: 'warn' },
+  running: { label: '导出中', tone: 'info' },
+  installing: { label: '导出中', tone: 'info' },
+  cancelling: { label: '取消中', tone: 'warn' },
+  done: { label: '已完成', tone: 'ok' },
+  failed: { label: '失败', tone: 'bad' },
+  cancelled: { label: '已取消', tone: '' }
+}
 
 const state = {
   ready: false,
@@ -54,8 +108,15 @@ const state = {
   contentHandle: null,
   contentToken: 0,
   heroRefs: null,
+  // 启动进度：按 instanceId 保存 GET /instances/:id/status 返回的 launch 状态。
+  // 与 state.detail 分离，切换 tab / 重绘 hero 时不会丢失。
+  launchStates: new Map(),
+  launchInflight: new Map(),
+  launchErrorToasts: new Map(),
+  overviewLaunchSlot: null,
   pollTimer: null,
-  backgroundTimer: null
+  backgroundTimer: null,
+  setupOpen: false
 }
 
 let rootEl = null
@@ -68,6 +129,7 @@ let countEl = null
 let navWrapEl = null
 let searchInputEl = null
 let lastPollAt = 0
+let lastLaunchPollAt = 0
 
 const moduleCache = new Map()
 function loadModule(name) {
@@ -104,6 +166,298 @@ function sessionLabel(session) {
   }[session.status] || session.status
 }
 
+/* ------------------------------------------------------------------ */
+/* launch helpers（纯函数，便于单测）                                  */
+/* ------------------------------------------------------------------ */
+
+function launchOf(instanceId) {
+  return instanceId ? state.launchStates.get(instanceId) || null : null
+}
+
+function isPreparingLaunch(launch) {
+  return !!launch && (launch.status === 'preparing' || launch.status === 'spawning')
+}
+
+function defaultLaunchActions(code) {
+  return [...(LAUNCH_ERROR_ACTIONS[code] || ['repair', 'open-logs', 'copy'])]
+}
+
+/** 阶段文案：`正在准备启动 · 3/7 校验客户端文件`。 */
+export function launchPhaseText(launch) {
+  if (!launch || !launch.status) return ''
+  const status = launch.status
+  if (status === 'running') return '游戏运行中'
+  if (status === 'failed') return '启动失败'
+  if (status === 'cancelled') return '已取消启动'
+  if (status === 'exited') return '游戏已退出'
+  if (status === 'idle') return ''
+  const phaseLabel = launch.phaseLabel || LAUNCH_PHASE_LABELS[launch.phase] || ''
+  const step = Math.max(0, Number(launch.step) || 0)
+  const total = Math.max(0, Number(launch.total) || 0)
+  const stage = step && total ? `${Math.min(step, total)}/${total} ` : ''
+  const prefix = status === 'spawning' ? '正在启动游戏' : '正在准备启动'
+  // 没有阶段名时只显示进度，避免出现“正在准备启动 · 准备启动”的重复文案。
+  if (!phaseLabel) return stage ? `${prefix} · ${stage.trim()}` : prefix
+  return `${prefix} · ${stage}${phaseLabel}`
+}
+
+/** 进度条数值：只有真实进度才返回数字，其余为 indeterminate。 */
+export function launchProgressInfo(launch) {
+  if (!launch) return { value: null, indeterminate: true }
+  if (launch.status === 'running') return { value: 100, indeterminate: false }
+  // Number(null) === 0，必须显式排除空值，避免把“不确定进度”画成 0%。
+  if (launch.indeterminate === true || launch.progress === null || launch.progress === undefined || launch.progress === '') {
+    return { value: null, indeterminate: true }
+  }
+  const value = Number(launch.progress)
+  const terminable = !['failed', 'cancelled', 'exited', 'idle'].includes(launch.status)
+  if (terminable && Number.isFinite(value) && value >= 0) {
+    return { value: Math.max(0, Math.min(100, value)), indeterminate: false }
+  }
+  return { value: null, indeterminate: true }
+}
+
+/**
+ * 统一服务端结构化错误、Error 实例与 status.launch.error 的字段。
+ * 保证返回对象一定包含 code/message/detail/missing/missingCount/paths/actions/crash。
+ */
+export function normalizeLaunchError(input, { message = '启动失败' } = {}) {
+  if (!input) return null
+  let raw = input
+  if (raw && typeof raw === 'object' && raw.status && 'error' in raw) raw = raw.error
+  else if (raw && typeof raw === 'object' && raw.error && typeof raw.error === 'object') raw = raw.error
+  if (!raw || typeof raw !== 'object') {
+    return {
+      code: '',
+      message: String(raw || message),
+      detail: '',
+      missing: [],
+      missingCount: 0,
+      paths: {},
+      actions: ['copy'],
+      crash: null,
+      logFile: ''
+    }
+  }
+  const code = String(raw.code || '')
+  const missing = Array.isArray(raw.missing)
+    ? raw.missing.filter(Boolean).map((item) => {
+      if (typeof item === 'string') return item
+      if (item && typeof item === 'object') {
+        const value = item.path || item.file || item.name || item.id
+        if (value) return String(value)
+      }
+      return String(item)
+    })
+    : []
+  const actions = Array.isArray(raw.actions) && raw.actions.length
+    ? raw.actions.map((item) => String(item))
+    : defaultLaunchActions(code)
+  // 复制错误信息始终可用，避免面板没有可执行按钮。
+  if (!actions.includes('copy')) actions.push('copy')
+  const paths = raw.paths && typeof raw.paths === 'object' ? raw.paths : {}
+  const rawDetail = raw.detail || raw.cause?.message || ''
+  const detail = typeof rawDetail === 'string' ? rawDetail : String(rawDetail?.message || '')
+  const crash = raw.crash && typeof raw.crash === 'object' ? raw.crash : null
+  return {
+    code,
+    message: String(raw.message || raw.error || message),
+    detail,
+    missing,
+    missingCount: Math.max(Number(raw.missingCount) || 0, missing.length),
+    paths,
+    actions: [...new Set(actions)],
+    crash,
+    logFile: raw.logFile || raw.paths?.logFile || ''
+  }
+}
+
+/** 「复制错误信息」使用的中文文本，包含摘要、缺失文件和相关路径。 */
+export function launchErrorCopyText(info, inst = {}) {
+  if (!info) return ''
+  const loader = inst.loader && inst.loader !== 'vanilla' ? ` · ${inst.loader}` : ''
+  const lines = [
+    `【启动失败】${inst.name || '实例'}${inst.mc ? `（${inst.mc}${loader}）` : ''}`,
+    `原因：${info.message || '未知原因'}`
+  ]
+  if (info.code) lines.push(`错误代码：${info.code}`)
+  if (info.detail) lines.push(`详细原因：${info.detail}`)
+  if (!info.detail) {
+    const reason = LAUNCH_ERROR_REASONS[info.code]
+    if (reason) lines.push(`说明：${reason}`)
+  }
+  if (info.missing.length) {
+    lines.push(`缺失文件（${info.missingCount}）：`)
+    for (const file of info.missing.slice(0, 40)) lines.push(`  - ${file}`)
+    if (info.missingCount > 40) lines.push(`  …还有 ${info.missingCount - 40} 项`)
+  }
+  const paths = [
+    ['游戏目录', info.paths.gameDir],
+    ['版本 JSON', info.paths.versionJson],
+    ['客户端 JAR', info.paths.clientJar],
+    ['日志目录', info.paths.logsDir],
+    ['实例目录', info.paths.baseDir],
+    ['日志文件', info.logFile]
+  ].filter(([, value]) => value)
+  if (paths.length) {
+    lines.push('路径：')
+    for (const [label, value] of paths) lines.push(`  ${label}：${value}`)
+  }
+  if (info.crash?.file) lines.push(`崩溃报告：${info.crash.file}`)
+  lines.push(`时间：${fmtDateTime(Date.now())}`)
+  return lines.join('\n')
+}
+
+function launchErrorReason(code) {
+  return LAUNCH_ERROR_REASONS[code] || '启动器没有返回更详细的原因，请打开日志查看完整输出。'
+}
+
+function dirOf(file) {
+  const text = String(file || '')
+  const index = Math.max(text.lastIndexOf('/'), text.lastIndexOf('\\'))
+  return index > 0 ? text.slice(0, index) : ''
+}
+
+function baseName(file) {
+  const text = String(file || '')
+  const index = Math.max(text.lastIndexOf('/'), text.lastIndexOf('\\'))
+  return index >= 0 ? text.slice(index + 1) : text
+}
+
+/* ------------------------------------------------------------------ */
+/* launch state tracking                                              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 保存 launch 状态；只在 status 变化时通知，避免每次轮询重复弹窗/重绘。
+ * 返回上一个状态，便于调用方判断。
+ */
+function rememberLaunch(instanceId, launch, { notify = true } = {}) {
+  if (!instanceId || !launch || typeof launch !== 'object') return null
+  const prev = state.launchStates.get(instanceId) || null
+  const next = launch.instanceId ? launch : { ...launch, instanceId }
+  state.launchStates.set(instanceId, next)
+  if (prev && prev.status === next.status) {
+    // 同阶段只更新进度，hero 由 pollStatus 的 updateHeroRuntime 刷新。
+    if (instanceId === state.selectedId && state.view === 'instance') updateHeroRuntime()
+    return prev
+  }
+  if (prev && notify) onLaunchStateChanged(instanceId, prev, next)
+  if (instanceId === state.selectedId && state.view === 'instance') {
+    if (state.tab === 'overview') refreshOverviewLaunchPanel()
+    updateHeroRuntime()
+  }
+  return prev
+}
+
+function onLaunchStateChanged(instanceId, prev, next) {
+  const inst = state.instances.find((item) => item.id === instanceId) ||
+    (state.selectedId === instanceId ? selectedInstance() : null)
+  if (next.status === 'failed') {
+    notifyLaunchFailure(instanceId, inst, normalizeLaunchError(next.error, { message: '游戏启动失败' }))
+  } else if (next.status === 'running' && ['preparing', 'spawning'].includes(prev.status)) {
+    toast('Minecraft 已启动', 'ok')
+  } else if (next.status === 'cancelled' && ['preparing', 'spawning'].includes(prev.status)) {
+    toast('已取消启动准备', 'ok')
+  }
+}
+
+function notifyLaunchFailure(instanceId, inst, info) {
+  const last = state.launchErrorToasts.get(instanceId) || 0
+  if (Date.now() - last < 5000) return
+  state.launchErrorToasts.set(instanceId, Date.now())
+  toast(`「${inst?.name || '实例'}」启动失败：${info?.message || '请查看诊断信息'}`, 'err')
+}
+
+/** 拉取单个实例的 status（含 launch），并发去重，失败静默。 */
+function fetchLaunchState(instanceId, { notify = true } = {}) {
+  if (!instanceId) return Promise.resolve(null)
+  const inflight = state.launchInflight.get(instanceId)
+  if (inflight) return inflight
+  let task = null
+  // 契约里的客户端方法叫 launchState；旧别名 instanceStatus 也保留兼容。
+  const request = typeof api.launchState === 'function'
+    ? api.launchState(instanceId)
+    : api.instanceStatus(instanceId)
+  task = request
+    .then((data) => {
+      if (data?.launch) {
+        rememberLaunch(instanceId, data.launch, { notify })
+      } else {
+        // 服务端没有 launch（旧版本或实例已被清理）：清除本地乐观状态，
+        // 否则会一直停留在“准备启动中”。
+        const stored = state.launchStates.get(instanceId)
+        if (stored?.local) {
+          state.launchStates.delete(instanceId)
+          if (instanceId === state.selectedId && state.view === 'instance') updateHeroRuntime()
+        }
+      }
+      return data
+    })
+    .catch(() => null)
+    .finally(() => {
+      if (state.launchInflight.get(instanceId) === task) state.launchInflight.delete(instanceId)
+    })
+  state.launchInflight.set(instanceId, task)
+  return task
+}
+
+/**
+ * 概览页的失败信息：优先使用 launch.error；旧服务端没有 launch 时回退到
+ * session.status === 'failed'（用户主动停止不会进入 failed）。
+ */
+function overviewFailureInfo(inst) {
+  if (!inst) return null
+  const launch = launchOf(inst.id)
+  if (launch?.status === 'failed') {
+    return {
+      launch,
+      info: normalizeLaunchError(launch.error || {
+        message: launch.detail || '游戏启动失败',
+        detail: launch.detail || ''
+      }, { message: '游戏启动失败' })
+    }
+  }
+  const session = sessionOf(inst.id)
+  if (session?.status === 'failed') {
+    return {
+      launch: null,
+      info: normalizeLaunchError({
+        code: session.crash ? 'GAME_CRASHED' : 'GAME_EXITED',
+        message: session.error || '游戏异常退出',
+        crash: session.crash || null
+      }, { message: '游戏异常退出' })
+    }
+  }
+  return null
+}
+
+/**
+ * 概览页常驻的启动失败诊断卡。轮询到 failed 时无需重新渲染整个概览，
+ * 直接重画这个 slot，切换 tab 后再回来也不会丢失（数据在 state.launchStates）。
+ */
+function paintOverviewLaunchPanel(slot, inst) {
+  if (!slot || !inst) return
+  clear(slot)
+  const failure = overviewFailureInfo(inst)
+  if (!failure?.info) return
+  const { info, launch } = failure
+  slot.appendChild(ui.sectionCard({
+    title: '启动失败诊断',
+    subtitle: [launch?.phaseLabel, info.code].filter(Boolean).join(' · ') || '上次启动未成功',
+    className: 'lp-card-danger',
+    actions: btn('查看日志', { size: 'sm', iconName: 'terminal', onClick: () => setTab('logs') }),
+    body: buildLaunchErrorPanel(info, inst)
+  }))
+}
+
+function refreshOverviewLaunchPanel() {
+  const slot = state.overviewLaunchSlot
+  if (!slot?.isConnected) return
+  const inst = selectedInstance()
+  if (inst) paintOverviewLaunchPanel(slot, inst)
+}
+
 function pageCtx() {
   return {
     api,
@@ -127,7 +481,7 @@ function pageCtx() {
     showInstance: async (id) => { await selectInstance(id) },
     showView: async (view) => { await showView(view) },
     openAccounts: () => openAccounts(),
-    openSettings: () => openLauncherSettings(),
+    openSettings: (section = 'launcher-root') => openLauncherSettings(section),
     setTab: (tab) => setTab(tab)
   }
 }
@@ -152,15 +506,51 @@ export async function initLauncherPage(pageHelpers = {}) {
   if (state.instances.length && state.selectedId) await loadDetail(state.selectedId, { render: false })
   renderMain()
   state.ready = true
+  if (state.settings?.needsSetup) setTimeout(() => openSetup(), 320)
+  // 启动器自身更新：按设置自动检查一次，发现新版本时右下角弹提示卡片。
+  initUpdateChecker({
+    autoCheck: state.settings?.update?.autoCheck !== false,
+    delay: state.settings?.needsSetup ? 6000 : 1500
+  })
   return {
     activate,
     deactivate,
     refresh: refreshAll,
+    applySettings,
     commandItems,
+    openSetup,
+    checkUpdates: () => checkForUpdates({ silent: false, force: true }),
     isActive: () => state.active,
     getState: () => state,
     destroy
   }
+}
+
+/** 首次启动 / 尚未选择游戏目录时，让用户先选 .minecraft 的位置。 */
+function openSetup() {
+  if (state.setupOpen) return
+  state.setupOpen = true
+  openGameDirSetup({
+    settings: state.settings || {},
+    onDone: async (next) => {
+      state.setupOpen = false
+      if (next) state.settings = next
+      toast('游戏目录已就绪：' + (next?.root || state.settings?.root || ''), 'ok')
+      try {
+        await loadBootstrap({ silent: true })
+        renderSidebar()
+        renderMain()
+      } catch (e) {
+        toast('刷新启动器失败：' + e.message, 'warn')
+      }
+    },
+    onCancel: () => { state.setupOpen = false }
+  })
+}
+
+/** 设置页保存启动器设置后同步到当前页面（不重建 DOM，避免闪烁）。 */
+function applySettings(next) {
+  if (next && typeof next === 'object') state.settings = next
 }
 
 function buildSkeleton() {
@@ -213,9 +603,10 @@ function buildNav() {
         tabs.find((button) => /导入已有/.test(button.textContent || ''))?.click()
       }, 60)
     }),
-    navButton('settings', '启动器设置', 'settings', () => openLauncherSettings()),
     h('div', { class: 'lp-nav-sep' }),
-    navButton('workspace', '返回工作台', 'workspace', () => helpers.switchPage?.('workbench'))
+    // 启动器是主页：工作台只是另一个页面，不再写成「返回工作台」。
+    navButton('workspace', '工作台', 'workspace', () => helpers.switchPage?.('workbench')),
+    navButton('settings', '设置', 'settings', () => openLauncherSettings())
   )
   updateNav()
 }
@@ -240,6 +631,11 @@ async function loadBootstrap({ silent = false } = {}) {
   state.accounts = data.accounts || { selected: '', items: [] }
   state.sessions = data.sessions || []
   state.jobs = data.jobs || []
+  // 实例被删除后，旧的启动状态不再有意义。
+  const alive = new Set(state.instances.map((item) => item.id))
+  for (const key of [...state.launchStates.keys()]) {
+    if (!alive.has(key)) state.launchStates.delete(key)
+  }
   const exists = state.instances.some((item) => item.id === state.selectedId)
   if (!exists) state.selectedId = data.selectedInstance || state.instances[0]?.id || ''
   state.loading = false
@@ -273,6 +669,7 @@ async function refreshSelectedDetail() {
     const detail = await api.instance(state.selectedId)
     if (state.selectedId !== detail.instance?.id) return
     state.detail = detail
+    if (detail?.status?.launch) rememberLaunch(state.selectedId, detail.status.launch, { notify: false })
     updateTabCounts()
     updateHeroRuntime()
   } catch {}
@@ -289,6 +686,8 @@ async function loadDetail(id, { render = true } = {}) {
     const detail = await api.instance(id)
     if (token !== state.detailToken || state.selectedId !== id) return null
     state.detail = detail
+    // GET /instances/:id 已经附带 status.launch，先写入缓存让 hero 立即可见。
+    if (detail?.status?.launch) rememberLaunch(id, detail.status.launch, { notify: false })
     if (state.view === 'instance') {
       if (render) renderMain()
       else { updateTabCounts(); updateHeroRuntime() }
@@ -407,6 +806,8 @@ async function selectInstance(id, { tab = 'overview' } = {}) {
   if (state.view === 'instance' && state.selectedId === id) {
     renderHeroAndTabs()
   }
+  // detail 里没有 launch 时（旧服务端/首次加载），再单独拉一次启动状态。
+  if (!launchOf(id)) void fetchLaunchState(id, { notify: false })
 }
 
 /* ------------------------------------------------------------------ */
@@ -539,7 +940,7 @@ function renderWelcome() {
     h('div', { class: 'lp-welcome-title' },
       h('span', { class: 'overline' }, 'Launch Bay'),
       h('h1', {}, '准备进入世界'),
-      h('p', {}, '把版本、账户和启动参数收进同一张工作台；工作台页面仍保留全部服务器与整合包工具。')
+      h('p', {}, '版本、账户和启动参数都收在启动器里；服务器、整合包与其它工具在工作台页面。')
     ),
     h('div', { class: 'lp-welcome-actions' },
       btn('新建实例', { variant: 'primary', iconName: 'add', onClick: () => showView('install') }),
@@ -614,30 +1015,182 @@ function renderHeroAndTabs() {
   mountTab(tabs.body, current, state.tab)
 }
 
+function heroMode(inst, session, launch) {
+  if (isPreparingLaunch(launch)) return 'preparing'
+  if (launch?.status === 'failed') return 'failed'
+  if (launch?.status === 'running') return 'running'
+  if (session?.status === 'failed') return 'failed'
+  if (isRunningSession(session)) return session.status === 'starting' ? 'preparing' : 'running'
+  return 'idle'
+}
+
+function heroStatusText(inst, session, launch, mode) {
+  if (mode === 'preparing') {
+    const phase = launch?.phaseLabel || LAUNCH_PHASE_LABELS[launch?.phase] || ''
+    return phase ? `准备启动 · ${phase}` : '正在启动…'
+  }
+  if (mode === 'running') return sessionLabel(session) || (launch?.status === 'running' ? '运行中' : '准备就绪')
+  if (mode === 'failed') return '启动失败'
+  if (launch?.status === 'cancelled') return '已取消启动'
+  if (launch?.status === 'exited') return '游戏已退出'
+  return inst.installed ? '准备就绪' : '尚未安装完成'
+}
+
+function launchPaintKey(mode, launch, stopping) {
+  return `${mode}:${launch?.status || ''}:${stopping ? 1 : 0}`
+}
+
+/** 服务端没有 launch 时，用 session.failed 合成一个可展示的失败状态。 */
+function heroLaunchState(inst, session) {
+  const launch = launchOf(inst.id)
+  if (launch) return launch
+  if (session?.status === 'failed') {
+    return {
+      instanceId: inst.id,
+      status: 'failed',
+      error: {
+        code: session.crash ? 'GAME_CRASHED' : 'GAME_EXITED',
+        message: session.error || '游戏异常退出',
+        crash: session.crash || null
+      }
+    }
+  }
+  return null
+}
+
+/**
+ * hero 上的启动进度块：阶段文案 + 真实/不确定进度 + 取消按钮；
+ * 失败时改为红色错误条，点击打开结构化错误面板。
+ */
+function buildLaunchProgress(inst) {
+  const headIcon = h('span', { class: 'lp-launch-progress-icon' })
+  const headText = h('b', {}, '')
+  const cancelBtn = btn('取消', {
+    size: 'xs',
+    variant: 'ghost',
+    class: 'lp-launch-cancel',
+    title: '取消启动准备',
+    onClick: () => cancelPreparingLaunch(inst)
+  })
+  const bar = progress(null, { className: 'lp-launch-progress-bar' })
+  const phase = h('div', { class: 'lp-launch-phase' }, '')
+  const errorLine = h('button', { class: 'lp-launch-error-line', type: 'button', hidden: true })
+  const root = h('div', { class: 'lp-launch-progress', hidden: true },
+    h('div', { class: 'lp-launch-progress-head' }, headIcon, headText, cancelBtn),
+    bar.el,
+    phase,
+    errorLine
+  )
+
+  function paint(launch, session) {
+    const status = launch?.status || ''
+    const visible = ['preparing', 'spawning', 'running', 'failed'].includes(status)
+    root.hidden = !visible
+    if (!visible) return
+    root.classList.toggle('is-failed', status === 'failed')
+    root.classList.toggle('is-running', status === 'running')
+    clear(headIcon)
+
+    if (status === 'failed') {
+      const info = normalizeLaunchError(launch.error, { message: '游戏启动失败' })
+      headIcon.appendChild(icon('warning', { size: 12 }))
+      headText.textContent = '启动失败'
+      headText.title = info?.message || ''
+      cancelBtn.hidden = true
+      bar.el.hidden = true
+      phase.textContent = info?.message || '启动失败，请查看诊断信息'
+      errorLine.hidden = false
+      clear(errorLine)
+      errorLine.append(
+        icon('warning', { size: 12 }),
+        h('span', { title: info?.message || '' }, info?.message || '启动失败'),
+        h('b', {}, '查看原因')
+      )
+      errorLine.onclick = () => showLaunchError(info || launch.error, inst, { launch })
+      return
+    }
+
+    if (status === 'running') {
+      headIcon.appendChild(icon('check-circle', { size: 12 }))
+      headText.textContent = '游戏运行中'
+      headText.title = ''
+      cancelBtn.hidden = true
+      bar.el.hidden = false
+      bar.state('ok')
+      bar.set(100)
+      phase.textContent = session
+        ? `${sessionLabel(session)} · ${fmtDuration(Math.max(0, (session.elapsed || 0) / 1000))}`
+        : '游戏进程正在运行'
+      errorLine.hidden = true
+      return
+    }
+
+    headIcon.appendChild(spinner(10))
+    headText.textContent = launchPhaseText(launch)
+    headText.title = headText.textContent
+    cancelBtn.hidden = !(launch?.cancellable !== false && ['preparing', 'spawning'].includes(status))
+    bar.el.hidden = false
+    bar.state('')
+    const info = launchProgressInfo(launch)
+    bar.set(info.value)
+    phase.textContent = launch.detail || '正在准备启动文件…'
+    errorLine.hidden = true
+  }
+
+  return { root, paint }
+}
+
+async function cancelPreparingLaunch(inst) {
+  if (!inst) return
+  try {
+    const result = await api.cancelLaunch(inst.id)
+    if (result && result.ok === false) throw new Error(result.error || '服务端未能取消启动')
+    toast('已取消启动准备', 'ok')
+    await pollStatus(true)
+  } catch (e) {
+    toast('取消启动失败：' + e.message, 'err')
+  }
+}
+
 function renderHero(inst, detail, session) {
-  const running = isRunningSession(session)
+  const launch = launchOf(inst.id)
+  const mode = heroMode(inst, session, launch)
   const stopping = session?.status === 'stopping'
   const actionWrap = h('div', { class: 'lp-hero-actions' })
-  const statusText = h('span', { class: 'lp-hero-status-text' }, running ? sessionLabel(session) : inst.installed ? '准备就绪' : '尚未安装完成')
-  const elapsed = h('span', { class: 'lp-hero-elapsed' }, running ? fmtDuration(Math.max(0, (session.elapsed || 0) / 1000)) : '')
-  const status = h('div', { class: 'lp-hero-status' + (running ? ' running' : '') },
+  const statusText = h('span', { class: 'lp-hero-status-text' }, heroStatusText(inst, session, launch, mode))
+  const elapsed = h('span', { class: 'lp-hero-elapsed' }, mode === 'running' ? fmtDuration(Math.max(0, (session?.elapsed || 0) / 1000)) : '')
+  const status = h('div', { class: 'lp-hero-status' + (mode === 'running' ? ' running' : mode === 'preparing' ? ' preparing' : mode === 'failed' ? ' failed' : '') },
     h('i', {}), statusText, elapsed)
 
-  const launchBtn = h('button', { class: 'lp-launch' + (running ? ' stop' : ''), type: 'button' })
-  function paintLaunch(isRunning = running, isStopping = stopping) {
+  const launchProgress = buildLaunchProgress(inst)
+  const launchBtn = h('button', { class: 'lp-launch' + (mode === 'running' ? ' stop' : ''), type: 'button' })
+  function paintLaunch(currentMode = mode, isStopping = stopping) {
+    const currentLaunch = launchOf(inst.id)
     clear(launchBtn)
-    launchBtn.className = 'lp-launch' + (isRunning ? ' stop' : '')
     launchBtn.disabled = false
-    if (isRunning) {
+    launchBtn.removeAttribute('aria-busy')
+    launchBtn.className = 'lp-launch' + (currentMode === 'running' ? ' stop' : '')
+    launchBtn.onclick = null
+    if (currentMode === 'running') {
       launchBtn.append(icon('stop', { size: 17 }), h('span', {}, isStopping ? '正在停止…' : '停止游戏'))
       launchBtn.disabled = isStopping
       launchBtn.onclick = () => stopSelected()
-    } else {
-      launchBtn.append(icon('play', { size: 17 }), h('span', {}, inst.installed ? '启动游戏' : '修复并启动'))
-      launchBtn.onclick = () => launchSelected()
+      return
     }
+    if (currentMode === 'preparing') {
+      const label = currentLaunch?.status === 'spawning' ? '正在启动…' : '准备启动中…'
+      launchBtn.disabled = true
+      launchBtn.setAttribute('aria-busy', 'true')
+      launchBtn.append(spinner(14), h('span', {}, label))
+      return
+    }
+    const failedBefore = currentLaunch?.status === 'failed' || sessionOf(inst.id)?.status === 'failed'
+    const label = !inst.installed ? '修复并启动' : failedBefore ? '重新启动' : '启动游戏'
+    launchBtn.append(icon('play', { size: 17 }), h('span', {}, label))
+    launchBtn.onclick = () => launchSelected()
   }
   paintLaunch()
+  launchProgress.paint(heroLaunchState(inst, session), session)
   const account = selectedAccount()
   const accountLine = h('span', { class: 'lp-launch-sub' }, account ? `以 ${account.name} 登录` : '需要先添加账户')
 
@@ -646,7 +1199,7 @@ function renderHero(inst, detail, session) {
   const moreBtn = iconBtn('more', { label: '更多操作', title: '更多操作', onClick: (e) => openInstanceMenu(e, inst) })
 
   actionWrap.append(
-    h('div', { class: 'lp-launch-wrap' }, launchBtn, accountLine),
+    h('div', { class: 'lp-launch-wrap' }, launchBtn, launchProgress.root, accountLine),
     h('div', { class: 'lp-hero-tools' }, settingsBtn, folderBtn, moreBtn)
   )
 
@@ -656,8 +1209,8 @@ function renderHero(inst, detail, session) {
     detail.summary?.pack ? h('span', { class: 'badge accent' }, '整合包') : null
   )
 
-  const root = h('div', { class: 'lp-hero' + (running ? ' is-running' : '') },
-    ui.instanceIcon(inst, { size: 72, running }),
+  const root = h('div', { class: 'lp-hero' + (mode === 'running' ? ' is-running' : '') },
+    ui.instanceIcon(inst, { size: 72, running: mode === 'running' }),
     h('div', { class: 'lp-hero-main' },
       h('span', { class: 'overline' }, inst.group || 'Instance'),
       h('h1', { title: inst.name }, inst.name),
@@ -667,7 +1220,18 @@ function renderHero(inst, detail, session) {
     ),
     actionWrap
   )
-  state.heroRefs = { root, launchBtn, status, statusText, elapsed, paintLaunch, instId: inst.id, sig: running ? (stopping ? 'stopping' : 'running') : 'idle' }
+  state.heroRefs = {
+    root,
+    launchBtn,
+    status,
+    statusText,
+    elapsed,
+    paintLaunch,
+    paintProgress: launchProgress.paint,
+    progress: launchProgress.root,
+    instId: inst.id,
+    sig: launchPaintKey(mode, launch, stopping)
+  }
   return root
 }
 
@@ -678,25 +1242,133 @@ function updateHeroRuntime() {
   const inst = detail?.instance || selectedInstance()
   if (!inst) return
   const session = sessionOf(inst.id)
-  const running = isRunningSession(session)
+  const launch = launchOf(inst.id)
+  const mode = heroMode(inst, session, launch)
   const stopping = session?.status === 'stopping'
-  refs.root?.classList.toggle('is-running', running)
-  refs.status?.classList.toggle('running', running)
-  if (refs.statusText) refs.statusText.textContent = running ? sessionLabel(session) : inst.installed ? '准备就绪' : '尚未安装完成'
-  if (refs.elapsed) refs.elapsed.textContent = running ? fmtDuration(Math.max(0, (session.elapsed || 0) / 1000)) : ''
+  refs.root?.classList.toggle('is-running', mode === 'running')
+  if (refs.status) {
+    refs.status.className = 'lp-hero-status' +
+      (mode === 'running' ? ' running' : mode === 'preparing' ? ' preparing' : mode === 'failed' ? ' failed' : '')
+  }
+  if (refs.statusText) refs.statusText.textContent = heroStatusText(inst, session, launch, mode)
+  if (refs.elapsed) {
+    refs.elapsed.textContent = mode === 'running' ? fmtDuration(Math.max(0, (session?.elapsed || 0) / 1000)) : ''
+  }
   if (refs.launchBtn) {
-    const sig = running ? (stopping ? 'stopping' : 'running') : 'idle'
+    const sig = launchPaintKey(mode, launch, stopping)
     if (refs.sig !== sig) {
       refs.sig = sig
-      refs.paintLaunch(running, stopping)
+      refs.paintLaunch(mode, stopping)
     }
   }
+  refs.paintProgress?.(heroLaunchState(inst, session), session)
   // If the instance just finished installing, the hero badges need refreshing.
   const badge = refs.root?.querySelector('.lp-hero-badges .badge')
   if (badge && inst.installed) {
     badge.className = 'badge ok'
     badge.textContent = '已安装'
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* structured launch error panel                                      */
+/* ------------------------------------------------------------------ */
+
+function launchErrorActionButton(action, info, inst, onAction) {
+  const fire = (name, fn) => () => {
+    try { onAction?.(name) } catch {}
+    fn()
+  }
+  switch (action) {
+    case 'repair':
+      return btn('检查并修复文件', { size: 'sm', iconName: 'refresh', onClick: fire('repair', () => repairInstance(inst)) })
+    case 'select-java':
+      return btn('选择 Java', { size: 'sm', iconName: 'java', onClick: fire('select-java', () => openInstanceSettings(inst)) })
+    case 'open-game-dir': {
+      const dir = info.paths.gameDir || inst?.paths?.gameDir || ''
+      if (!dir) return null
+      return btn('打开游戏目录', { size: 'sm', iconName: 'folder-open', onClick: fire('open-game-dir', () => openPath(dir)) })
+    }
+    case 'open-logs':
+      return btn('打开日志', { size: 'sm', iconName: 'terminal', onClick: fire('open-logs', () => setTab('logs')) })
+    case 'copy':
+      return btn('复制错误信息', {
+        size: 'sm',
+        iconName: 'copy',
+        onClick: async () => {
+          const ok = await copyText(launchErrorCopyText(info, inst))
+          toast(ok ? '错误信息已复制' : '复制失败，请手动选择文本', ok ? 'ok' : 'err')
+        }
+      })
+    default:
+      return null
+  }
+}
+
+/**
+ * 结构化错误面板：摘要、详细原因、缺失文件（最多 12 项）、相关路径、
+ * 崩溃诊断，以及按 error.actions 渲染的可操作按钮。
+ */
+function buildLaunchErrorPanel(info, inst, { onAction = null } = {}) {
+  const wrap = h('div', { class: 'lp-launch-error-panel' })
+  if (!info) return wrap
+  wrap.appendChild(h('div', { class: 'lp-launch-error-summary' },
+    icon('warning', { size: 20 }),
+    h('div', { class: 'lp-launch-error-summary-main' },
+      h('div', { class: 'lp-launch-error-summary-title' },
+        h('b', {}, info.message || '启动失败'),
+        info.code ? h('span', { class: 'lp-error-code', title: '错误代码' }, info.code) : null
+      ),
+      h('p', {}, info.detail || launchErrorReason(info.code))
+    )
+  ))
+
+  if (info.missing.length) {
+    const shown = info.missing.slice(0, 12)
+    const total = Math.max(info.missingCount, info.missing.length)
+    wrap.appendChild(h('div', { class: 'lp-launch-error-detail' },
+      h('div', { class: 'lp-subhead' }, `缺失文件（${total}）`),
+      h('ul', { class: 'lp-error-missing' }, ...shown.map((file) => h('li', { title: file }, file))),
+      total > shown.length ? h('div', { class: 'lp-hint' }, `仅显示前 ${shown.length} 项，共 ${total} 项。`) : null
+    ))
+  }
+
+  const pathRows = [
+    ['游戏目录', info.paths.gameDir],
+    ['版本 JSON', info.paths.versionJson],
+    ['客户端 JAR', info.paths.clientJar],
+    ['日志目录', info.paths.logsDir],
+    ['实例目录', info.paths.baseDir],
+    ['日志文件', info.logFile]
+  ].filter(([, value]) => !!value)
+  if (pathRows.length) {
+    wrap.appendChild(h('div', { class: 'lp-launch-error-detail' },
+      h('div', { class: 'lp-subhead' }, '相关路径'),
+      ...pathRows.map(([label, value]) => h('div', { class: 'lp-error-path-row' },
+        h('span', {}, label),
+        h('code', { title: String(value) }, String(value))
+      ))
+    ))
+  }
+
+  if (info.crash) {
+    const crash = info.crash
+    const hints = (Array.isArray(crash.hints) ? crash.hints : []).slice(0, 3)
+    wrap.appendChild(h('div', { class: 'lp-crash-panel' },
+      h('b', {}, crash.name || crash.file || '崩溃报告'),
+      crash.description ? h('p', {}, crash.description) : null,
+      ...hints.map((hint) => h('p', {}, `${hint.title || '诊断'}：${hint.suggestion || hint.detail || ''}`)),
+      crash.file ? h('p', { class: 'mono' }, crash.file) : null
+    ))
+  }
+
+  const actions = h('div', { class: 'lp-error-actions' })
+  for (const action of info.actions) {
+    const button = launchErrorActionButton(action, info, inst, onAction)
+    if (button) actions.appendChild(button)
+  }
+  if (actions.childElementCount) wrap.appendChild(actions)
+  return wrap
 }
 
 function renderMetaStrip(inst, detail) {
@@ -816,6 +1488,12 @@ async function renderOverview(container, inst) {
   grid.append(left, right)
   container.appendChild(grid)
 
+  // 启动失败诊断：常驻卡片，轮询到 failed 后在这里持久显示，而不是只弹 toast。
+  const launchSlot = h('div', { class: 'lp-overview-launch' })
+  state.overviewLaunchSlot = launchSlot
+  left.appendChild(launchSlot)
+  paintOverviewLaunchPanel(launchSlot, inst)
+
   // Runtime console / crash
   if (isRunningSession(session)) {
     const live = h('div', { class: 'lp-live-console' })
@@ -833,7 +1511,9 @@ async function renderOverview(container, inst) {
     }).catch(() => {})
   }
 
-  if (detail?.status?.crash) {
+  // launch 已包含崩溃诊断时不再重复显示“上次启动的崩溃诊断”卡片。
+  const launchCrashShown = ['GAME_CRASHED', 'GAME_EXITED'].includes(overviewFailureInfo(inst)?.info?.code)
+  if (detail?.status?.crash && !launchCrashShown) {
     const crash = detail.status.crash
     const hints = (crash.hints || []).slice(0, 3)
     left.appendChild(ui.sectionCard({
@@ -941,6 +1621,7 @@ async function renderOverview(container, inst) {
     ['打开日志目录', 'terminal', () => openPath(detail?.paths?.logsDir || inst.paths?.logsDir || '')],
     ['检查并修复文件', 'refresh', () => repairInstance(inst)],
     ['复制实例', 'copy', () => duplicateInstance(inst)],
+    ['导出为整合包', 'archive', () => openPackExport(inst)],
     ['导出实例配置', 'save', () => exportInstance(inst)],
     ['删除实例', 'trash', () => deleteInstanceAction(inst)]
   ]) {
@@ -1038,7 +1719,14 @@ function paintNews(slot, compact) {
 async function launchSelected() {
   const inst = selectedInstance()
   if (!inst) { showView('install'); return }
-  if (!inst.installed) { toast('实例尚未安装完成，先执行“检查并修复文件”', 'warn'); return }
+  // 未安装完成也允许发起一次启动：后端会返回 VERSION_JSON_MISSING /
+  // MISSING_FILES 等结构化错误，前端给出「检查并修复文件」等操作，
+  // 比只弹一个“尚未安装”的 toast 更可操作。
+  const launch = launchOf(inst.id)
+  if (isPreparingLaunch(launch)) {
+    toast('这个实例正在准备启动，请稍候', 'warn')
+    return
+  }
   const account = selectedAccount()
   if (!account) {
     toast('请先添加并选择一个账户', 'warn')
@@ -1046,37 +1734,65 @@ async function launchSelected() {
     return
   }
   try {
-    const refs = state.heroRefs
-    if (refs?.launchBtn) refs.launchBtn.disabled = true
-    await api.launch(inst.id, account.id)
+    // 先写入乐观状态：即使服务端还没返回，hero 也会立即显示“准备启动中”并禁用按钮。
+    rememberLaunch(inst.id, {
+      instanceId: inst.id,
+      status: 'preparing',
+      phase: 'account',
+      phaseLabel: LAUNCH_PHASE_LABELS.account,
+      step: 1,
+      total: 7,
+      detail: '正在提交启动请求…',
+      progress: null,
+      indeterminate: true,
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      cancellable: false,
+      error: null,
+      local: true
+    }, { notify: false })
+    updateHeroRuntime()
+
+    const result = await api.launch(inst.id, account.id)
+    if (result?.launch) rememberLaunch(inst.id, result.launch, { notify: false })
     toast('正在启动 Minecraft…', 'ok')
     await pollStatus(true)
-    setTab('logs')
+    // hero 常驻，切到日志 tab 不会丢失进度块；不在实例页时不操作隐藏的 tab。
+    if (state.view === 'instance') setTab('logs')
     if (state.settings?.closeOnLaunch) {
       setTimeout(() => { try { navigator.sendBeacon('/api/shutdown') } catch {} }, 2500)
     }
   } catch (e) {
-    if (refs?.launchBtn) refs.launchBtn.disabled = false
+    state.launchStates.delete(inst.id)
+    updateHeroRuntime()
     showLaunchError(e, inst)
+    // 失败后刷新一次，避免按钮仍停留在乐观的“准备启动中”。
+    await pollStatus(true)
   }
 }
 
-function showLaunchError(error, inst) {
-  const box = h('div', { class: 'lp-launch-error' },
-    icon('warning', { size: 20 }),
-    h('div', {},
-      h('b', {}, '启动失败'),
-      h('p', {}, error.message || String(error)),
-      h('p', { class: 'lp-hint' }, '常见原因：Java 版本不匹配、文件不完整、账户登录过期或模组冲突。')
-    )
-  )
-  const modal = openModal({
-    title: '无法启动 ' + inst.name,
-    size: 'md',
-    body: box,
+function showLaunchError(error, inst, { launch = null } = {}) {
+  const target = inst || selectedInstance() || { name: '实例', paths: {} }
+  const info = normalizeLaunchError(error || launch?.error || { message: '启动失败' }, { message: '启动失败' })
+  if (!info) {
+    toast('启动失败，请打开日志查看原因', 'err')
+    return
+  }
+  // 抑制同一失败原因的重复 toast；结构化面板本身是主要反馈。
+  if (target.id) state.launchErrorToasts.set(target.id, Date.now())
+  let modal = null
+  const panel = buildLaunchErrorPanel(info, target, {
+    onAction: (action) => {
+      if (action === 'copy') return
+      try { modal?.close() } catch {}
+    }
+  })
+  modal = openModal({
+    title: `无法启动「${target.name || '实例'}」`,
+    size: 'lg',
+    body: panel,
     buttons: [
-      { label: '关闭', class: 'btn-ghost' },
-      { label: '检查并修复文件', class: 'btn-primary', onClick: () => { modal.close(); repairInstance(inst) } }
+      { label: '关闭', class: 'btn-ghost' }
     ]
   })
 }
@@ -1148,6 +1864,276 @@ async function exportInstance(inst) {
   toast('实例配置已导出（不含游戏文件）', 'ok')
 }
 
+/* ------------------------------------------------------------------ */
+/* export pack (.mrpack / .zip)                                       */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 「导出为整合包」弹窗：格式、存档/截图开关、输出目录与任务进度。
+ * 任务由后端 /api/launcher/exports/:id 提供，关闭弹窗只停止本地轮询。
+ */
+function openPackExport(inst) {
+  let format = 'mrpack'
+  let outputDir = ''
+  let includeSaves = false
+  let includeScreenshots = false
+  let job = null
+  let pollTimer = null
+  let after = 0
+  let logLines = []
+  let closed = false
+
+  const formatWrap = h('div', { class: 'lp-export-format' })
+  const formatOptions = []
+  for (const [value, title, desc] of [
+    ['mrpack', 'Modrinth 整合包（.mrpack）', '写入 modrinth.index.json，兼容 Modrinth 及支持 mrpack 的启动器。'],
+    ['zip', '通用整合包（.zip）', '写入 manifest.json，可用本工具箱直接重新导入安装。']
+  ]) {
+    const radio = h('input', {
+      type: 'radio',
+      name: 'lp-export-format',
+      value,
+      checked: value === format,
+      onchange: () => { format = value; syncFormat() }
+    })
+    const option = h('label', {
+      class: 'lp-export-format-option' + (value === format ? ' is-active' : '')
+    },
+      radio,
+      h('span', { class: 'lp-export-option-main' },
+        h('b', {}, title),
+        h('span', {}, desc)
+      )
+    )
+    formatOptions.push([value, option])
+    formatWrap.appendChild(option)
+  }
+  function syncFormat() {
+    for (const [value, option] of formatOptions) {
+      option.classList.toggle('is-active', value === format)
+      const radio = option.querySelector('input')
+      if (radio) radio.checked = value === format
+    }
+  }
+
+  const savesInput = h('input', { type: 'checkbox', onchange: (e) => { includeSaves = e.target.checked } })
+  const screenshotsInput = h('input', { type: 'checkbox', onchange: (e) => { includeScreenshots = e.target.checked } })
+  const pathText = h('span', { class: 'lp-export-path' }, '启动器 exports 目录（默认）')
+  const pickBtn = btn('选择目录', {
+    size: 'sm',
+    iconName: 'folder-open',
+    onClick: async () => {
+      const dir = await pickDir(outputDir || '', { title: '选择整合包导出目录' })
+      if (!dir) return
+      outputDir = dir
+      pathText.textContent = dir
+      pathText.title = dir
+    }
+  })
+  const defaultBtn = btn('使用默认', {
+    size: 'sm',
+    variant: 'ghost',
+    onClick: () => {
+      outputDir = ''
+      pathText.textContent = '启动器 exports 目录（默认）'
+      pathText.title = ''
+    }
+  })
+
+  const errorLine = h('div', { class: 'lp-launch-error-line', hidden: true })
+  const jobSlot = h('div', { class: 'lp-export-job-slot' })
+  const form = h('div', { class: 'lp-export-form' },
+    h('div', { class: 'lp-field-row' }, h('label', {}, '格式'), formatWrap),
+    h('div', { class: 'lp-field-row' },
+      h('label', {}, '包含内容'),
+      h('label', { class: 'lp-inline-check' }, savesInput, h('span', {}, '包含存档')),
+      h('label', { class: 'lp-inline-check' }, screenshotsInput, h('span', {}, '包含截图'))
+    ),
+    h('div', { class: 'lp-field-row' },
+      h('label', {}, '输出目录'),
+      pathText,
+      pickBtn,
+      defaultBtn
+    ),
+    h('div', { class: 'lp-hint' }, [
+      '默认排除日志、崩溃报告、缓存与账户令牌；未匹配到下载地址的模组会放进 overrides。',
+      inst.external ? '这是外部实例，导出只读取原目录，不会写入或修改它。' : '导出不会修改实例本身。',
+      '关闭窗口不会中断导出，任务会继续在后台完成。'
+    ].join('')),
+    errorLine,
+    jobSlot
+  )
+
+  const startBtn = btn('开始导出', { variant: 'primary', iconName: 'archive', onClick: () => startExport() })
+  function setStartLabel(text, iconName, disabled) {
+    clear(startBtn)
+    if (iconName) startBtn.appendChild(icon(iconName, { size: 14 }))
+    startBtn.appendChild(h('span', {}, text))
+    startBtn.disabled = !!disabled
+  }
+  setStartLabel('开始导出', 'archive', false)
+
+  function showError(text) {
+    errorLine.hidden = false
+    clear(errorLine)
+    errorLine.append(icon('warning', { size: 12 }), h('span', { title: text }, text))
+  }
+  function clearError() {
+    errorLine.hidden = true
+    clear(errorLine)
+  }
+  function stopPoll() {
+    if (pollTimer) clearInterval(pollTimer)
+    pollTimer = null
+  }
+
+  function renderJob(current) {
+    clear(jobSlot)
+    if (!current) return
+    const status = current.status || 'running'
+    const active = EXPORT_ACTIVE.has(status)
+    const done = status === 'done'
+    const failed = status === 'failed'
+    const progressValue = Number(current.progress)
+    const hasProgress = current.indeterminate !== true && current.progress !== null &&
+      current.progress !== undefined && current.progress !== '' && Number.isFinite(progressValue)
+    const bar = progress(hasProgress ? progressValue : null, { className: 'lp-export-bar' })
+    bar.state(done ? 'ok' : failed ? 'bad' : '')
+    const badgeInfo = EXPORT_STATUS[status] || EXPORT_STATUS.running
+    const card = h('div', { class: 'lp-export-job' + (done ? ' is-done' : failed ? ' is-failed' : '') },
+      h('div', { class: 'lp-export-job-head' },
+        icon(done ? 'check-circle' : failed ? 'x-circle' : 'archive', { size: 15 }),
+        h('b', {}, `${EXPORT_FORMATS[current.format] || '整合包'}${current.instanceName ? ' · ' + current.instanceName : ''}`),
+        h('span', { class: 'badge ' + badgeInfo.tone }, badgeInfo.label)
+      ),
+      bar.el,
+      h('div', { class: 'lp-hint' }, [current.phase, current.detail].filter(Boolean).join(' · ') || '准备导出…')
+    )
+    if (done) {
+      const file = current.file || ''
+      const openTarget = current.output || dirOf(file) || file
+      card.appendChild(h('div', { class: 'lp-export-done' },
+        h('span', {}, file ? `已生成 ${baseName(file)}` : '导出完成'),
+        current.size ? h('span', { class: 'mono' }, fmtBytes(current.size)) : null,
+        openTarget ? btn('打开所在文件夹', { size: 'xs', iconName: 'folder-open', onClick: () => openPath(openTarget) }) : null
+      ))
+    }
+    if (failed) {
+      const failText = typeof current.error === 'string'
+        ? current.error
+        : (current.error?.message || current.detail || '导出失败，请查看任务日志。')
+      card.appendChild(h('div', { class: 'lp-launch-error-line' },
+        icon('warning', { size: 12 }),
+        h('span', { title: failText }, failText)
+      ))
+    }
+    if (active) {
+      card.appendChild(h('div', { class: 'lp-row-actions' },
+        btn('取消导出', { size: 'xs', variant: 'danger', onClick: () => cancelExportJob() })
+      ))
+    }
+    if (logLines.length) {
+      card.appendChild(h('pre', { class: 'lp-export-job-log' },
+        logLines.slice(-6).map((line) => `[${line.t || ''}] ${line.text}`).join('\n')))
+    }
+    jobSlot.appendChild(card)
+  }
+
+  async function cancelExportJob() {
+    if (!job?.id || !EXPORT_ACTIVE.has(job.status)) return
+    if (!(await confirmDialog('取消当前导出任务？临时文件会被清理，未完成的输出文件不会保留。', {
+      title: '取消导出', danger: true, okText: '取消导出'
+    }))) return
+    try {
+      await api.cancelExport(job.id)
+      toast('已请求取消导出', 'ok')
+      setStartLabel('取消中…', 'archive', true)
+    } catch (e) {
+      toast('取消导出失败：' + e.message, 'err')
+    }
+  }
+
+  function startPolling(id) {
+    stopPoll()
+    setStartLabel('导出中…', 'archive', true)
+    const tick = async () => {
+      if (closed) return
+      try {
+        const data = await api.exportJob(id, after)
+        if (closed) return
+        const next = data?.job
+          ? { ...data.job, logs: data.logs ?? data.job.logs }
+          : data
+        if (!next || typeof next !== 'object') return
+        job = { ...job, ...next }
+        if (Array.isArray(next.logs) && next.logs.length) {
+          logLines.push(...next.logs)
+          after = Math.max(after, ...next.logs.map((line) => Number(line.seq) || 0))
+        }
+        const seq = Number(next.logSeq)
+        if (Number.isFinite(seq) && seq > after) after = seq
+        if (logLines.length > 60) logLines = logLines.slice(-60)
+        renderJob(job)
+        if (EXPORT_FINISHED.has(job.status)) {
+          stopPoll()
+          if (job.status === 'done') {
+            setStartLabel('再次导出', 'archive', false)
+            toast('整合包导出完成', 'ok')
+          } else if (job.status === 'failed') {
+            setStartLabel('重新导出', 'refresh', false)
+            const reason = typeof job.error === 'string' ? job.error : job.error?.message
+            toast('导出失败：' + (reason || job.detail || '请查看任务日志'), 'err')
+          } else {
+            setStartLabel('开始导出', 'archive', false)
+          }
+        }
+      } catch (e) {
+        stopPoll()
+        setStartLabel('开始导出', 'archive', false)
+        showError('读取导出进度失败：' + e.message)
+      }
+    }
+    tick()
+    pollTimer = setInterval(tick, 1200)
+  }
+
+  async function startExport() {
+    if (startBtn.disabled) return
+    setStartLabel('正在创建任务…', 'archive', true)
+    clearError()
+    clear(jobSlot)
+    logLines = []
+    after = 0
+    try {
+      const payload = { format, includeSaves, includeScreenshots, outputDir, name: inst.name }
+      const result = await api.exportInstance(inst.id, payload)
+      const created = result?.job || result
+      if (!created?.id) throw new Error('服务器没有返回导出任务编号')
+      job = created
+      renderJob(job)
+      startPolling(job.id)
+    } catch (e) {
+      setStartLabel('开始导出', 'archive', false)
+      showError('无法开始导出：' + e.message)
+    }
+  }
+
+  const modal = openModal({
+    title: `导出为整合包 · ${inst.name}`,
+    size: 'lg',
+    body: form,
+    buttons: [
+      { label: '关闭', class: 'btn-ghost' },
+      startBtn
+    ],
+    onClose: () => {
+      closed = true
+      stopPoll()
+    }
+  })
+  return modal
+}
+
 async function deleteInstanceAction(inst) {
   const message = inst.external
     ? `从列表中移除「${inst.name}」？这是外部引用的实例，原 .minecraft 文件不会被删除。`
@@ -1178,6 +2164,7 @@ function openInstanceMenu(e, inst) {
       { label: '打开日志目录', iconName: 'terminal', onClick: () => openPath(inst.paths?.logsDir || '') },
       { separator: true },
       { label: '复制启动命令', iconName: 'copy', onClick: () => showCommandPreview(inst, true) },
+      { label: '导出为整合包', iconName: 'archive', onClick: () => openPackExport(inst) },
       { label: '导出实例配置', iconName: 'save', onClick: () => exportInstance(inst) },
       { label: '复制实例', iconName: 'copy', onClick: () => duplicateInstance(inst) },
       { separator: true },
@@ -1330,20 +2317,18 @@ async function openAccounts() {
   }
 }
 
-async function openLauncherSettings() {
-  try {
-    const mod = await loadModule('settings')
-    mod.openLauncherSettings({
-      ...pageCtx(),
-      onSaved: async (settings) => {
-        if (settings) state.settings = settings
-        await loadBootstrap({ silent: true })
-        if (state.view === 'instance') renderMain()
-      }
-    })
-  } catch (e) {
-    toast('设置面板加载失败：' + e.message, 'err')
+// 设置已并入整页设置：启动器侧栏只负责跳到「启动器」分组。
+async function openLauncherSettings(section = 'launcher-root') {
+  if (typeof helpers.openSettings === 'function') {
+    try {
+      await helpers.openSettings(section)
+      return
+    } catch (e) {
+      toast('打开设置失败：' + e.message, 'err')
+      return
+    }
   }
+  toast('设置页不可用，请刷新后重试', 'err')
 }
 
 /* ------------------------------------------------------------------ */
@@ -1354,14 +2339,37 @@ async function pollStatus(force = false) {
   if (!state.active && !force) return
   if (!force && Date.now() - lastPollAt < 1200) return
   lastPollAt = Date.now()
+  // 选中实例的启动状态单独节流拉取，并与全局状态并行；失败静默。
+  const launchId = state.selectedId
+  const wantLaunch = !!launchId && (force || Date.now() - lastLaunchPollAt >= 1800)
+  let launchTask = null
+  if (wantLaunch) {
+    lastLaunchPollAt = Date.now()
+    launchTask = fetchLaunchState(launchId, { notify: true })
+  }
   try {
     const [data, community] = await Promise.all([
       api.status(),
-      api.communityJobs().catch(() => ({ items: [] }))
+      api.communityJobs().catch(() => ({ items: [] })),
+      launchTask || Promise.resolve(null)
     ])
+    const previousSessions = state.sessions
     state.sessions = data.sessions || []
     state.jobs = data.jobs || []
     state.communityJobs = community.items || []
+    // 旧服务端/启动状态缺失时，用 session.failed 兜底显示持久诊断，主动停止不会触发。
+    const before = previousSessions.find((item) => item.instanceId === state.selectedId)
+    const after = state.sessions.find((item) => item.instanceId === state.selectedId)
+    if (state.selectedId && after?.status === 'failed' && before?.status !== 'failed') {
+      notifyLaunchFailure(state.selectedId, selectedInstance(), normalizeLaunchError({
+        code: after.crash ? 'GAME_CRASHED' : 'GAME_EXITED',
+        message: after.error || '游戏异常退出',
+        crash: after.crash || null
+      }, { message: '游戏异常退出' }))
+      if (state.tab === 'overview') refreshOverviewLaunchPanel()
+    } else if (before?.status === 'failed' && after?.status !== 'failed' && state.tab === 'overview') {
+      refreshOverviewLaunchPanel()
+    }
     updateRunningIndicators()
     updateHeroRuntime()
     detectJobChanges()
@@ -1464,6 +2472,8 @@ async function activate() {
   if (state.view === 'instance') {
     if (state.selectedId) {
       await loadDetail(state.selectedId, { render: false })
+      // 启动状态在后台拉取，hero 重绘后再补进度块，不阻塞页面。
+      if (!launchOf(state.selectedId)) void fetchLaunchState(state.selectedId, { notify: false })
       renderMain()
     } else {
       renderMain()
@@ -1482,6 +2492,7 @@ function deactivate() {
 function destroy() {
   deactivate()
   stopBackgroundStatus()
+  disposeUpdateChecker()
   state.installController?.destroy?.()
   state.javaController?.destroy?.()
   state.downloadsController?.destroy?.()
@@ -1506,7 +2517,11 @@ function commandItems() {
     { group: '启动器', label: '新建实例 / 安装版本', iconName: 'add', run: () => showView('install') },
     { group: '启动器', label: '账户管理', hint: account ? account.name : '未登录', iconName: 'user', run: () => openAccounts() },
     { group: '启动器', label: 'Java 运行时', iconName: 'java', run: () => showView('java') },
-    { group: '启动器', label: '启动器设置', iconName: 'settings', run: () => openLauncherSettings() }
+    ...(state.settings?.needsSetup
+      ? [{ group: '启动器', label: '选择游戏目录', hint: '尚未设置', iconName: 'folder', run: () => openSetup() }]
+      : []),
+    { group: '启动器', label: '设置', hint: '游戏目录 / 下载 / 启动', iconName: 'settings', run: () => openLauncherSettings() },
+    { group: '启动器', label: '检查启动器更新', hint: '从 GitHub Releases 获取新版本', iconName: 'refresh', run: () => { checkForUpdates({ silent: false, force: true }) } }
   ]
   if (inst) {
     items.push(

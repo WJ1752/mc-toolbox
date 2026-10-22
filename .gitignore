@@ -3,6 +3,8 @@ dist/
 data/
 runtime/
 node_modules/
+# 便携游戏目录（首次启动默认创建在启动器旁边）
+.minecraft/
 **/__pycache__/
 *.pyc
 
@@ -14,6 +16,8 @@ host/lib/
 
 # 本机临时工具（含绝对路径）
 dl-mt.mjs
+# 本机文件完整性标签修复脚本（只在当前 Windows 环境使用）
+fix-low-integrity.cmd
 
 # 工作区/记忆（私有）
 .workbuddy/

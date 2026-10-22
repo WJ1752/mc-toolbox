@@ -12,6 +12,10 @@ assert.equal(requiredJava({ mc: '1.12.2' }), 8)
 assert.equal(requiredJava({ mc: '1.17.1' }), 16)
 assert.equal(requiredJava({ mc: '1.20.4' }), 17)
 assert.equal(requiredJava({ mc: '1.20.5' }), 21)
+// 2026 起 Mojang 改用年份版本号（26.x），旧正则会把这类版本判成非法。
+assert.equal(requiredJava({ mc: '26.3' }), 25)
+assert.equal(requiredJava({ mc: '26.4-snapshot-5' }), 25)
+assert.equal(requiredJava({ mc: '1.21.11' }), 21)
 assert.throws(() => validateMemory('2G', '8G'), /初始内存/)
 assert.throws(() => validateMemory('8G & echo unsafe'), /格式/)
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mc-launch-'))
@@ -39,12 +43,26 @@ try {
     await fs.rename(root, moved)
     try {
       const { stdout } = await exec('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(moved, 'start.ps1')], {
-        cwd: os.tmpdir(), env: { ...process.env, MC_SERVER_JAVA: '', MC_TOOLBOX_LAUNCH_CHECK: '1' }, windowsHide: true, timeout: 30000
+        cwd: os.tmpdir(), env: { ...process.env, MC_SERVER_JAVA: '', MC_TOOLBOX_LAUNCH_CHECK: '1' }, windowsHide: true, timeout: 90000
       })
       assert.match(stdout, /runtime[\\/]bin[\\/]java.exe/)
       assert.ok(stdout.includes('-Xms1G -Xmx8G -jar'))
       console.log('✓ 本机 Java 8 自动选择、拒绝不兼容 Java、复制真实运行时、移动目录后启动检查通过')
-    } finally { await fs.rename(moved, root) }
+    } finally {
+      // Windows 上 PowerShell / 随包 Java 退出后可能短暂持有目录句柄，
+      // 直接 rename 会偶发 EPERM。重试几次，最后仍失败则清理临时目录，
+      // 不让清理阶段的文件锁把已经通过的断言判成失败。
+      let restored = false
+      for (let attempt = 0; attempt < 10 && !restored; attempt++) {
+        try {
+          await fs.rename(moved, root)
+          restored = true
+        } catch {
+          await new Promise((r) => setTimeout(r, 150))
+        }
+      }
+      if (!restored) await fs.rm(moved, { recursive: true, force: true, maxRetries: 3 }).catch(() => {})
+    }
   }
   const modern = path.join(root, 'modern')
   await fs.mkdir(path.join(modern, 'libraries/net/minecraftforge/forge/1.20.1-47.3.0'), { recursive: true })

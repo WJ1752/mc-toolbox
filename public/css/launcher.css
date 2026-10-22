@@ -652,6 +652,7 @@
 .lp-crash-hint span { font-size: 10.5px; color: var(--dim); line-height: 1.55; }
 
 .lp-hint { font-size: 10.5px; color: var(--mute); line-height: 1.6; overflow-wrap: anywhere; }
+.lp-hint.bad { color: var(--redstone); }
 .lp-subhead { display: flex; align-items: center; gap: 8px; margin: 2px 0 8px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--mute); }
 .lp-subhead::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 .lp-toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 9px; }
@@ -1254,21 +1255,34 @@
 .lp-account-ms-success { display: flex; align-items: center; gap: 7px; padding: 8px 9px; border: 1px solid color-mix(in srgb, var(--emerald) 30%, var(--line)); border-radius: var(--r-1); background: color-mix(in srgb, var(--emerald) 6%, transparent); color: var(--dim); }
 .lp-account-ms-success > svg { color: var(--emerald); }
 
-/* ---------------- launcher settings modal refinements ---------------- */
-.lp-settings { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+/* ---------------- 设置页：启动器分组的共用小部件 ---------------- */
 .lp-settings-loading { display: flex; align-items: center; gap: 8px; padding: 30px 4px; color: var(--mute); font-size: 11px; }
-.lp-settings-card { margin-bottom: 0; }
-.lp-settings-card .lp-form-grid { gap: 9px 12px; }
-.lp-settings-toggle { padding: 8px 0; }
-.lp-settings-toggle.warn { border-left: 2px solid var(--gold); padding-left: 9px; margin-left: -11px; }
-.lp-settings-toggle-info { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.lp-settings-root-row { align-items: center; gap: 5px; flex-wrap: wrap; }
 .lp-settings-path-row { align-items: center; gap: 5px; flex-wrap: wrap; }
 .lp-settings-path { font-family: var(--font-mono); font-size: 10px; color: var(--dim); overflow-wrap: anywhere; flex: 1 1 240px; min-width: 0; }
 .lp-settings-paths { display: flex; flex-direction: column; gap: 5px; }
-.lp-settings-root-change { margin-top: 2px; }
-.lp-settings-foot-state { font-size: 10px; color: var(--mute); font-family: var(--font-mono); }
-.lp-settings-java-row { align-items: center; gap: 5px; flex-wrap: wrap; }
+
+/* ---------------- 首次启动：选择游戏目录 ---------------- */
+.lp-setup { display: flex; flex-direction: column; gap: 10px; }
+.lp-setup-lead { margin: 0; font-size: 12px; line-height: 1.75; color: var(--text); }
+.lp-setup-path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line));
+  border-radius: var(--r-2);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
+  min-width: 0;
+}
+.lp-setup-path b {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.lp-setup-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
 
 
 /* ---------------- 内容页排版修正 ---------------- */
@@ -1345,3 +1359,57 @@
 .lp-jvm-tools { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .lp-jvm-tools .lp-hint { margin: 0; }
 .lp-switch-row .lp-hint { display: block; margin-top: 2px; }
+
+/* ---------------- 启动器自身更新 ---------------- */
+.lp-update-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 384px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-hi);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--r-1);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+  pointer-events: auto;
+  animation: toast-in var(--t) both;
+}
+.lp-update-badge {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 50%;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.lp-update-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
+.lp-update-copy b { font-size: var(--fs-12); font-weight: 600; }
+.lp-update-copy span { font-size: 10.5px; color: var(--dim); overflow-wrap: anywhere; }
+.lp-update-card-actions { display: flex; align-items: center; gap: 5px; flex: none; }
+.lp-update-card .icobtn { width: 20px; height: 20px; }
+
+.lp-update-dialog { display: flex; flex-direction: column; gap: 10px; font-size: var(--fs-12); }
+.lp-update-versions { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 13px; }
+.lp-update-versions svg { color: var(--dim); }
+.lp-update-from { color: var(--dim); }
+.lp-update-to { color: var(--accent); font-weight: 600; }
+.lp-update-meta { font-size: 10.5px; color: var(--dim); overflow-wrap: anywhere; }
+.lp-update-notes {
+  max-height: 240px;
+  overflow: auto;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.lp-update-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+.lp-update-gap { height: 6px; }
+.lp-update-notes-empty { color: var(--dim); }
+.lp-update-progress .lp-bar { height: 5px; }
+.lp-update-status { font-size: 11px; color: var(--mute); min-height: 15px; }
+.lp-update-error { font-size: 11.5px; color: var(--redstone); white-space: pre-wrap; overflow-wrap: anywhere; }

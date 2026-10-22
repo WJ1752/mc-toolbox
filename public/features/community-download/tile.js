@@ -1,11 +1,13 @@
 // 社区资源下载 — Modrinth / CurseForge 搜索、详情与下载队列
 import { h, clear, fmtBytes, fmtAgo } from '/js/core/dom.js'
+import { jobProgress, jobMetaText, jobBytesText, jobElapsedText, jobStatusLabel } from '/js/core/jobs.js'
 import { api } from '/js/core/api.js'
 import { openModal } from '/js/core/modal.js'
 import { toast } from '/js/core/toast.js'
 import { pickDir } from '/js/core/dirpicker.js'
 import { icon } from '/js/ui/icons.js'
 import { btn, iconBtn, input, select, field, seg, progress, spinner, openPath } from '/js/ui/kit.js'
+import { reconcileJobRows } from '/features/community-download/job-board.js'
 
 const TYPES = [
   ['', '全部'],
@@ -34,7 +36,6 @@ const COMMON_VERSIONS = [
   '1.12.2', '1.7.10'
 ]
 
-const JOB_LABEL = { queued: '排队中', running: '下载中', installing: '安装中', done: '已完成', failed: '失败', cancelled: '已取消' }
 const DOT_CLASS = { done: 'ok', failed: 'bad', cancelled: '', queued: 'warn', running: 'warn', installing: 'warn' }
 const BADGE_CLASS = { done: 'ok', failed: 'bad', cancelled: '', queued: 'warn', running: 'info', installing: 'info' }
 const LINK_LABEL = { site: '官网', wiki: 'Wiki', issues: '问题追踪', discord: 'Discord' }
@@ -53,13 +54,6 @@ function fmtCount(n) {
   if (n >= 1e8) return (n / 1e8).toFixed(1) + ' 亿'
   if (n >= 1e4) return (n / 1e4).toFixed(1) + ' 万'
   return String(n)
-}
-
-function fmtSpeed(bps) {
-  if (!bps || bps <= 0) return ''
-  if (bps >= 1024 * 1024) return (bps / 1024 / 1024).toFixed(1) + ' MB/s'
-  if (bps >= 1024) return (bps / 1024).toFixed(1) + ' KB/s'
-  return Math.round(bps) + ' B/s'
 }
 
 // 去掉项目简介里的 HTML 标签与常见实体（内容一律走 textContent，不注入 HTML）
@@ -282,34 +276,12 @@ function createJobBoard({ limit = 8, height = 228, holder = null, onDispose = nu
   let busy = false
   let disposed = false
 
-  function jobMetaText(j) {
-    const received = fmtBytes(j.received || 0)
-    const total = j.total ? fmtBytes(j.total) : ''
-    if (j.status === 'installing') {
-      const ip = Number(j.installProgress)
-      const pctText = Number.isFinite(ip) ? Math.round(ip) + '%' : ''
-      return ['安装中', pctText, j.installLog || ''].filter(Boolean).join(' · ')
-    }
-    if (j.status === 'queued') return '等待调度'
-    if (j.status === 'done') return total || received
-    if (j.status === 'cancelled') return total ? `${received} / ${total}` : received
-    const parts = [total ? `${received} / ${total}` : received]
-    if (j.total) parts.push(Math.round((j.received / j.total) * 100) + '%')
-    if (j.status === 'running') {
-      if (j.speed > 0) parts.push(fmtSpeed(j.speed))
-      if (j.threads > 1) parts.push(j.threads + ' 线程')
-    }
-    return parts.join(' · ')
-  }
-
   function updateRow(r, j) {
-    const pct = j.total ? Math.max(0, Math.min(100, (j.received / j.total) * 100)) : 0
-    const installing = j.status === 'installing'
-    const instPct = installing && Number.isFinite(Number(j.installProgress)) ? Number(j.installProgress) : null
-    const barPct = installing ? instPct : pct
-    r.bar.set(barPct)
+    const now = Date.now()
+    const pct = jobProgress(j)
+    r.bar.set(pct)
     r.bar.state(j.status === 'done' ? 'ok' : j.status === 'failed' ? 'bad' : '')
-    r.bar.el.title = barPct === null || barPct === undefined ? '进行中' : Math.round(barPct) + '%'
+    r.bar.el.title = pct === null ? '进行中' : Math.round(pct) + '%'
     r.dotEl.className = 'dot ' + (DOT_CLASS[j.status] || '')
     r.name.textContent = j.filename || j.title || '未命名文件'
     r.name.title = j.filename || ''
@@ -317,9 +289,26 @@ function createJobBoard({ limit = 8, height = 228, holder = null, onDispose = nu
     r.dirEl.title = j.dir || ''
     r.dirEl.hidden = !j.dir
     r.badgeEl.className = 'badge ' + (BADGE_CLASS[j.status] || '')
-    r.badgeEl.textContent = JOB_LABEL[j.status] || j.status || '未知'
-    r.metaEl.textContent = jobMetaText(j)
+    r.badgeEl.textContent = jobStatusLabel(j)
+    let meta = jobMetaText(j, now)
+    if (j.status === 'running' && Number(j.threads) > 1) meta += ` · ${Number(j.threads)} 线程`
+    // 安装阶段可能没有下载字节进度，必须单独展示 installProgress 与安装日志。
+    if (j.status === 'installing') {
+      meta = [
+        '安装中',
+        pct === null ? '' : Math.round(pct) + '%',
+        jobBytesText(j),
+        jobElapsedText(j, now)
+      ].filter(Boolean).join(' · ')
+    }
+    r.metaEl.textContent = meta
+    r.metaEl.title = meta
+    const log = j.status === 'installing' ? String(j.installLog || '') : ''
+    r.logEl.textContent = log
+    r.logEl.title = log
+    r.logEl.hidden = !log
     r.errEl.textContent = j.error || ''
+    r.errEl.title = j.error || ''
     r.errEl.hidden = !j.error
     const canCancel = j.status === 'running' || j.status === 'queued'
     r.actBtn.textContent = canCancel ? '取消' : '打开'
@@ -332,10 +321,15 @@ function createJobBoard({ limit = 8, height = 228, holder = null, onDispose = nu
     const dirEl = h('div', { class: 'j-meta mono', hidden: true })
     const bar = progress(0, { className: 'j-bar' })
     const metaEl = h('div', { class: 'j-meta' })
+    const logEl = h('div', {
+      class: 'j-meta',
+      hidden: true,
+      style: { whiteSpace: 'normal', overflowWrap: 'anywhere' }
+    })
     const errEl = h('div', { class: 'j-error', hidden: true })
     const badgeEl = h('span', { class: 'badge' })
     const actBtn = h('button', { class: 'btn btn-xs', type: 'button' })
-    const r = { row: h('div', { class: 'job' }), dotEl, name, dirEl, bar, metaEl, errEl, badgeEl, actBtn, job: j }
+    const r = { row: h('div', { class: 'job' }), dotEl, name, dirEl, bar, metaEl, logEl, errEl, badgeEl, actBtn, job: j }
     actBtn.addEventListener('click', () => {
       const job = r.job
       if (!job) return
@@ -344,36 +338,46 @@ function createJobBoard({ limit = 8, height = 228, holder = null, onDispose = nu
     })
     r.row.append(
       dotEl,
-      h('div', { class: 'j-main' }, name, dirEl, bar.el, metaEl, errEl),
+      h('div', { class: 'j-main' }, name, dirEl, bar.el, metaEl, logEl, errEl),
       h('div', { class: 'j-actions' }, badgeEl, actBtn)
     )
-    rows.set(j.id, r)
     return r
   }
 
   function render(items) {
-    const shown = items.slice(0, limit)
-    if (!shown.length) {
-      for (const r of rows.values()) r.row.remove()
-      rows.clear()
-      clear(list)
-      list.appendChild(emptyEl)
-      return
-    }
-    if (emptyEl.parentNode === list) emptyEl.remove()
-    const ids = new Set()
-    for (const j of shown) {
-      ids.add(j.id)
-      const r = rowFor(j)
-      r.job = j
-      updateRow(r, j)
-      list.appendChild(r.row)
-    }
-    for (const [id, r] of rows) {
-      if (ids.has(id)) continue
+    const keepScroll = list.scrollTop
+    const plan = reconcileJobRows([...rows.keys()], items, limit)
+
+    for (const id of plan.removedIds) {
+      const r = rows.get(id)
+      if (!r) continue
       r.row.remove()
       rows.delete(id)
     }
+
+    if (!plan.items.length) {
+      rows.clear()
+      clear(list)
+      list.appendChild(emptyEl)
+      list.scrollTop = 0
+      return
+    }
+
+    if (emptyEl.parentNode === list) emptyEl.remove()
+
+    // 按服务端顺序复用/插入行；同一任务只对应 rows 里的一个节点。
+    plan.items.forEach((j, index) => {
+      let r = rows.get(j.id)
+      if (!r) {
+        r = rowFor(j)
+        rows.set(j.id, r)
+      }
+      r.job = j
+      updateRow(r, j)
+      const current = list.children[index]
+      if (current !== r.row) list.insertBefore(r.row, current || null)
+    })
+    list.scrollTop = keepScroll
   }
 
   async function refresh() {

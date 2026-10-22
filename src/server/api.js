@@ -14,6 +14,7 @@ import * as serverManager from './server-manager.js'
 import { resolveServerJava, inspectServer } from './server-inspection.js'
 import { resolveJava, requiredJava, discoverJavaRuntimes } from './server-launch.js'
 import * as community from './community.js'
+import { validateGameVersion } from './mc-versions.js'
 import * as servercore from './servercore.js'
 import * as saveeditor from './saveeditor.js'
 import * as dirsMgmt from './dirs.js'
@@ -413,18 +414,29 @@ const cfKey = () => (deepMerge(DEFAULT_SETTINGS, store.get('settings', DEFAULT_S
 
 on('GET', '/api/community/search', async (_req, _p, q) => {
   const s = deepMerge(DEFAULT_SETTINGS, store.get('settings', DEFAULT_SETTINGS))
+  // 版本校验：非法/未知版本（例如外部实例的目录名 M1182rebirth）不硬过滤，
+  // 回退为全部版本并返回中文提示，避免用户看到「0 个结果」却不知道为什么。
+  const check = await validateGameVersion(
+    q.gameVersion === 'all' ? 'all' : (q.gameVersion || s.community.defaultGameVersion || '')
+  )
   const args = {
     query: q.query || '',
     type: q.type || '',
-    gameVersion: q.gameVersion === 'all' ? '' : (q.gameVersion || s.community.defaultGameVersion || ''),
+    gameVersion: check.applied,
     loader: q.loader === 'none' ? '' : (q.loader || s.community.defaultLoader || ''),
     limit: Number(q.limit) || s.community.pageSize || 20,
     offset: Number(q.offset) || 0,
     sort: q.sort || 'relevance'
   }
-  return q.source === 'curseforge'
-    ? community.curseforgeSearch({ ...args, key: cfKey() })
-    : community.modrinthSearch(args)
+  const result = q.source === 'curseforge'
+    ? await community.curseforgeSearch({ ...args, key: cfKey() })
+    : await community.modrinthSearch(args)
+  return {
+    ...result,
+    gameVersionRequested: check.requested,
+    gameVersionApplied: check.applied,
+    gameVersionNotice: check.notice
+  }
 })
 
 on('GET', '/api/community/project', async (_req, _p, q) => {
@@ -434,13 +446,25 @@ on('GET', '/api/community/project', async (_req, _p, q) => {
 
 on('GET', '/api/community/versions', async (_req, _p, q) => {
   if (!q.id) return { error: '缺少项目 ID' }
+  const check = await validateGameVersion(q.gameVersion === 'all' ? 'all' : (q.gameVersion || ''))
   const opt = {
-    gameVersion: q.gameVersion === 'all' ? '' : (q.gameVersion || ''),
+    gameVersion: check.applied,
     loader: q.loader === 'none' ? '' : (q.loader || '')
   }
-  return q.source === 'curseforge'
-    ? community.curseforgeVersions(q.id, { ...opt, key: cfKey() })
-    : community.modrinthVersions(q.id, opt)
+  const items = q.source === 'curseforge'
+    ? await community.curseforgeVersions(q.id, { ...opt, key: cfKey() })
+    : await community.modrinthVersions(q.id, opt)
+  // withMeta=1 返回对象；不传时保持旧版裸数组响应，兼容已有调用方。
+  if (q.withMeta === '1' || q.withMeta === 'true') {
+    return {
+      items,
+      gameVersionRequested: check.requested,
+      gameVersionApplied: check.applied,
+      gameVersionNotice: check.notice,
+      notice: check.notice
+    }
+  }
+  return items
 })
 
 on('POST', '/api/community/download', async (req) => {
@@ -511,6 +535,7 @@ on('POST', '/api/servercore/download', async (req) => {
   const startScript = { runtime: { mc: body.mc, loader: body.loader, loaderVersion: body.loaderVersion }, info, javaPath: java?.path || body.javaPath || '', mem: s.servercore?.memory || '2G' }
   const job = await community.startDownload({
     url: info.url,
+    mirrors: info.mirrors,
     filename: info.filename,
     dir: body.dir || s.community.downloadDir,
     title: `${body.loader} ${body.mc}`,
@@ -997,7 +1022,18 @@ export async function requestHandler(req, res) {
       }
       sendJson(res, 404, { error: '接口不存在: ' + pathname })
     } catch (e) {
-      sendJson(res, 500, { error: e.message })
+      // 结构化错误：前端 core/api.js 会把 code/detail/missing/paths/actions
+      // 附加到 Error 上，用于启动失败面板的「详细原因 / 缺失文件 / 操作按钮」。
+      sendJson(res, 500, {
+        error: e.message,
+        code: e.code || '',
+        detail: e.detail || '',
+        missing: Array.isArray(e.missing) ? e.missing : [],
+        missingCount: Number(e.missingCount) || 0,
+        paths: e.paths || null,
+        actions: Array.isArray(e.actions) ? e.actions : [],
+        crash: e.crash || null
+      })
     }
     return
   }

@@ -76,6 +76,7 @@ export async function modrinthSearch({ query = '', type, gameVersion, loader, li
 }
 
 function normalizeModrinthHit(h) {
+  const categories = Array.isArray(h.categories) ? h.categories : []
   return {
     source: 'modrinth',
     id: h.project_id || h.slug,
@@ -88,7 +89,9 @@ function normalizeModrinthHit(h) {
     downloads: h.downloads ?? 0,
     follows: h.follows ?? 0,
     updated: h.date_modified || h.date_created,
-    categories: h.categories || [],
+    categories,
+    gameVersions: Array.isArray(h.versions) ? h.versions : [],
+    loaders: categories.filter((c) => ['fabric', 'forge', 'neoforge', 'quilt'].includes(String(c).toLowerCase())),
     url: `https://modrinth.com/${h.project_type}/${h.slug}`
   }
 }
@@ -196,7 +199,32 @@ export async function curseforgeSearch({ query = '', type, gameVersion, loader, 
   }
 }
 
+const CF_MOD_LOADER_NAMES = { 1: 'forge', 2: 'cauldron', 3: 'liteloader', 4: 'fabric', 5: 'quilt', 6: 'neoforge' }
+const CF_LOADER_NAMES = new Set(['forge', 'fabric', 'quilt', 'neoforge', 'liteloader', 'cauldron'])
+
+function cfLoaderName(value) {
+  if (typeof value === 'string') {
+    const text = value.trim().toLowerCase()
+    if (!text) return ''
+    if (/^\d+$/.test(text)) return CF_MOD_LOADER_NAMES[Number(text)] || ''
+    return CF_LOADER_NAMES.has(text) ? text : ''
+  }
+  return CF_MOD_LOADER_NAMES[Number(value)] || ''
+}
+
+function cfLoadersFromGameVersions(values) {
+  const out = []
+  for (const value of Array.isArray(values) ? values : []) {
+    const name = String(value || '').toLowerCase()
+    if (CF_LOADER_NAMES.has(name) && !out.includes(name)) out.push(name)
+  }
+  return out
+}
+
 function normalizeCfHit(m) {
+  const indexes = Array.isArray(m.latestFilesIndexes) ? m.latestFilesIndexes : []
+  const gameVersions = [...new Set(indexes.map((f) => f?.gameVersion).filter(Boolean))]
+  const loaders = [...new Set(indexes.map((f) => cfLoaderName(f?.modLoader)).filter(Boolean))]
   return {
     source: 'curseforge',
     id: String(m.id),
@@ -209,6 +237,8 @@ function normalizeCfHit(m) {
     follows: m.thumbsUpCount ?? 0,
     updated: m.dateModified,
     categories: (m.categories || []).map((c) => c.slug || c.name),
+    gameVersions,
+    loaders,
     url: m.links?.websiteUrl || `https://www.curseforge.com/minecraft/mc-mods/${m.slug}`
   }
 }
@@ -252,7 +282,7 @@ export async function curseforgeVersions(id, { gameVersion, loader, key, pageSiz
     date: f.fileDate,
     downloads: f.downloadCount ?? 0,
     gameVersions: f.gameVersions || [],
-    loaders: [],
+    loaders: cfLoadersFromGameVersions(f.gameVersions),
     changelog: '',
     files: f.downloadUrl ? [{ name: f.fileName, url: f.downloadUrl, size: f.fileLength || 0, primary: true }] : []
   }))
@@ -299,9 +329,40 @@ function safeName(name) {
 const jobs = new Map()
 let jobSeq = 1
 
+function clampProgress(value) {
+  return Math.max(0, Math.min(100, Math.round(value * 100) / 100))
+}
+
+/**
+ * 统一的 0–100 进度（或 null = 未知）。
+ * 优先：完成 100 → 安装百分比 → 已下载字节比例。
+ */
+function jobProgress(j) {
+  if (!j) return null
+  if (j.status === 'done') return 100
+  if (j.status === 'installing') {
+    if (j.installProgress === null || j.installProgress === undefined) return null
+    const install = Number(j.installProgress)
+    return Number.isFinite(install) ? clampProgress(install) : null
+  }
+  const total = Number(j.total)
+  if (!Number.isFinite(total) || total <= 0) return null
+  return clampProgress((Math.max(0, Number(j.received) || 0) / total) * 100)
+}
+
+/** 对外的任务快照：附带派生字段，不泄漏 controller / completion。 */
 function publicJob(j) {
   const { controller, completion, ...rest } = j
-  return rest
+  return { ...rest, progress: jobProgress(j) }
+}
+
+/** 统一写终态：finishedAt 只写一次，终态不再保留速度。 */
+function markFinished(job, status, error) {
+  job.status = status
+  if (error !== undefined && error !== null) job.error = String(error)
+  if (!job.finishedAt) job.finishedAt = Date.now()
+  job.updatedAt = job.finishedAt
+  job.speed = 0
 }
 
 export function listJobs() {
@@ -324,8 +385,8 @@ function pump() {
     if (j.status !== 'queued') continue
     running++
     j.completion = runDownload(j).catch((e) => {
-      j.status = 'failed'
-      j.error = e.message
+      // runDownload 已处理任务内错误；这里只兜底，且不能覆盖已取消的终态。
+      if (j.status !== 'cancelled') markFinished(j, 'failed', e?.message || String(e))
       pump()
     }).finally(() => {
       pump()
@@ -333,7 +394,7 @@ function pump() {
   }
 }
 
-export async function startDownload({ url, dir, filename, title, meta, postCommand, startScript, extraFiles, preserveName, exactDir = false }) {
+export async function startDownload({ url, mirrors, dir, filename, title, meta, postCommand, startScript, extraFiles, preserveName, exactDir = false }) {
   if (!url) throw new Error('缺少下载地址')
   const baseDir = dir && dir.trim() ? dir.trim() : cfg.downloadDir || path.join(os.homedir(), 'Downloads')
   let target = baseDir
@@ -363,6 +424,8 @@ export async function startDownload({ url, dir, filename, title, meta, postComma
     dir: target,
     path: dest,
     url,
+    // 备用下载源（如 BMCLAPI 镜像）：主地址不可达时按顺序回退
+    mirrors: (Array.isArray(mirrors) ? mirrors : []).filter((item) => typeof item === 'string' && item),
     status: 'queued',
     received: 0,
     total: 0,
@@ -371,7 +434,11 @@ export async function startDownload({ url, dir, filename, title, meta, postComma
     installProgress: null,
     installLog: '',
     error: null,
-    startedAt: Date.now(),
+    // createdAt = 排队时刻；startedAt 由 runDownload 真正开跑时写入，
+    // 排队等待不能算进「已进行」。
+    createdAt: Date.now(),
+    startedAt: 0,
+    updatedAt: Date.now(),
     finishedAt: null,
     meta: meta || {},
     postCommand: resolvedPost,
@@ -425,6 +492,10 @@ async function downloadToFile(url, dest, job, signal) {
       job.threads = threads
       job.total += len
       const fh = await fsp.open(tmp, 'w')
+      // 任一分片失败时必须立刻中止其他分片，并等它们全部退出后再回滚字节；
+      // 否则残留的 reader 会在 runDownload 回滚之后继续累加 received。
+      const partController = new AbortController()
+      const combined = signal ? AbortSignal.any([signal, partController.signal]) : partController.signal
       try {
         const chunk = Math.ceil(len / threads)
         const parts = []
@@ -434,20 +505,29 @@ async function downloadToFile(url, dest, job, signal) {
           if (start > end) continue
           parts.push({ start, end })
         }
-        await Promise.all(parts.map(async ({ start, end }) => {
-          const res = await httpFetch(url, { headers: { 'User-Agent': UA, Range: `bytes=${start}-${end}` }, signal, redirect: 'follow' })
-          if (!res.ok && res.status !== 206) throw new Error(`分段下载失败 HTTP ${res.status}`)
-          const reader = res.body.getReader()
-          let pos = start
-          for (;;) {
-            const { done, value } = await reader.read()
-            if (done) break
-            await limiter.take(value.length)
-            await fh.write(value, 0, value.length, pos)
-            pos += value.length
-            job.received += value.length
+        const settled = await Promise.allSettled(parts.map(async ({ start, end }) => {
+          try {
+            const res = await httpFetch(url, { headers: { 'User-Agent': UA, Range: `bytes=${start}-${end}` }, signal: combined, redirect: 'follow' })
+            if (!res.ok && res.status !== 206) throw new Error(`分段下载失败 HTTP ${res.status}`)
+            const reader = res.body.getReader()
+            let pos = start
+            for (;;) {
+              const { done, value } = await reader.read()
+              if (done) break
+              if (combined.aborted) throw combined.reason || new Error('已取消')
+              await limiter.take(value.length)
+              await fh.write(value, 0, value.length, pos)
+              pos += value.length
+              job.received += value.length
+              job.updatedAt = Date.now()
+            }
+          } catch (e) {
+            partController.abort(e)
+            throw e
           }
         }))
+        const failed = settled.find((item) => item.status === 'rejected')
+        if (failed) throw failed.reason
       } finally {
         await fh.close()
       }
@@ -469,12 +549,14 @@ async function downloadToFile(url, dest, job, signal) {
             await fh.write(value, 0, value.length, pos)
             pos += value.length
             job.received += value.length
+            job.updatedAt = Date.now()
           }
         } else {
           const buf = Buffer.from(await res.arrayBuffer())
           await limiter.take(buf.length)
           await fh.write(buf)
           job.received += buf.length
+          job.updatedAt = Date.now()
         }
       } finally {
         await fh.close()
@@ -489,7 +571,9 @@ async function downloadToFile(url, dest, job, signal) {
 
 async function runDownload(job) {
   job.status = 'running'
+  // 只有真正开始下载才写 startedAt；排队时间用 createdAt 单独展示。
   job.startedAt = Date.now()
+  job.updatedAt = job.startedAt
   job.received = 0
   job.total = 0
   const signal = job.controller.signal
@@ -498,6 +582,11 @@ async function runDownload(job) {
   let lastBytes = 0
   let lastAt = Date.now()
   const tick = setInterval(() => {
+    // 终态（成功 / 失败 / 取消）之后不再更新速度，避免取消后又被定时器写回非 0。
+    if (job.finishedAt || job.status === 'cancelled') {
+      job.speed = 0
+      return
+    }
     const now = Date.now()
     const dt = Math.max(0.2, (now - lastAt) / 1000)
     job.speed = (job.received - lastBytes) / dt
@@ -507,8 +596,29 @@ async function runDownload(job) {
   const stopTick = () => clearInterval(tick)
 
   try {
-    // 主文件
-    await downloadToFile(job.url, job.path, job, signal)
+    // 主文件：镜像优先（Forge / NeoForge 的 maven 在国内常被墙），失败再回退官方地址
+    const mainUrls = [...new Set([...(job.mirrors || []), job.url].filter(Boolean))]
+    let mainError = null
+    for (const candidate of mainUrls) {
+      if (job.status === 'cancelled' || signal.aborted) break
+      // 每次镜像尝试前快照字节：失败尝试（404 / 超时 / 半截连接）不能把
+      // 已读字节累计进 job.received/total，否则总进度会虚高。
+      const bytesBefore = { received: job.received, total: job.total }
+      try {
+        await downloadToFile(candidate, job.path, job, signal)
+        mainError = null
+        break
+      } catch (e) {
+        job.received = bytesBefore.received
+        job.total = bytesBefore.total
+        mainError = e
+        await fsp.unlink(job.path + '.part').catch(() => {})
+        if (job.status === 'cancelled' || signal.aborted) throw e
+        job.installLog = `主地址不可用，尝试备用源：${e.message.slice(0, 80)}`
+      }
+    }
+    if (mainError) throw mainError
+    job.installLog = ''
     if (job.status === 'cancelled') {
       await fsp.unlink(job.path).catch(() => {})
       return
@@ -525,15 +635,13 @@ async function runDownload(job) {
     if (job.postCommand) {
       await runPostCommand(job)
     } else {
-      job.status = 'done'
-      job.finishedAt = Date.now()
+      markFinished(job, 'done')
     }
     // 无论是否有安装步骤，成功后统一生成启动脚本（Paper/Vanilla 直接 jar 也要）
     if (job.status === 'done' && job.startScript) await writeStartScripts(job)
   } catch (e) {
     if (job.status === 'cancelled') return
-    job.status = 'failed'
-    job.error = e.message
+    markFinished(job, 'failed', e.message)
     await fsp.unlink(job.path + '.part').catch(() => {})
   } finally {
     stopTick()
@@ -556,6 +664,7 @@ function nextBreak(s) {
 function parseInstallerLine(job, raw) {
   const line = raw.replace(ANSI_RE, '').replace(/\s+/g, ' ').trim()
   if (!line) return
+  job.updatedAt = Date.now()
   job.installLog = line.length > 140 ? line.slice(-140) : line
   // 各种进度写法：45%、[#####-----] 45%、Downloading ... 45.2%
   const pct = line.match(/(\d{1,3}(?:\.\d+)?)\s*%/g)
@@ -606,13 +715,13 @@ async function runPostCommand(job) {
       })
     })
     if (job.controller.signal.aborted) return
-    job.status = 'done'
     job.installProgress = 100
-    job.finishedAt = Date.now()
+    markFinished(job, 'done')
   } catch (e) {
     if (job.controller.signal.aborted) return
-    job.status = 'failed'
-    job.error = e.message
+    // 失败时保留最后一次解析到的安装百分比（没有则为 null），并写 finishedAt。
+    if (job.installProgress === undefined) job.installProgress = null
+    markFinished(job, 'failed', e.message)
   }
 }
 
@@ -645,7 +754,8 @@ export function cancelJob(id) {
   const job = jobs.get(id)
   if (!job) return false
   if (job.status === 'done' || job.status === 'failed') return false
-  job.status = 'cancelled'
+  // 取消是终态：立即写 finishedAt 并清零速度，界面不再显示「已进行」。
+  markFinished(job, 'cancelled')
   job.controller.abort()
   pump()
   return true

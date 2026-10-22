@@ -50,6 +50,8 @@ export const launcherApi = {
 
   launch: (id, accountId = '') => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/launch`, { accountId }),
   stop: (id, force = true) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/stop`, { force }),
+  cancelLaunch: (id) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/launch/cancel`, {}),
+  launchState: (id) => api.get(`/api/launcher/instances/${encodeURIComponent(id)}/status`),
   preview: (id) => api.get(`/api/launcher/instances/${encodeURIComponent(id)}/preview`),
   instanceStatus: (id) => api.get(`/api/launcher/instances/${encodeURIComponent(id)}/status`),
   liveLog: (id, after = 0) => api.get(`/api/launcher/instances/${encodeURIComponent(id)}/log?after=${Number(after) || 0}`),
@@ -72,7 +74,8 @@ export const launcherApi = {
   loaderVersions: (loader, mc) => api.get(`/api/launcher/loaders/${encodeURIComponent(loader)}/versions${qs({ mc })}`),
   install: (payload) => api.post('/api/launcher/install', payload),
   jobs: () => api.get('/api/launcher/jobs'),
-  job: (id, after = 0) => api.get(`/api/launcher/jobs/${encodeURIComponent(id)}${qs({ after })}`),
+  // 任务对象本身带 error 字段（失败原因），不能让它触发通用错误处理。
+  job: (id, after = 0) => api.get(`/api/launcher/jobs/${encodeURIComponent(id)}${qs({ after })}`, { allowErrorField: true }),
   cancelJob: (id) => api.post(`/api/launcher/jobs/${encodeURIComponent(id)}/cancel`),
   clearJobs: () => api.post('/api/launcher/jobs/clear'),
   communityJobs: () => api.get('/api/community/jobs'),
@@ -80,7 +83,7 @@ export const launcherApi = {
   java: (refresh = false, mc = '') => api.get('/api/launcher/java' + qs({ refresh: refresh ? 1 : '', mc })),
   requiredJava: (mc) => api.get('/api/launcher/java/required' + qs({ mc })),
   downloadJava: (major) => api.post('/api/java/download', { major }),
-  javaJob: (id) => api.get(`/api/java/download/${encodeURIComponent(id)}`),
+  javaJob: (id) => api.get(`/api/java/download/${encodeURIComponent(id)}`, { allowErrorField: true }),
   cancelJavaJob: (id) => api.post(`/api/java/download/${encodeURIComponent(id)}/cancel`),
 
   accounts: () => api.get('/api/launcher/accounts'),
@@ -97,10 +100,29 @@ export const launcherApi = {
 
   packInspect: (source) => api.post('/api/launcher/packs/inspect', { source }),
   packInstall: (payload) => api.post('/api/launcher/packs/install', payload),
+  packOnlineInstall: (payload) => api.post('/api/launcher/packs/install-online', payload),
   packUpload: (file, { onProgress, name = '', maxMemory = 0 } = {}) =>
     upload(`/api/launcher/packs/upload${qs({ name, maxMemory })}`, file, { onProgress }),
 
-  news: (refresh = false) => api.get('/api/launcher/news' + (refresh ? '?refresh=1' : ''))
+  exportInstance: (id, payload = {}) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/export`, payload),
+  exports: () => api.get('/api/launcher/exports'),
+  exportJob: (id, after = 0) => api.get(`/api/launcher/exports/${encodeURIComponent(id)}${qs({ after })}`, { allowErrorField: true }),
+  cancelExport: (id) => api.post(`/api/launcher/exports/${encodeURIComponent(id)}/cancel`, {}),
+
+  communitySearch: (params = {}) => api.get('/api/community/search' + qs(params)),
+  communityVersions: (params = {}) => api.get('/api/community/versions' + qs({ ...params, withMeta: 1 })),
+
+  news: (refresh = false) => api.get('/api/launcher/news' + (refresh ? '?refresh=1' : '')),
+
+  // 启动器自身更新（GitHub Releases）
+  updateCheck: (force = false) => api.get('/api/launcher/update/check' + (force ? '?force=1' : '')),
+  updateState: () => api.get('/api/launcher/update/state'),
+  updateDownload: () => api.post('/api/launcher/update/download'),
+  updateApply: () => api.post('/api/launcher/update/apply'),
+  updateSkip: (version) => api.post('/api/launcher/update/skip', { version }),
+  updateReset: () => api.post('/api/launcher/update/reset'),
+  updateConfig: () => api.get('/api/launcher/update/config'),
+  saveUpdateConfig: (patch) => api.put('/api/launcher/update/config', patch)
 }
 
 export { qs }

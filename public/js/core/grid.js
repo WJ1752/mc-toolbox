@@ -1,4 +1,13 @@
-// Masonry tile grid — pointer dragging, FLIP reflow, no dependencies.
+// Tile grid — pointer dragging, manual columns or masonry, FLIP reflow, no deps.
+//
+// Three layouts share one drag machinery:
+//   * `masonry: true, adaptive: false` (default for the workbench) — manual
+//     columns. Every tile carries `data-col` (0-based) and stacks vertically
+//     inside its own column in DOM order. Columns never influence each other,
+//     so dragging a tile only inserts the placeholder into the target column;
+//   * `masonry: true, adaptive: true` — the legacy shortest-column masonry;
+//   * `masonry: false` — flow layout (e.g. latency-monitor cards): the browser
+//     lays the children out, grid.js only moves the placeholder.
 //
 // Dragging rules (why it is written this way):
 //   * the dragged tile is taken out of the flow (position: fixed) and moved with
@@ -6,12 +15,13 @@
 //     a full layout on every pointermove and made the tile trail the cursor;
 //   * pointermove is coalesced into one rAF tick, so a 1000 Hz mouse cannot
 //     queue more work than the compositor can show;
-//   * the placeholder target is computed from *predicted* masonry slots and the
+//   * the placeholder target is computed from *predicted* slots and the
 //     pointer, not from the live tile rectangles: hit-testing rectangles that
 //     are still gliding (FLIP) made the "nearest" tile change under a still
 //     pointer, so the placeholder kept bouncing between two slots;
-//   * the current slot wins ties by a small margin, so the pointer has to enter
-//     the next slot clearly before the placeholder moves again;
+//   * in manual mode the target column comes from the pointer x and the insert
+//     position from the pointer y vs. the tile midlines of that column only —
+//     the other columns are never re-ordered or re-positioned;
 //   * every reflow is animated with a FLIP transform (compositor only), so the
 //     surrounding tiles glide instead of snapping.
 const DRAG_THRESHOLD = 5
@@ -24,6 +34,124 @@ const FLIP_MS = 180
 // absorbs pointer jitter at a swap boundary.
 const SWAP_BIAS = 32
 
+/* ------------------------------------------------------------------ */
+/* pure layout helpers (no DOM — covered by tests/tile-layout.test.mjs) */
+/* ------------------------------------------------------------------ */
+
+function wholeNumber(value, fallback = 0) {
+  const n = Number(value)
+  return Number.isFinite(n) ? Math.trunc(n) : fallback
+}
+
+function columnCount(columns) {
+  return Math.max(1, Math.floor(Number(columns)) || 1)
+}
+
+/** Clamp a requested column (0-based) into the effective column range. */
+export function clampColumn(col, columns) {
+  const count = columnCount(columns)
+  return Math.min(Math.max(0, wholeNumber(col)), count - 1)
+}
+
+/**
+ * Resolve a tile's persisted column for the first paint.
+ * - valid saved value wins (including values beyond the current viewport);
+ * - missing/invalid values are distributed by layout index so old settings
+ *   without `col` keep roughly the same visual arrangement as before.
+ */
+export function resolveTileColumn(saved, index = 0, maxColumns = 1) {
+  if (saved !== null && saved !== undefined && saved !== '') {
+    const value = Number(saved)
+    if (Number.isFinite(value) && value >= 0) return Math.trunc(value)
+  }
+  const columns = Math.max(1, Math.trunc(Number(maxColumns)) || 1)
+  const pos = Math.max(0, Math.trunc(Number(index)) || 0)
+  return pos % columns
+}
+
+/**
+ * 手动列布局：每个磁贴按 `col` 落在自己的列里，列内按数组顺序（即 DOM 顺序）
+ * 垂直堆叠，列与列互不影响；容器高度取最高列。
+ *
+ * @param {Array<{id?:string, col?:number, height?:number}>} items
+ * @param {{columns?:number, colWidth?:number, gap?:number}} metrics
+ * @returns {{columns:number, colWidth:number, gap:number,
+ *            positions:Array<{id:any, col:number, requestedCol:number,
+ *                             left:number, top:number, width:number, height:number}>,
+ *            height:number, heights:number[]}}
+ */
+export function manualLayout(items, { columns = 1, colWidth = 0, gap = 0 } = {}) {
+  const count = columnCount(columns)
+  const width = Math.max(0, Number(colWidth) || 0)
+  const spacing = Math.max(0, Number(gap) || 0)
+  const heights = new Array(count).fill(0)
+  const positions = []
+  for (const item of Array.isArray(items) ? items : []) {
+    // 保存的 col 可能超出当前有效列数：只影响显示（clamp 到最后一列），
+    // 不写回/不修改输入值，窗口变宽后磁贴会回到原来的列。
+    const requested = Math.max(0, wholeNumber(item?.col))
+    const col = Math.min(requested, count - 1)
+    const height = Math.max(0, Number(item?.height) || 0)
+    const top = heights[col]
+    positions.push({
+      id: item?.id,
+      col,
+      requestedCol: requested,
+      left: col * (width + spacing),
+      top,
+      width,
+      height
+    })
+    heights[col] = top + height + spacing
+  }
+  const tallest = heights.length ? Math.max(...heights) : 0
+  return {
+    columns: count,
+    colWidth: width,
+    gap: spacing,
+    positions,
+    heights,
+    height: positions.length ? Math.max(0, tallest - spacing) : 0
+  }
+}
+
+/**
+ * 根据指针 x（容器内坐标）计算目标列。
+ * 列间距归左侧列所有：只有越过下一个列起点才会进入下一列。
+ */
+export function manualTargetColumn(x, { left = 0, colWidth = 0, gap = 0, columns = 1 } = {}) {
+  const count = columnCount(columns)
+  const width = Number(colWidth)
+  if (!Number.isFinite(width) || width <= 0) return 0
+  const spacing = Math.max(0, Number(gap) || 0)
+  const local = Number(x) - (Number(left) || 0)
+  if (!Number.isFinite(local)) return 0
+  return clampColumn(Math.floor(local / (width + spacing)), count)
+}
+
+/**
+ * 根据指针 y（容器内坐标）与目标列内磁贴的中线计算插入位置。
+ * 指针在某磁贴中线之上时插到它前面；越过所有中线时追加到列尾。
+ *
+ * @param {Array<{top?:number, height?:number}>} items 目标列的磁贴（DOM 顺序）
+ * @param {number} centerY
+ */
+export function manualInsertIndex(items, centerY) {
+  const list = Array.isArray(items) ? items : []
+  const y = Number(centerY)
+  if (!Number.isFinite(y)) return list.length
+  for (let i = 0; i < list.length; i++) {
+    const top = Number(list[i]?.top) || 0
+    const height = Math.max(0, Number(list[i]?.height) || 0)
+    if (y < top + height / 2) return i
+  }
+  return list.length
+}
+
+/* ------------------------------------------------------------------ */
+/* grid                                                                */
+/* ------------------------------------------------------------------ */
+
 export class TileGrid {
   constructor(container, {
     onChange,
@@ -32,6 +160,7 @@ export class TileGrid {
     handleSelector = '.tile-head',
     placeholderClass = 'tile-placeholder',
     masonry = false,
+    adaptive = false,
     minColumnWidth = MIN_COLUMN_WIDTH,
     onColumnsChange
   } = {}) {
@@ -42,7 +171,10 @@ export class TileGrid {
     this.itemSelector = itemSelector
     this.handleSelector = handleSelector
     this.placeholderClass = placeholderClass
+    // `masonry` selects the absolute-positioned grid; `adaptive` picks the
+    // shortest-column algorithm inside it. Manual column layout is the default.
     this.masonry = !!masonry
+    this.adaptive = !!adaptive
     this.minColumnWidth = minColumnWidth
     this.layoutRaf = null
     this._pendingAnimate = false
@@ -58,13 +190,18 @@ export class TileGrid {
     if (this.masonry) {
       container.classList.add('masonry-grid')
       if (typeof ResizeObserver === 'function') {
-        // The container observer only cares about width: its own height is set
-        // by _layoutMasonry, and reacting to that would loop.
-        this.resizeObserver = new ResizeObserver(() => {
+        // The container's own height is written by the layout pass, so height
+        // changes on the container itself must be ignored (otherwise loop).
+        // Tile height changes (async content, collapse, data arriving) do need
+        // a reflow even when the container width did not change.
+        this.resizeObserver = new ResizeObserver((entries) => {
           const width = this.container.clientWidth
-          if (width === this._lastWidth) return
-          this._lastWidth = width
-          this._scheduleLayout()
+          if (width !== this._lastWidth) {
+            this._lastWidth = width
+            this._scheduleLayout()
+            return
+          }
+          if (entries.some((entry) => entry.target !== this.container)) this._scheduleLayout()
         })
         this.resizeObserver.observe(container)
       }
@@ -73,8 +210,23 @@ export class TileGrid {
     container.addEventListener('pointerdown', this._onDown)
   }
 
+  /** 'flow' | 'manual' | 'adaptive' */
+  get mode() {
+    if (!this.masonry) return 'flow'
+    return this.adaptive ? 'adaptive' : 'manual'
+  }
+
   setAnimations(v) {
     this.animations = !!v
+  }
+
+  // Switching modes only changes the arrangement: `data-col` is kept, the
+  // layout order and the mounted tiles stay exactly as they are.
+  setAdaptive(v) {
+    const next = !!v
+    if (next === this.adaptive) return
+    this.adaptive = next
+    this._scheduleLayout(true)
   }
 
   mount(el, beforeId) {
@@ -146,8 +298,14 @@ export class TileGrid {
       const animateNext = this._pendingAnimate
       this.layoutRaf = null
       this._pendingAnimate = false
-      this._layoutMasonry({ animate: animateNext })
+      this._layout({ animate: animateNext })
     })
+  }
+
+  _layout(options = {}) {
+    if (!this.masonry) return
+    if (this.adaptive) this._layoutMasonry(options)
+    else this._layoutManual(options)
   }
 
   // Effective column count: the user picks a maximum, the width decides what
@@ -163,12 +321,27 @@ export class TileGrid {
     return { columns, colWidth, gap, width, preferred }
   }
 
+  _noteColumns(columns, preferred) {
+    if (columns === this.columns) return
+    this.columns = columns
+    this.onColumnsChange?.(columns, preferred)
+  }
+
   _layoutChildren() {
-    const dragged = this.drag?.el || this._settlingEl
     return Array.from(this.container.children).filter((el) => {
-      if (el === dragged) return false
+      // Exclude both the active drag and a tile that is still gliding into its
+      // slot: otherwise starting a second drag inside the FLIP window counted
+      // the settling tile twice (its placeholder is still in the DOM).
+      if (el === this.drag?.el || el === this._settlingEl) return false
       return el.matches?.(this.itemSelector) || el.classList?.contains(this.placeholderClass)
     })
+  }
+
+  // The requested column of a tile (0-based). Values outside the effective
+  // range are clamped by the layout, never rewritten here.
+  _colOf(el) {
+    const n = Number.parseInt(el?.dataset?.col, 10)
+    return Number.isFinite(n) ? Math.max(0, n) : 0
   }
 
   _clearFlip() {
@@ -183,6 +356,43 @@ export class TileGrid {
     }
   }
 
+  // Manual columns: widths first (one forced layout), then every tile is
+  // stacked inside its own column. Columns are independent by construction, so
+  // a tile moving inside column 0 cannot change the coordinates of column 1.
+  _layoutManual({ animate = false } = {}) {
+    if (!this.masonry) return
+    const children = this._layoutChildren()
+    if (!children.length) {
+      this.container.style.height = ''
+      return
+    }
+    const { columns, colWidth, gap, preferred } = this._metrics()
+    if (!width(colWidth)) return
+    this._noteColumns(columns, preferred)
+
+    const before = animate ? new Map(children.map((el) => [el, el.getBoundingClientRect()])) : null
+    this._clearFlip()
+
+    for (const el of children) el.style.width = colWidth + 'px'
+
+    const layout = manualLayout(
+      children.map((el) => ({
+        id: el.dataset?.id || '',
+        col: this._colOf(el),
+        height: el.offsetHeight
+      })),
+      { columns, colWidth, gap }
+    )
+    for (let i = 0; i < children.length; i++) {
+      const pos = layout.positions[i]
+      children[i].style.left = pos.left + 'px'
+      children[i].style.top = pos.top + 'px'
+    }
+    this.container.style.height = layout.height + 'px'
+    this.container.classList.add('is-laid-out')
+    if (before) this._flip(before)
+  }
+
   _layoutMasonry({ animate = false } = {}) {
     if (!this.masonry) return
     const children = this._layoutChildren()
@@ -192,10 +402,7 @@ export class TileGrid {
     }
     const { columns, colWidth, gap, preferred } = this._metrics()
     if (!width(colWidth)) return
-    if (columns !== this.columns) {
-      this.columns = columns
-      this.onColumnsChange?.(columns, preferred)
-    }
+    this._noteColumns(columns, preferred)
 
     // Capture where the tiles are *right now* — including any FLIP transform
     // still in flight — before the layout is rewritten. Measuring after
@@ -317,6 +524,11 @@ export class TileGrid {
     ph.style.minHeight = rect.height + 'px'
     this.container.insertBefore(ph, el)
 
+    // The placeholder carries the column it currently represents so the manual
+    // layout can treat it like any other child.
+    const startCol = this._colOf(el)
+    const originCol = el.dataset?.col === undefined ? null : String(el.dataset.col)
+    ph.dataset.col = String(startCol)
     const prevStyle = {}
     for (const k of ['width', 'height', 'left', 'top', 'transform', 'transition', 'zIndex', 'pointerEvents']) {
       prevStyle[k] = el.style[k]
@@ -326,6 +538,13 @@ export class TileGrid {
       ph,
       prevStyle,
       originNext: ph.nextSibling,
+      originCol,
+      originRequestedCol: startCol,
+      startColumns: this._metrics().columns,
+      targetCol: startCol,
+      manualCol: -1,
+      manualIndex: -1,
+      cancelled: false,
       offsetX: x - rect.left,
       offsetY: y - rect.top,
       width: rect.width,
@@ -361,7 +580,7 @@ export class TileGrid {
     // Without this the placeholder sits at 0,0 until the first swap and then
     // flies across the grid as part of that FLIP, and the removed tile leaves
     // an unpacked hole behind.
-    this._layoutMasonry({ animate: false })
+    this._layout({ animate: false })
   }
 
   _queueMove(x, y) {
@@ -422,7 +641,57 @@ export class TileGrid {
     // A flow grid (monitor cards) is laid out by the browser: inserting the
     // placeholder is enough, so keep hit-testing the live rectangles there.
     if (!this.masonry) return this._evalFlowTarget(d, x, y)
+    if (this.adaptive) return this._evalMasonryTarget(d, x, y)
+    return this._evalManualTarget(d, x, y)
+  }
 
+  // Manual columns: column from pointer x, insert index from pointer y against
+  // the midlines of the target column only. Other columns are never touched.
+  _evalManualTarget(d, x, y) {
+    const metrics = this._metrics()
+    if (!width(metrics.colWidth)) return
+    const rect = this.container.getBoundingClientRect()
+    const column = manualTargetColumn(x - rect.left, metrics)
+    const pointerY = y - rect.top
+
+    const items = []
+    for (const el of this.container.children) {
+      if (el === d.el || el === d.ph) continue
+      if (!el.matches?.(this.itemSelector)) continue
+      if (clampColumn(this._colOf(el), metrics.columns) !== column) continue
+      items.push(el)
+    }
+
+    // Midlines of the target column without the placeholder: stable boundaries
+    // that do not move under the pointer every time the placeholder moves.
+    const boxes = []
+    let top = 0
+    for (const el of items) {
+      const h = el.offsetHeight
+      boxes.push({ top, height: h })
+      top += h + metrics.gap
+    }
+    const index = manualInsertIndex(boxes, pointerY)
+    if (column === d.manualCol && index === d.manualIndex) return
+
+    // Insert into the target column at the computed position. Inserting before
+    // the tile that should follow keeps the column order without re-ordering
+    // any other column.
+    let ref = null
+    if (index < items.length) ref = items[index]
+    else if (items.length) ref = items[items.length - 1].nextSibling
+
+    d.manualCol = column
+    d.manualIndex = index
+    d.targetCol = column
+    d.ph.dataset.col = String(column)
+    if (ref !== d.ph) this.container.insertBefore(d.ph, ref)
+    d.lastSwapX = x
+    d.lastSwapY = y
+    this._layout({ animate: this.animations })
+  }
+
+  _evalMasonryTarget(d, x, y) {
     const items = []
     let current = 0
     for (const el of this.container.children) {
@@ -474,7 +743,7 @@ export class TileGrid {
     this.container.insertBefore(d.ph, items[best] || null)
     d.lastSwapX = x
     d.lastSwapY = y
-    this._layoutMasonry({ animate: this.animations })
+    this._layout({ animate: this.animations })
   }
 
   // Flow layouts (e.g. the latency-monitor cards) reorder themselves when the
@@ -519,6 +788,9 @@ export class TileGrid {
     for (const k of Object.keys(d.prevStyle)) d.el.style[k] = d.prevStyle[k]
     if (d.ph.parentNode) d.ph.remove()
     if (d.scroller) d.scroller.style.scrollBehavior = d.prevScrollBehavior || ''
+    // A new drag may have started while the previous tile was still settling;
+    // in that case the new drag owns the body/container state.
+    if (this.drag) return
     this.container.classList.remove('is-dragging')
     document.body.classList.remove('dragging-tile')
     document.body.style.userSelect = ''
@@ -530,6 +802,7 @@ export class TileGrid {
     if (!d) return
     if (d.frame) cancelAnimationFrame(d.frame)
     d.frame = 0
+    d.cancelled = true
     if (d.originNext && d.originNext.parentNode === this.container) {
       this.container.insertBefore(d.ph, d.originNext)
     }
@@ -542,6 +815,38 @@ export class TileGrid {
     if (d.frame) cancelAnimationFrame(d.frame)
     d.frame = 0
     this._finishDrag(d)
+  }
+
+  // Manual mode: persist the requested column on drop (or restore the original
+  // one on cancel). Clamped display columns never overwrite data-col.
+  _commitManualColumn(d) {
+    if (!this.masonry || this.adaptive) return
+    if (d.cancelled) {
+      if (d.originCol === null || d.originCol === undefined) delete d.el.dataset.col
+      else d.el.dataset.col = String(d.originCol)
+      return
+    }
+    const requested = Math.max(0, Number(d.originRequestedCol) || 0)
+    const startColumns = Math.max(1, Number(d.startColumns) || 1)
+    const startDisplay = Math.min(requested, startColumns - 1)
+    // The tile was saved in a column beyond the current narrow viewport and the
+    // user only reordered inside that clamped display column. Keep the original
+    // deep column so widening the window restores it.
+    if (requested > startColumns - 1 && d.targetCol === startDisplay) {
+      d.el.dataset.col = String(requested)
+      return
+    }
+    d.el.dataset.col = String(d.targetCol)
+  }
+
+  // Adaptive mode also records the column the tile landed in, so switching
+  // back to manual restores a meaningful arrangement.
+  _rememberAdaptiveColumn(el) {
+    const { columns, colWidth, gap } = this._metrics()
+    const left = Number.parseFloat(el.style.left)
+    const pitch = colWidth + gap
+    if (!width(colWidth) || !Number.isFinite(left) || pitch <= 0) return
+    el.dataset.col = String(Math.min(columns - 1, Math.max(0, Math.round(left / pitch))))
   }
 
   _finishDrag(d) {
@@ -558,10 +863,12 @@ export class TileGrid {
       // Put the tile back where the placeholder is *before* the placeholder is
       // removed; insertBefore needs a reference that is still a child.
       if (d.ph.parentNode === this.container) this.container.insertBefore(d.el, d.ph)
+      this._commitManualColumn(d)
       this._restoreDragStyles(d)
       d.ph.remove()
       this.lastDragEnd = Date.now()
-      this._layoutMasonry({ animate: false })
+      this._layout({ animate: false })
+      if (this.masonry && this.adaptive) this._rememberAdaptiveColumn(d.el)
       this.onChange(this.order())
     }
 

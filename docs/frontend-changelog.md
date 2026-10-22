@@ -77,3 +77,14 @@
 - 暗/亮两套截图：工作台折叠、8 个功能展开、10 个设置分区、命令面板、任务抽屉、添加磁贴、空态、功能加载失败。
 - 重新生成的 `src/server/integrity.gen.js`、`src/server/asset-version.gen.js`（由 `node build.mjs` 生成）。
 - 本地分支 `rewrite/frontend-bench-v1` 与 tag。
+
+## 9. v1.9 启动器界面增量
+
+v1.9 不重做整体设计系统，只在启动器内新增以下表面（样式与 `launcher.css` 分离，避免覆盖原规则）：
+
+- `css/launcher-versions.css`：PCL 风格可输入 MC 版本下拉（`.lp-vc*`）、筛选条件行（`.lp-filter-line`）、兼容/其他版本分组（`.lp-version-group*`）、版本行强调（`.lp-mod-version.is-compatible/.is-current/.is-recommended`）与 900px 窄窗规则。
+- `css/launcher-launch.css`：启动阶段进度（`.lp-launch-progress*`）、可操作错误面板（`.lp-launch-error-panel`、`.lp-error-actions`、`.lp-error-missing`）、概览持久诊断卡（`.lp-crash-panel`）、导出整合包表单与任务卡（`.lp-export-*`）。
+- `js/launcher/version-picker.js`：版本下拉与兼容分组/徽章的共享纯逻辑 + DOM 组件，供内容安装与在线整合包共用。
+- `js/launcher/content.js`：安装弹窗版本筛选与版本列表；`js/launcher/index.js`：启动进度、结构化错误面板、导出入口；`js/launcher/install.js`：在线整合包搜索下载、导入手动 MC、下载中心导出任务。
+- 兼容性：原有 `.lp-*` 类、`/api/launcher` 与 `/api/community` 接口、`launcher.json` / `launcherAccounts.json` 结构均保持兼容；新增字段只增不改。`js/core/api.js` 仅在错误对象上附加 `code/detail/missing/paths/actions`，不改变成功响应。
+- 完整性清单：新增两个 CSS 与 `version-picker.js` 已由 `node build.mjs` 自动写入 `integrity.gen.js` 与 `asset-version.gen.js`。

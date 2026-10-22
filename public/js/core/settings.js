@@ -2,9 +2,12 @@ import { h, clear, fmtBytes } from './dom.js'
 import { api } from './api.js'
 import { toast } from './toast.js'
 import { confirmDialog } from './modal.js'
-import { pickDir, pickFile } from './dirpicker.js'
+import { pickDir } from './dirpicker.js'
 import { icon } from '../ui/icons.js'
-import { btn, input, select, seg, toggle, spinner } from '../ui/kit.js'
+import { btn, toggle, spinner } from '../ui/kit.js'
+import { createSettingsKit } from './settings-kit.js'
+import { initLauncherSettings } from './settings-launcher.js'
+import { checkForUpdatesManual } from '../launcher/update.js'
 
 const ACCENTS = ['#c07a4a', '#5ec96a', '#3ba0ff', '#c084fc', '#ff8a4c', '#f43f5e', '#22d3ee', '#eab308']
 
@@ -25,7 +28,6 @@ const clone = (o) => JSON.parse(JSON.stringify(o ?? {}))
 const ENGINE_STATUS = { queued: '排队中', running: '下载中', installing: '安装中', done: '已完成', failed: '失败', cancelled: '已取消' }
 
 export function initSettings(ctx) {
-  const SECTIONS = buildSections(ctx)
   const page = document.getElementById('settingsPage')
   const nav = document.getElementById('settingsNav')
   const content = document.getElementById('settingsContent')
@@ -38,6 +40,17 @@ export function initSettings(ctx) {
   let saving = false
   let again = false
   let restoreScroll = 0
+
+  // 启动器设置独立存储（launcher.json），但和工具箱共用这一页、这套保存状态。
+  const launcher = initLauncherSettings({
+    onStatus: (text, kind) => setSaveState(text, kind),
+    onReady: () => {
+      if (!page.hidden && String(active).startsWith('launcher-')) renderContent()
+    },
+    onSaved: (next) => ctx.onLauncherSaved?.(next),
+    onRootChanged: (next) => ctx.onLauncherRootChanged?.(next)
+  })
+  const SECTIONS = [...launcher.sections, ...buildSections(ctx)]
 
   function setSaveState(text, kind = '') {
     if (!saveStateEl) return
@@ -95,107 +108,66 @@ export function initSettings(ctx) {
   }
 
   /* ---------------- generic field helpers ---------------- */
-
-  function row(label, desc, control, extraClass = '') {
-    return h('div', { class: 'setting-row' + (extraClass ? ' ' + extraClass : '') },
-      h('div', { class: 'info' }, h('b', {}, label), desc ? h('span', {}, desc) : null),
-      h('div', { class: 'ctrl' }, control)
-    )
-  }
-
-  function card(title, desc, ...children) {
-    return h('section', { class: 'settings-card' },
-      h('div', { class: 'settings-card-head' },
-        h('h3', {}, title),
-        desc ? h('span', { class: 'muted' }, desc) : null
-      ),
-      h('div', { class: 'settings-card-body' }, ...children.filter(Boolean))
-    )
-  }
-
-  function numField(get, set, { min = 0, max = 999999, step = 1, suffix = '', width = '' } = {}) {
-    const inp = input({ type: 'number', value: get(), min, max, step, class: width })
-    const apply = () => {
-      let v = Number(inp.value)
-      if (!Number.isFinite(v)) v = get()
-      v = Math.min(max, Math.max(min, v))
-      inp.value = String(v)
-      set(v)
-      commit()
-    }
-    inp.addEventListener('change', apply)
-    inp.addEventListener('blur', apply)
-    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); apply() } })
-    return suffix
-      ? h('div', { class: 'input-group', style: { width: '150px' } }, inp, h('span', { class: 'unit' }, suffix))
-      : inp
-  }
-
-  function textField(get, set, placeholder = '', width = '') {
-    const inp = input({ value: get() || '', placeholder, class: width })
-    inp.addEventListener('change', () => { set(inp.value.trim()); commit() })
-    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); set(inp.value.trim()); commit(); inp.blur() } })
-    return inp
-  }
-
-  function monoField(get, set, placeholder = '', width = '') {
-    const inp = input({ value: get() || '', placeholder, mono: true, class: width })
-    inp.addEventListener('change', () => { set(inp.value.trim()); commit() })
-    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); set(inp.value.trim()); commit(); inp.blur() } })
-    return inp
-  }
-
-  function pathField(get, set, placeholder = '', { fileMode = false, exts = [], title = '选择目录' } = {}) {
-    const inp = input({ value: get() || '', placeholder, mono: true })
-    const apply = () => { set(inp.value.trim()); commit() }
-    inp.addEventListener('change', apply)
-    const browse = btn('浏览', {
-      size: 'sm',
-      onClick: async () => {
-        const picked = fileMode
-          ? await pickFile(inp.value || '', { title, exts })
-          : await pickDir(inp.value || '', { title })
-        if (picked) {
-          inp.value = picked
-          apply()
-        }
-      }
-    })
-    return h('div', { class: 'row', style: { gap: '5px', flexWrap: 'wrap' } }, inp, browse)
-  }
-
-  function segField(get, set, options, onChange) {
-    return seg(options, get(), (v) => {
-      set(v)
-      commit()
-      onChange?.(v)
-    })
-  }
-
-  function switchField(get, set, onChange) {
-    return toggle(!!get(), (v) => {
-      set(v)
-      commit()
-      onChange?.(v)
-    })
-  }
-
-  function panel(title, desc, ...children) {
-    return h('div', { class: 'settings-panel' },
-      h('div', { class: 'settings-title' }, h('h2', {}, title)),
-      h('p', { class: 'settings-desc' }, desc),
-      ...children
-    )
-  }
-
-  function actionRow(...nodes) {
-    return h('div', { class: 'settings-actions' }, ...nodes)
-  }
+  // 行/卡片/数值框等通用控件集中在 core/settings-kit.js，启动器设置复用同一套。
+  const { row, card, panel, actionRow, numField, textField, monoField, pathField, segField, switchField } =
+    createSettingsKit({ commit })
 
   /* ---------------- sections ---------------- */
 
   function buildSections(ctx) {
     const C = ctx
+
+    function monitorCards() {
+      const engineLine = h('div', { class: 'settings-badge-line' }, h('span', { class: 'spinner' }), '读取引擎状态…')
+      const clearBtn = btn('清空历史数据', { size: 'sm', variant: 'danger', onClick: async () => {
+        if (S.general.confirmDanger && !(await confirmDialog('确定清空全部监测历史数据吗？此操作不可恢复。', { danger: true }))) return
+        try {
+          await api.del('/api/monitors/history')
+          toast('历史数据已清空', 'ok')
+        } catch (e) { toast('清空失败：' + e.message, 'err') }
+      } })
+      const toggleBtn = btn('切换运行 / 暂停', { size: 'sm', onClick: async () => {
+        try {
+          const snap = await api.get('/api/monitors')
+          const run = !snap.running
+          await api.post('/api/monitors/engine', { running: run })
+          toast(run ? '监测已启动' : '监测已暂停', 'ok')
+          loadEngine()
+        } catch (e) { toast('操作失败：' + e.message, 'err') }
+      } })
+      async function loadEngine() {
+        try {
+          const snap = await api.get('/api/monitors')
+          clear(engineLine)
+          engineLine.append(
+            h('span', { class: 'dot ' + (snap.running ? 'ok' : '') }),
+            h('span', { class: 'badge ' + (snap.running ? 'ok' : '') }, snap.running ? '运行中' : '已暂停'),
+            h('span', { class: 'muted' }, `${(snap.items || []).length} 台 · ${(snap.items || []).filter((x) => x.status?.ok).length} 在线`)
+          )
+        } catch (e) {
+          clear(engineLine)
+          engineLine.append(h('span', { class: 'badge bad' }, '不可用'), h('span', { class: 'muted' }, e.message))
+        }
+      }
+      setTimeout(loadEngine, 0)
+
+      return [
+        card('监测策略', '采样与展示',
+          row('默认轮询间隔', '新增监测项时使用', numField(() => S.monitor.defaultInterval, (v) => (S.monitor.defaultInterval = v), { min: 1, max: 3600, step: 1, suffix: '秒' })),
+          row('默认图表指标', '新增监测项默认显示的指标', segField(() => S.monitor.defaultMetric, (v) => (S.monitor.defaultMetric = v), [['latency', '延迟'], ['players', '在线人数'], ['loss', '丢包率']])),
+          row('历史保留点数', '每个监测项保留的采样数量', numField(() => S.monitor.historyPoints, (v) => (S.monitor.historyPoints = v), { min: 60, max: 10080, step: 60, suffix: '点' })),
+          row('离线判定阈值', '连续失败达到该次数判定离线', numField(() => S.monitor.offlineAfter, (v) => (S.monitor.offlineAfter = v), { min: 1, max: 10, suffix: '次' })),
+          row('延迟告警阈值', '超过该值在图表中标红', numField(() => S.monitor.latencyWarn, (v) => (S.monitor.latencyWarn = v), { min: 20, max: 2000, step: 10, suffix: 'ms' })),
+          row('展开图显示点数', '详情图表的时间窗口', numField(() => S.monitor.chartRange, (v) => (S.monitor.chartRange = v), { min: 30, max: 1440, step: 30, suffix: '点' })),
+          row('监测磁贴最大宽度', '0 表示不限制', numField(() => S.monitor.maxTileWidth ?? 300, (v) => (S.monitor.maxTileWidth = v), { min: 0, max: 800, step: 10, suffix: 'px' })),
+          row('磁贴高度策略', '固定 / 限高 / 自适应', segField(() => S.monitor.tileHeightMode ?? 'fixed', (v) => (S.monitor.tileHeightMode = v), [['fixed', '固定'], ['max', '限制最大'], ['auto', '自适应']])),
+          row('磁贴高度', '配合高度策略使用', numField(() => S.monitor.tileHeight ?? 100, (v) => (S.monitor.tileHeight = v), { min: 60, max: 500, step: 5, suffix: 'px' })),
+          row('启动后自动监测', '工具箱启动时立即开始轮询', switchField(() => S.monitor.autoStart, (v) => (S.monitor.autoStart = v)))
+        ),
+        card('监测引擎', '', row('运行状态', '启动 / 暂停只影响轮询，不删除监测项', engineLine), actionRow(toggleBtn, clearBtn))
+      ]
+    }
+
 
     return [
       {
@@ -246,7 +218,8 @@ export function initSettings(ctx) {
             card('外观', '主题、强调色与磁贴网格',
               row('主题', '六套调色板，深色为默认台面', themeDots),
               row('强调色', '主按钮、选中态与图表主线', accentDots),
-              row('每行磁贴数', '1 = 单列；多列时每个磁贴默认占一列', numField(() => S.general.tileColumns || 1, (v) => { S.general.tileColumns = v; applyLive() }, { min: 1, max: 4, step: 1, suffix: '列' })),
+              row('最大列数', '窗口够宽时最多分几列；窗口变窄会自动减少列数', numField(() => S.general.tileColumns || 1, (v) => { S.general.tileColumns = v; applyLive() }, { min: 1, max: 4, step: 1, suffix: '列' })),
+              row('自适应磁贴', '关闭 = 手动按列摆放（默认）；开启 = 自动排到最短列', switchField(() => S.general.adaptiveTiles === true, (v) => (S.general.adaptiveTiles = v), (v) => C.onAdaptiveChange?.(v))),
               row('界面动画', '拖拽与弹层过渡；关闭后立即静止', switchField(() => S.general.animations, (v) => { S.general.animations = v; applyLive(); C.onAnimationsChange?.(v) })),
               row('时间格式', '日志、图表与记录时间', segField(() => S.general.timeFormat, (v) => (S.general.timeFormat = v), [['24h', '24 小时'], ['12h', '12 小时']])),
               row('新磁贴默认折叠', '只显示图标、标题与状态', switchField(() => S.general.defaultCollapsed !== false, (v) => (S.general.defaultCollapsed = v)))
@@ -260,11 +233,11 @@ export function initSettings(ctx) {
       },
       {
         id: 'network',
-        label: '网络',
+        label: '网络与监测',
         iconName: 'globe',
-        desc: '探测、默认端口与下载代理',
+        desc: '探测、监测、默认端口与下载代理',
         render() {
-          return panel('网络', '所有服务器探测、监测与下载功能共享这些默认值。',
+          return panel('网络与监测', '服务器探测、延迟监测与下载共用这些默认值。',
             card('探测参数', '单次连接与重试策略',
               row('超时时间', '单次连接最长等待', numField(() => S.network.timeout, (v) => (S.network.timeout = v), { min: 500, max: 30000, step: 500, suffix: 'ms' })),
               row('失败重试次数', '判定失败前的重试', numField(() => S.network.retries, (v) => (S.network.retries = v), { min: 0, max: 5, step: 1, suffix: '次' })),
@@ -277,74 +250,19 @@ export function initSettings(ctx) {
             card('下载代理', '作用于社区资源下载与服务端核心下载（含安装器联网）',
               row('代理地址', '如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080；支持 user:pass@ 认证，留空直连',
                 h('div', { class: 'ctrl-wide' }, textField(() => S.network.proxy, (v) => (S.network.proxy = v), 'http://127.0.0.1:7890')))
-            )
-          )
-        }
-      },
-      {
-        id: 'monitor',
-        label: '延迟监测',
-        iconName: 'pulse',
-        desc: '采样、图表与磁贴高度策略',
-        render() {
-          const engineLine = h('div', { class: 'settings-badge-line' }, h('span', { class: 'spinner' }), '读取引擎状态…')
-          const clearBtn = btn('清空历史数据', { size: 'sm', variant: 'danger', onClick: async () => {
-            if (S.general.confirmDanger && !(await confirmDialog('确定清空全部监测历史数据吗？此操作不可恢复。', { danger: true }))) return
-            try {
-              await api.del('/api/monitors/history')
-              toast('历史数据已清空', 'ok')
-            } catch (e) { toast('清空失败：' + e.message, 'err') }
-          } })
-          const toggleBtn = btn('切换运行 / 暂停', { size: 'sm', onClick: async () => {
-            try {
-              const snap = await api.get('/api/monitors')
-              const run = !snap.running
-              await api.post('/api/monitors/engine', { running: run })
-              toast(run ? '监测已启动' : '监测已暂停', 'ok')
-              loadEngine()
-            } catch (e) { toast('操作失败：' + e.message, 'err') }
-          } })
-          async function loadEngine() {
-            try {
-              const snap = await api.get('/api/monitors')
-              clear(engineLine)
-              engineLine.append(
-                h('span', { class: 'dot ' + (snap.running ? 'ok' : '') }),
-                h('span', { class: 'badge ' + (snap.running ? 'ok' : '') }, snap.running ? '运行中' : '已暂停'),
-                h('span', { class: 'muted' }, `${(snap.items || []).length} 台 · ${(snap.items || []).filter((x) => x.status?.ok).length} 在线`)
-              )
-            } catch (e) {
-              clear(engineLine)
-              engineLine.append(h('span', { class: 'badge bad' }, '不可用'), h('span', { class: 'muted' }, e.message))
-            }
-          }
-          setTimeout(loadEngine, 0)
-
-          return panel('延迟监测', '影响所有监测磁贴与展开图表。',
-            card('监测策略', '采样与展示',
-              row('默认轮询间隔', '新增监测项时使用', numField(() => S.monitor.defaultInterval, (v) => (S.monitor.defaultInterval = v), { min: 1, max: 3600, step: 1, suffix: '秒' })),
-              row('默认图表指标', '新增监测项默认显示的指标', segField(() => S.monitor.defaultMetric, (v) => (S.monitor.defaultMetric = v), [['latency', '延迟'], ['players', '在线人数'], ['loss', '丢包率']])),
-              row('历史保留点数', '每个监测项保留的采样数量', numField(() => S.monitor.historyPoints, (v) => (S.monitor.historyPoints = v), { min: 60, max: 10080, step: 60, suffix: '点' })),
-              row('离线判定阈值', '连续失败达到该次数判定离线', numField(() => S.monitor.offlineAfter, (v) => (S.monitor.offlineAfter = v), { min: 1, max: 10, suffix: '次' })),
-              row('延迟告警阈值', '超过该值在图表中标红', numField(() => S.monitor.latencyWarn, (v) => (S.monitor.latencyWarn = v), { min: 20, max: 2000, step: 10, suffix: 'ms' })),
-              row('展开图显示点数', '详情图表的时间窗口', numField(() => S.monitor.chartRange, (v) => (S.monitor.chartRange = v), { min: 30, max: 1440, step: 30, suffix: '点' })),
-              row('监测磁贴最大宽度', '0 表示不限制', numField(() => S.monitor.maxTileWidth ?? 300, (v) => (S.monitor.maxTileWidth = v), { min: 0, max: 800, step: 10, suffix: 'px' })),
-              row('磁贴高度策略', '固定 / 限高 / 自适应', segField(() => S.monitor.tileHeightMode ?? 'fixed', (v) => (S.monitor.tileHeightMode = v), [['fixed', '固定'], ['max', '限制最大'], ['auto', '自适应']])),
-              row('磁贴高度', '配合高度策略使用', numField(() => S.monitor.tileHeight ?? 100, (v) => (S.monitor.tileHeight = v), { min: 60, max: 500, step: 5, suffix: 'px' })),
-              row('启动后自动监测', '工具箱启动时立即开始轮询', switchField(() => S.monitor.autoStart, (v) => (S.monitor.autoStart = v)))
             ),
-            card('监测引擎', '', row('运行状态', '启动 / 暂停只影响轮询，不删除监测项', engineLine), actionRow(toggleBtn, clearBtn))
+            ...monitorCards()
           )
         }
       },
       {
-        id: 'c2s',
-        label: '客户端转服务端',
-        iconName: 'swap',
-        desc: 'mod 扫描与处理默认值',
+        id: 'servers',
+        label: '服务端',
+        iconName: 'chip',
+        desc: '客户端 mod 转换与服务端核心',
         render() {
-          return panel('客户端转服务端', 'mod 处理工具的默认目录与行为；目录修改后立即生效。',
-            card('mod 处理', '客户端转服务端辅助工具的默认行为',
+          return panel('服务端', '客户端转服务端工具的默认行为，以及安装服务端后生成的启动脚本。',
+            card('客户端转服务端', 'mod 处理工具的默认目录与行为；目录修改后立即生效',
               row('默认 mods 目录', '打开工具时自动填充', pathField(() => S.client2server.modsDir, (v) => (S.client2server.modsDir = v), '例如 C:\\Users\\...\\.minecraft\\mods')),
               row('备份目录', '移出的仅客户端 mod 存放位置；留空使用 mods 同级目录', pathField(() => S.client2server.backupDir, (v) => (S.client2server.backupDir = v), '留空则使用 mods 目录同级')),
               row('默认处理方式', '', segField(() => S.client2server.defaultAction, (v) => (S.client2server.defaultAction = v), [['disable', '禁用'], ['backup', '移入备份'], ['delete', '直接删除']])),
@@ -352,6 +270,10 @@ export function initSettings(ctx) {
               row('包含 .jar.disabled', '把已禁用的 mod 也纳入扫描', switchField(() => S.client2server.includeDisabled, (v) => (S.client2server.includeDisabled = v))),
               row('自动识别 environment=client', '依据 fabric/quilt 元数据自动标记', switchField(() => S.client2server.autoDetectEnv, (v) => (S.client2server.autoDetectEnv = v))),
               row('启动脚本', '绑定 .bat / .cmd / .sh；留空表示未绑定', pathField(() => S.client2server.scriptPath, (v) => (S.client2server.scriptPath = v), '未绑定启动脚本', { fileMode: true, exts: ['.bat', '.cmd', '.sh'], title: '选择要绑定的启动脚本' }))
+            ),
+            card('服务端核心启动脚本', 'Fabric 等服务端安装完成后，自动在目标目录生成 start.bat / start.sh',
+              row('分配内存', '写入启动脚本的 -Xms 与 -Xmx，如 2G、4G、1024M', textField(() => S.servercore.memory, (v) => (S.servercore.memory = v), '2G')),
+              h('div', { class: 'settings-note' }, '内存字符串会原样写入启动脚本，不做数值校验。请按实际物理内存与整合包规模填写。')
             )
           )
         }
@@ -398,20 +320,6 @@ export function initSettings(ctx) {
                   toast('已清空下载记录', 'ok')
                 } catch (e) { toast('清空失败：' + e.message, 'err') }
               } }))
-            )
-          )
-        }
-      },
-      {
-        id: 'servercore',
-        label: '服务端核心',
-        iconName: 'chip',
-        desc: '启动脚本内存',
-        render() {
-          return panel('服务端核心', 'Fabric 等服务端安装完成后，自动在目标目录生成 start.bat / start.sh。',
-            card('启动脚本', '',
-              row('分配内存', '写入启动脚本的 -Xms 与 -Xmx，如 2G、4G、1024M', textField(() => S.servercore.memory, (v) => (S.servercore.memory = v), '2G')),
-              h('div', { class: 'settings-note' }, '内存字符串会原样写入启动脚本，不做数值校验。请按实际物理内存与整合包规模填写。')
             )
           )
         }
@@ -624,7 +532,10 @@ export function initSettings(ctx) {
         desc: '版本、路径与许可',
         render() {
           const box = h('div', {}, h('div', { class: 'row' }, h('span', { class: 'spinner' }), h('span', { class: 'muted' }, '读取系统信息…')))
+          // 更新卡片里的版本号要等 /api/system/info 回来再填（S.version 是设置结构版本，不是程序版本）。
+          const updateVersionEl = h('b', { style: { fontSize: '12px' } }, '当前版本 —')
           api.get('/api/system/info').then((info) => {
+            updateVersionEl.textContent = `当前版本 v${info.version || ''}`
             clear(box)
             const openByWhich = (which, label) => btn('打开', {
               size: 'xs',
@@ -664,6 +575,19 @@ export function initSettings(ctx) {
           })
           return panel('关于', '本工具不包含遥测；所有配置和数据都保存在本机。',
             card('关于本工具箱', '', box),
+            card('启动器更新', '从 GitHub Releases 检查并安装新版本',
+              h('div', { class: 'row', style: { gap: '10px', alignItems: 'center', flexWrap: 'wrap' } },
+                h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px', flex: '1 1 220px' } },
+                  updateVersionEl,
+                  h('span', { class: 'muted', style: { fontSize: '11px' } }, '发现新版本时右下角会提示，可一键下载并重启')
+                ),
+                btn('检查更新', { size: 'sm', variant: 'primary', iconName: 'refresh', onClick: () => checkForUpdatesManual() })
+              ),
+              h('div', { class: 'settings-actions' },
+                h('a', { class: 'btn btn-sm', href: 'https://github.com/WJ1752/mc-toolbox/releases', target: '_blank', rel: 'noopener' }, '发布页'),
+                h('span', { class: 'settings-note', style: { flex: '1', margin: '0' } }, '可在「启动器 → 更新」里关闭自动检查、指定仓库或填写访问 Token。')
+              )
+            ),
             card('许可与运行时', '',
               h('div', { class: 'settings-note' }, '前端零第三方运行时依赖（无框架、无 CDN、无在线字体）。打包版内嵌 Node.js 运行时与 Microsoft Edge WebView2，分别遵循其上游许可。'),
               h('div', { class: 'settings-note' }, '整合包翻译由内置的 mc-i18n 提供（vendor/mc-i18n），以子进程方式运行。'),
@@ -820,10 +744,27 @@ export function initSettings(ctx) {
   /* ---------------- navigation ---------------- */
 
   const NAV_GROUPS = [
-    ['工作台', ['general', 'network']],
-    ['工具', ['monitor', 'c2s', 'community', 'servercore', 'i18n', 'features']],
+    ['启动器', ['launcher-root', 'launcher-launch', 'launcher-download', 'launcher-update']],
+    ['工具箱', ['general', 'network', 'servers', 'community', 'i18n', 'features']],
     ['系统', ['data', 'about']]
   ]
+
+  // 分区合并后的兼容别名：旧入口 / 命令面板 / 磁贴仍能找到新的位置。
+  const SECTION_ALIASES = {
+    monitor: 'network',
+    c2s: 'servers',
+    servercore: 'servers',
+    launcher: 'launcher-root',
+    launch: 'launcher-launch',
+    downloads: 'launcher-download',
+    updates: 'launcher-update'
+  }
+
+  function resolveSection(id) {
+    const key = String(id || '').trim()
+    const mapped = SECTION_ALIASES[key] || key
+    return SECTIONS.some((s) => s.id === mapped) ? mapped : 'general'
+  }
 
   function renderNav() {
     clear(nav)
@@ -845,7 +786,7 @@ export function initSettings(ctx) {
   }
 
   function openSection(id) {
-    active = SECTIONS.some((s) => s.id === id) ? id : 'general'
+    active = resolveSection(id)
     for (const b of nav.querySelectorAll('button')) b.classList.toggle('active', b.dataset.section === active)
     renderContent()
     content.scrollTop = 0
@@ -872,14 +813,17 @@ export function initSettings(ctx) {
       }
       S = clone(ctx.getSettings())
       MIRROR = S
-      active = SECTIONS.some((x) => x.id === sectionId) ? sectionId : 'general'
+      active = resolveSection(sectionId)
       setSaveState('即时保存')
       renderNav()
       openSection(active)
       page.hidden = false
+      // 启动器设置按需读取；读完后 onReady 会重绘当前分区。
+      if (active.startsWith('launcher-')) launcher.ensureLoaded()
     },
     close() {
       flush()
+      launcher.flush()
       page.hidden = true
       const ws = document.getElementById('workspace')
       if (ws) ws.scrollTop = restoreScroll

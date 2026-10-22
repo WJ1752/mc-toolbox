@@ -1,5 +1,45 @@
 # Minecraft 工具箱
 
+### v1.9.3 下载同步、任务耗时与手动磁贴布局
+
+- 工作台与启动器的下载统一口径：社区下载磁贴、下载中心、状态栏任务数共用 `public/js/core/jobs.js`，同一任务在三个位置显示相同的百分比、字节、速度与状态。状态栏「任务 N」现在同时统计社区下载与启动器安装任务。
+- 修复工作台社区下载磁贴的「任务越刷新越多」：任务行按 id 复用，不再每次轮询都追加新行；同一任务任何时刻只显示一行。
+- 修复下载中心的进度与状态：社区任务不再永远显示不确定动画，运行中显示真实 `received / total`、百分比与速度；完成显示 100% 与「用时」；失败/取消显示终态与终止时间，不再显示「已进行」。安装任务详情与字节字段统一按当前阶段计数，不再出现详情 599 MB、字节 60 MB 的错位。
+- 修复安装/下载耗时：任务区分 `createdAt`（排队）与 `startedAt`（真正开始），`finishedAt` 在所有终态写入；排队时间不再算进「已进行」。运行中超过 2 分钟没有进展会显示「无进展 X」，便于识别卡住的任务；镜像重试不会把失败尝试的字节计入进度。
+- 工作台磁贴默认改为「手动列布局」：每个磁贴有独立的列位（`layout[].col`），拖动只改变目标列与列内顺序，其他列的磁贴不会被挤走；支持把所有磁贴放在第一列或任意列，窗口变窄时暂时收列、变宽后回到原列。
+- 设置 → 通用 → 外观新增「自适应磁贴」开关，工作台工具条也提供「手动 / 自适应」切换；开启后恢复按最短列自动排布，切换不丢列位、不重新挂载磁贴。
+- 工作台内容不再被 1440px 宽度限制，1920 / 2560 窗口下磁贴随窗口变宽；1280×820 自动收列且无横向溢出。
+- 回归与验证：`node --test tests/*.test.mjs` 156 项通过；`tools/launcher-ui-smoke.mjs` 21/21；新增 `tools/bench-layout-check.mjs` 32/32（手动列布局、拖动、宽度自适应、下载中心真实进度与磁贴轮询行数）。
+- 需求、根因与验收记录见 [工作台下载同步与磁贴布局需求](docs/bench-downloads-layout.md)。
+
+### v1.9.2 启动器检查更新与一键更新
+
+- 启动器启动时检查 GitHub Releases：发现新版本在右下角提示「启动器有新版本」，可立即更新或稍后；`设置 → 启动器 → 更新`、`设置 → 关于` 与命令面板都能手动检查。
+- 一键更新：下载发布资产里的新 `mc-toolbox.exe`，校验大小与 SHA-256 后，由独立 PowerShell 脚本在旧进程退出后替换 exe 并自动重启；替换失败会回滚备份并拉回旧版。开发模式（`node server.js`）只检查、不替换本体。
+- 更新源可配置：默认官方仓库，可改 `owner/repo`、填写访问 Token（私有仓库或 API 限额，只保存在本机不回显）、接受预发布版本、忽略某个版本。
+- 详细设计见 [启动器说明 · 启动器自身更新](docs/launcher.md#48-启动器自身更新)。
+
+### v1.9.1 启动器主页、统一设置与 .minecraft 目录
+
+- 启动器成为唯一主页：启动应用直接进入启动器，品牌、侧栏「工作台」、标题栏与 `Ctrl/Cmd+1` 都能回到启动器；去掉「返回工作台」这种把工作台当主页的文案，工作台 Rail 顶部新增「启动器主页」按钮。
+- 设置合并成一页：左侧导航分为「启动器 / 工具箱 / 系统」；启动器设置从弹窗并入整页（游戏目录与存储、启动与 Java、下载与安装，原 7 张卡片合并为 4 张），与工具箱设置共用即时保存。「延迟监测」并入「网络与监测」，「客户端转服务端」与「服务端核心」并入「服务端」。
+- 首次启动选择游戏目录：默认在启动器旁边创建 `.minecraft`（与 PCL / HMCL 一致），也可以选择其它文件夹；启动器会在其中准备 `versions` / `libraries` / `assets` / `instances`。每个实例都会记住创建时的根目录，之后更换游戏目录不会移动或丢失已有实例。
+- 旧版 `<data>/minecraft` 升级：如果 root 还停在旧版自动写入的位置（用户从未主动选过），会重新弹出目录选择；已有实例自动固定到旧目录，文件不受影响。
+- 详细设计见 [启动器说明](docs/launcher.md)。
+
+### v1.9.0 版本识别、启动反馈与整合包能力
+
+- 内容安装（模组 / 资源包 / 光影）把「实例版本 / 全部版本」两段按钮换成 PCL 风格可输入 MC 版本下拉：全部版本、当前实例真实版本（推荐）、Mojang 版本清单（新到旧）；支持关键字过滤、手动输入合法版本、非法值中文提示且不发送请求。搜索结果顶部显示「筛选：1.20.1 · Fabric」；项目版本列表把当前实例 MC + 加载器兼容项置顶并按发布时间倒序，标记「适配」「当前实例可用」「推荐」，不兼容版本折叠到「其他版本（N）」，无兼容项时提供「查看全部版本」。
+- 外部实例版本识别修复：导入 PCL2 / HMCL / 官方 `.minecraft` 时按 `inheritsFrom` 链根 → `jar`/`clientVersion` → `assetIndex`/`assets` → 版本目录中的原版 JSON → 版本格式校验的顺序解析真实 MC 版本；无法判断时在导入界面要求手动选择，不再拿实例名或版本文件夹名（如 `M1182rebirth`）冒充 MC 版本。导入后 `mc`、`versionId`、`jarVersion`、`baseDir`、`gameDir` 与外部 `libraries`/`assets` 均指向正确位置。
+- 外部实例启动修复：外部 `versions` / `libraries` / `assets` 按原 `.minecraft` 解析，启动器日志与 natives 仍写入实例目录；客户端 JAR 按 `jarVersion`/`versionId`/`mc` 候选取实际存在的文件；PCL2 版本隔离目录（`versions/<id>/mods`、`saves`）作为 `gameDir`；启动准备不会在外部目录创建 mods/saves 等启动器目录。
+- 启动流程拆为账户 → 版本链 → Java → 文件 → natives → 进程 → 窗口 7 个阶段，前端在启动按钮旁显示进度条、阶段文案、真实/不确定进度与「取消」；准备状态保存在服务端，切换页面不丢失，重复点击被 `ALREADY_RUNNING` 拦截。
+- 启动失败返回结构化错误：`NO_ACCOUNT`、`NO_JAVA`、`JAVA_TOO_OLD`、`VERSION_JSON_MISSING`、`MISSING_FILES`、`EXTERNAL_DIR_UNWRITABLE`、`ALREADY_RUNNING`、`SPAWN_FAILED`，面板显示摘要、详细原因、缺失文件与相关路径，并提供「检查并修复文件」「选择 Java」「打开游戏目录」「打开日志」「复制错误信息」。异常退出显示 `GAME_CRASHED` / `GAME_EXITED` 诊断与日志入口；用户主动停止不误报崩溃。
+- 新建实例 → 整合包新增「搜索下载」（默认）与「本地文件」双模式：Modrinth / CurseForge 搜索、PCL 风格 MC 版本筛选、项目版本兼容优先与标记、一键「下载并安装」。后端解析下载地址、缓存并校验哈希，复用现有整合包管线；任务阶段为 下载整合包 → 校验整合包 → 解析清单 → 安装加载器 → 下载模组 → 解压覆盖文件 → 完成，成功/失败/取消都清理临时目录。CurseForge 未配置 API Key 时显示明确设置引导。ZIP 读取器改为按 EOCD 偏移读取中央目录，2 万+ 条 overrides 的大包也能正确识别清单。
+- 已有实例支持「导出为整合包」：优先 Modrinth `.mrpack`（`modrinth.index.json` + `overrides/`），同时提供通用 `.zip`（`manifestType: mc-toolbox` + `overrides/`）。模组按 SHA-1 匹配 Modrinth 并写入下载地址/哈希，未匹配的放入 `overrides/mods/`；导出 `config/`、`defaultconfigs/`、`kubejs/`、`resourcepacks/`、`shaderpacks/`、`options.txt`、`servers.dat`，可选存档/截图；默认排除日志、崩溃报告、缓存与账户令牌。导出异步、可取消、有真实进度与压缩包校验，失败不留半成品；外部实例只读源目录。
+- 社区接口 `/api/community/search` 与 `/api/community/versions` 对 `gameVersion` 做格式 + Mojang 清单校验：非法/未知版本不硬过滤，回退全部版本并返回 `gameVersionNotice`，避免静默 0 结果。版本接口保留旧数组响应，新增 `withMeta=1` 返回对象与提示。
+- 回归与验证：`node --test tests/*.test.mjs` 105 项通过；`node build.mjs` 生成 82.7 MB EXE；`tools/launcher-ui-smoke.mjs` 20/20；真实 PCL2 外部 26.2 实例启动到主菜单，在线安装 Modrinth「FPS Modpack 1.8」，导出 `.mrpack`/`.zip` 后重新导入并启动。
+- 详细设计与验收记录见 [启动器说明](docs/launcher.md)。
+
 ### v1.8.0 内置启动器（Launch Bay）
 
 - 新增独立启动器页面并作为默认主菜单：标题栏「启动器 / 工作台」一键切换，`Ctrl/Cmd+1`、`Ctrl/Cmd+2` 直接跳转。工作台、八个功能磁贴、设置页与所有旧数据保持原样，启动器只新增入口，不替换任何工具。
@@ -138,13 +178,14 @@ node build.mjs
 
 产出 `dist/mc-toolbox.exe`（约 83 MB）。**双击即可启动，无需安装 Node.js**。
 
-发布版首次运行将数据与运行时放在用户目录，EXE 所在目录保持干净：
+发布版首次运行把配置与运行时放在用户目录；第一次进入启动器时会让你选择游戏目录，默认在 EXE 同级创建 `.minecraft`（和 PCL / HMCL 一致，之后可在「设置 → 游戏目录」更换）：
 
 ```
 %LOCALAPPDATA%/MC Toolbox/data/        用户数据（监测历史、磁贴布局）
 %LOCALAPPDATA%/MC Toolbox/runtime/     界面、翻译运行时和下载的 Java
 文档/MC Toolbox/config/               设置及配置
 文档/MC Toolbox/client-mods/          客户端模组库
+<EXE 所在目录>/.minecraft/            游戏文件（versions / libraries / assets / instances）
 ```
 
 升级后按内嵌版本自动更新界面缓存。源码开发模式使用项目内的 data / runtime / public 目录。
@@ -295,10 +336,18 @@ GET    /api/data/export               导出配置
 # 启动器（详见 docs/launcher.md）
 GET    /api/launcher/bootstrap        启动器设置、实例、账户、任务、会话
 GET/PUT /api/launcher/settings        启动器设置
+GET    /api/launcher/update/check     检查 GitHub Releases 是否有新版本（?force=1 绕过缓存）
+POST   /api/launcher/update/download  下载新版本 exe（立即返回，进度看 state）
+GET    /api/launcher/update/state     下载进度与是否可一键替换
+POST   /api/launcher/update/apply     替换当前 exe 并重启（仅 Windows 打包版）
+POST   /api/launcher/update/skip      忽略某个版本
+GET/PUT /api/launcher/update/config   更新源（仓库 / Token / 预发布 / 忽略版本）
 GET    /api/launcher/instances        实例列表
 GET/PUT/DELETE /api/launcher/instances/:id   实例详情 / 修改 / 删除
-POST   /api/launcher/instances/:id/launch    启动游戏
+POST   /api/launcher/instances/:id/launch    启动游戏（立即返回，准备阶段轮询 status.launch）
+POST   /api/launcher/instances/:id/launch/cancel 取消启动准备
 POST   /api/launcher/instances/:id/stop      停止游戏
+GET    /api/launcher/instances/:id/status    运行状态 + 启动阶段/错误（launch）
 GET    /api/launcher/instances/:id/preview   启动命令预览（令牌脱敏）
 GET    /api/launcher/instances/:id/log       实时/已保存日志
 GET    /api/launcher/instances/:id/content   模组/资源包/光影/世界/截图/服务器/日志/崩溃
@@ -308,7 +357,12 @@ GET    /api/launcher/versions         Mojang 版本清单（正式版/快照）
 GET    /api/launcher/loaders/:loader/versions 加载器版本候选
 POST   /api/launcher/install          创建安装任务
 GET    /api/launcher/jobs             安装/整合包任务
-POST   /api/launcher/packs/install    安装 .mrpack / CurseForge ZIP
+POST   /api/launcher/packs/install    安装本地 .mrpack / CurseForge ZIP / 本工具导出的 ZIP
+POST   /api/launcher/packs/install-online 搜索下载的整合包一键安装
+POST   /api/launcher/instances/:id/export 导出实例为 .mrpack / 通用 .zip
+GET    /api/launcher/exports          导出任务列表
+GET    /api/launcher/exports/:id      导出任务详情与增量日志
+POST   /api/launcher/exports/:id/cancel 取消导出
 GET    /api/launcher/java             扫描本机 Java
 GET/POST /api/launcher/accounts       账户列表 / 添加离线账户
 POST   /api/launcher/accounts/ms/start|poll 微软设备码登录
@@ -316,4 +370,11 @@ POST   /api/launcher/accounts/authlib 第三方 authlib-injector 登录
 GET    /api/launcher/import/scan      扫描本机 .minecraft / PCL / HMCL 版本
 POST   /api/launcher/import           导入已有版本（引用原目录）
 GET    /api/launcher/news             Mojang 版本动态
+
+# 社区资源（版本参数校验）
+GET    /api/community/search          搜索项目；返回 gameVersionRequested/Applied/Notice
+GET    /api/community/versions        项目版本；withMeta=1 返回 items + 版本提示
+GET    /api/community/project         项目详情
+POST   /api/community/download        下载单个文件到下载中心
+GET    /api/community/jobs            社区下载任务
 ```

@@ -8,6 +8,7 @@ import { badge, btn, iconBtn, input, seg, spinner, openPath as openPathDefault }
 import { api as coreApi } from '../core/api.js'
 import { launcherApi } from './api.js'
 import { emptyBlock, sectionCard, loaderLabel } from './ui.js'
+import { versionCombo, partitionVersions, compatibleVersion, filterSummary, isMinecraftVersion, versionTagBadges } from './version-picker.js'
 const ENV = { client: ['客户端', 'info'], server: ['服务端', 'accent'], both: ['通用', ''], '*': ['通用', ''] }
 const MODES = ['生存模式', '创造模式', '冒险模式', '旁观模式']
 const KINDS = { release: '正式版', beta: '测试版', alpha: '预览版' }
@@ -561,10 +562,15 @@ const INSTALL_KINDS = {
   shaderpacks: { type: 'shader', label: '光影', icon: 'wand', title: '安装光影', loader: false }
 }
 
+/** 读取 Mojang 版本清单失败时的内置常用版本（契约 §7）。 */
+const MC_FALLBACK_VERSIONS = ['26.2', '26.1', '1.21.11', '1.21.8', '1.21.4', '1.21.1', '1.20.1', '1.20', '1.19.4', '1.18.2', '1.17.1', '1.16.5', '1.12.2', '1.8.9']
+
 function openContentInstall(t, kind, onDone, { initialQuery = '' } = {}) {
   const conf = INSTALL_KINDS[kind] || INSTALL_KINDS.mods
   const isMod = kind === 'mods'
-  const hasMc = !!t.inst.mc
+  const instanceMc = String(t.inst.mc || '').trim()
+  // 实例没有真实 MC 版本时不把实例名/目录名当版本传出去，避免用非法值筛选。
+  const hasMc = isMinecraftVersion(instanceMc)
   const targetDir = isMod
     ? t.inst.paths?.modsDir
     : kind === 'resourcepacks' ? t.inst.paths?.resourcePacksDir : t.inst.paths?.shaderPacksDir
@@ -572,25 +578,76 @@ function openContentInstall(t, kind, onDone, { initialQuery = '' } = {}) {
   let project = null
   let view = 'search'
   let seq = 0
-  let searching = false
-  let versionScope = hasMc ? 'instance' : 'all'
+  let versions = []
+  let othersOpen = false
+  let onlyCompatible = false
   const searchBox = input({ value: initialQuery, placeholder: `搜索${conf.label}名称…`, onKeyDown: (event) => { if (event.key === 'Enter') { event.preventDefault(); search() } } })
   searchBox.style.flex = '1 1 200px'
   const status = tip('')
   const results = h('div', { class: 'lp-list', style: { maxHeight: '52vh', overflowY: 'auto' } })
   const sourceSeg = seg([['modrinth', 'Modrinth'], ['curseforge', 'CurseForge']], source, (value) => {
     source = value
-    view === 'versions' ? reloadVersions() : search()
+    // 项目 ID 与来源绑定：切换来源后旧项目不再有效，直接回到搜索结果。
+    project = null
+    othersOpen = false
+    onlyCompatible = false
+    search()
   })
-  const scopeSeg = hasMc
-    ? seg([['instance', t.inst.mc], ['all', '全部版本']], versionScope, (value) => {
-      versionScope = value
-      view === 'versions' ? reloadVersions() : search()
-    }, { title: '按 Minecraft 版本筛选' })
-    : null
-  const searchBar = barEl(sourceSeg, scopeSeg, searchBox, btn('搜索', { size: 'sm', variant: 'primary', iconName: 'search', onClick: search }))
+  const combo = versionCombo({
+    value: hasMc ? instanceMc : '',
+    instanceMc: hasMc ? instanceMc : '',
+    versions: MC_FALLBACK_VERSIONS,
+    title: '按 Minecraft 版本筛选',
+    allLabel: '全部版本',
+    currentLabel: '当前实例',
+    onChange: () => {
+      paintFilterLine()
+      // 版本列表已经一次读全，切换筛选项只需本地重新分组，不重复请求。
+      if (view === 'versions' && project) renderVersions()
+      else search()
+    }
+  })
+  // 输入框同时是筛选框：聚焦时清空文字以便浏览完整 Mojang 版本列表，
+  // 没选就离开时还原成已选值（versionCombo 内部仍保留选中值）。
+  const comboField = combo.el.querySelector('.lp-vc-input')
+  if (comboField) {
+    comboField.addEventListener('focus', () => {
+      if (!comboField.value) return
+      comboField.value = ''
+      comboField.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    comboField.addEventListener('blur', () => {
+      const selected = combo.getValue()
+      if (selected && !String(comboField.value || '').trim()) comboField.value = selected
+    })
+  }
+  const searchBtn = btn('搜索', {
+    size: 'sm',
+    variant: 'primary',
+    iconName: 'search',
+    onClick: () => {
+      // 输入框里手动输入了合法版本时，先确认筛选条件再搜索，避免界面显示与请求不一致。
+      const typed = String(comboField?.value || '').trim()
+      const selected = combo.getValue()
+      if (typed && typed !== selected) {
+        if (!isMinecraftVersion(typed)) {
+          combo.setError(`「${typed}」不是有效的 MC 版本号，请输入类似 1.21.8 或 26.3 的版本。`)
+          return
+        }
+        combo.setValue(typed) // apply 内部会触发 onChange 重新搜索
+        // 在版本列表页点“搜索”时，明确回到搜索结果，而不是只重新分组。
+        if (view === 'versions') search()
+        return
+      }
+      search()
+    }
+  })
+  const searchBar = barEl(sourceSeg, combo.el, searchBox, searchBtn)
   searchBar.style.border = '0'
   searchBar.style.padding = '0'
+  const filterLine = h('div', { class: 'lp-filter-line' })
+  const comboHint = h('div', { class: 'lp-hint', hidden: true })
+  const noticeEl = h('div', { class: 'lp-form-note lp-version-notice', hidden: true })
   const loader = isMod && t.inst.loader && t.inst.loader !== 'vanilla' ? t.inst.loader : ''
   const vanillaWarning = isMod && !loader
     ? h('div', { class: 'lp-form-note lp-danger-note' }, '当前实例是原版，没有模组加载器；这里安装的 JAR 不会在游戏中生效。请先新建 Fabric / Forge / NeoForge 实例。')
@@ -598,47 +655,75 @@ function openContentInstall(t, kind, onDone, { initialQuery = '' } = {}) {
   const modal = t.modal({
     title: conf.title,
     size: 'xl',
-    body: h('div', { class: 'col', style: { gap: '8px' } }, searchBar, vanillaWarning, status, results),
-    buttons: [{ label: '关闭', class: 'btn-ghost' }]
+    body: h('div', { class: 'col', style: { gap: '8px' } }, searchBar, filterLine, comboHint, noticeEl, vanillaWarning, status, results),
+    buttons: [{ label: '关闭', class: 'btn-ghost' }],
+    onClose: () => combo.destroy()
   })
-  function filterText() {
-    const parts = []
-    if (hasMc && versionScope === 'instance') parts.push(t.inst.mc)
-    else parts.push('全部 MC 版本')
-    if (loader) parts.push(loaderLabel(t.inst))
-    return parts.join(' · ')
+  function filterMc() {
+    return String(combo.getValue() || '').trim()
+  }
+  /** 结果区顶部的筛选条件，例如「筛选：1.21.8 · Fabric」。 */
+  function paintFilterLine() {
+    const summary = filterSummary({ mc: filterMc(), loader: isMod ? loader : '', kind })
+    const extras = []
+    if (!hasMc) {
+      extras.push(h('span', {
+        class: 'lp-vc-badge warn',
+        title: '实例没有识别到真实的 MC 版本；安装记录会留空，建议先到实例设置里填写，例如 1.21.8。'
+      }, '实例 MC 版本未知'))
+    }
+    // “筛选：”保持弱化颜色，具体条件用强调色，避免整行都是高亮。
+    const value = summary.startsWith('筛选：') ? summary.slice(3) : summary
+    filterLine.replaceChildren(h('span', {}, '筛选：'), h('b', {}, value), ...extras)
+  }
+  /** 接口返回的版本回退提示（例如版本未识别，已按全部版本搜索）。 */
+  function setNotice(text = '') {
+    const value = String(text || '').trim()
+    noticeEl.hidden = !value
+    noticeEl.replaceChildren(icon('warning', { size: 13 }), h('span', {}, value))
   }
   function showHint() {
-    status.textContent = `按 ${filterText()} 过滤；点击结果选择版本。`
+    paintFilterLine()
+    status.textContent = hasMc
+      ? `按 ${filterMc() || '全部 MC 版本'} 过滤；点击结果选择版本。`
+      : '当前实例没有识别到 MC 版本，默认按全部版本搜索；可在上方输入版本号，例如 1.21.8。'
     results.replaceChildren(emptyBlock(`搜索并选择${conf.label}`, `结果来自 Modrinth / CurseForge；安装会把文件下载到当前实例的对应目录。`, null, conf.icon))
   }
   async function search() {
-    if (searching) return
     const token = ++seq
-    searching = true
+    searchBtn.disabled = true
     view = 'search'
     project = null
+    versions = []
+    paintFilterLine()
+    setNotice('')
     status.textContent = '正在搜索…'
     results.replaceChildren(loadingBlock('正在搜索…'))
+    const mc = filterMc()
     try {
       const params = new URLSearchParams({ source, query: (searchBox.value || '').trim(), type: conf.type, limit: '20' })
-      if (hasMc && versionScope === 'instance') params.set('gameVersion', t.inst.mc)
-      else params.set('gameVersion', 'all')
+      params.set('gameVersion', mc || 'all')
+      // 模组只用实例加载器筛选；其它类型显式传 none，避免服务端回落到默认加载器。
       if (loader) params.set('loader', loader)
       else params.set('loader', 'none')
       const data = await coreApi.get('/api/community/search?' + params)
       if (token !== seq || !modal.panel.isConnected) return
-      const items = data?.items || []
-      status.textContent = `共 ${data?.total ?? items.length} 个结果 · 点击查看匹配版本`
+      const items = Array.isArray(data) ? data : (data?.items || [])
+      // 服务端识别失败时会回退全部版本并给出中文说明，这里原样提示。
+      setNotice(!Array.isArray(data) ? data?.gameVersionNotice : '')
+      const total = Array.isArray(data) ? items.length : (data?.total ?? items.length)
+      status.textContent = `共 ${total} 个结果 · 点击查看匹配版本`
       fillList(results, items, emptyBlock('没有搜索结果',
-        source === 'curseforge' ? 'CurseForge 需要 API Key，可在“设置 → 社区资源”里配置。' : '换个关键词，或把版本筛选切到“全部版本”。',
+        source === 'curseforge'
+          ? 'CurseForge 需要 API Key，可在“设置 → 社区资源”里配置。'
+          : mc ? `该内容没有适配 ${mc} 的结果；可把版本筛选切到“全部版本”再试。` : '换个关键词，或把版本筛选切到“全部版本”。',
         null, 'search'), hitRow)
     } catch (error) {
       if (token !== seq) return
       status.textContent = ''
       results.replaceChildren(failBlock('搜索失败', error, search))
     } finally {
-      if (token === seq) searching = false
+      if (token === seq) searchBtn.disabled = false
     }
   }
   function hitRow(hit) {
@@ -656,54 +741,171 @@ function openContentInstall(t, kind, onDone, { initialQuery = '' } = {}) {
       chip('查看版本')
     )
   }
-  async function loadVersionsFor(hit, { token, title } = {}) {
-    const params = new URLSearchParams({ source, id: hit.id })
-    if (hasMc && versionScope === 'instance') params.set('gameVersion', t.inst.mc)
-    else params.set('gameVersion', 'all')
-    if (loader) params.set('loader', loader)
-    else params.set('loader', 'none')
-    const versions = await coreApi.get('/api/community/versions?' + params)
-    if (token !== seq || !modal.panel.isConnected) return null
-    return Array.isArray(versions) ? versions.slice(0, 30) : []
+  /** 读取项目的全部版本（不按 MC / 加载器过滤，交给前端分组，才能“查看全部版本”）。 */
+  async function fetchVersions(hit) {
+    const params = new URLSearchParams({ source, id: String(hit?.id || '') })
+    const data = await coreApi.get('/api/community/versions?' + params)
+    const items = Array.isArray(data) ? data : (Array.isArray(data?.items) ? data.items : [])
+    const notice = Array.isArray(data) ? '' : String(data?.gameVersionNotice || '')
+    return { items: items.filter(Boolean), notice }
+  }
+  function backBar(hit) {
+    const back = barEl(btn('返回搜索结果', { size: 'sm', iconName: 'arrow-left', onClick: () => search() }), h('b', { style: { fontSize: '12px' } }, hit?.title || '版本列表'))
+    back.style.border = '0'
+    back.style.padding = '0'
+    return back
   }
   async function openProject(hit) {
     const token = ++seq
     view = 'versions'
     project = hit
-    status.textContent = `正在读取「${hit.title}」的版本…`
+    versions = []
+    othersOpen = false
+    onlyCompatible = false
+    paintFilterLine()
+    setNotice('')
+    status.textContent = `正在读取「${hit.title || ''}」的版本…`
     results.replaceChildren(loadingBlock('正在读取版本列表…'))
-    const back = barEl(btn('返回搜索结果', { size: 'sm', iconName: 'arrow-left', onClick: () => { seq++; search() } }), h('b', { style: { fontSize: '12px' } }, hit.title))
-    back.style.border = '0'
-    back.style.padding = '0'
+    const back = backBar(hit)
     try {
-      const items = await loadVersionsFor(hit, { token })
-      if (!items) return
-      status.textContent = `${hit.title} · ${items.length} 个匹配版本`
-      results.replaceChildren(back, ...(items.length ? items.map(versionRow) : [emptyBlock('没有匹配的版本', '把版本筛选切到“全部版本”，或确认该内容支持当前 MC 版本。', null, 'filter')]))
+      const data = await fetchVersions(hit)
+      if (token !== seq || !modal.panel.isConnected) return
+      versions = data.items
+      setNotice(data.notice)
+      renderVersions(back)
     } catch (error) {
       if (token !== seq) return
       status.textContent = ''
-      results.replaceChildren(back, failBlock('读取版本失败', error))
+      results.replaceChildren(backBar(hit), failBlock('读取版本失败', error))
     }
   }
-  async function reloadVersions() {
-    if (view === 'versions' && project) await openProject(project)
-    else await search()
+  /** 当前实例可用：MC 与实例一致，且模组加载器明确匹配（不靠猜测）。 */
+  function isCurrentVersion(version, mc) {
+    if (!hasMc || !mc || mc !== instanceMc) return false
+    if (!compatibleVersion(version, { mc: instanceMc, loader: isMod ? loader : '', kind })) return false
+    if (kind !== 'mods') return true
+    if (!loader) return false // 原版实例无法加载模组，不能标成可用
+    const loaders = Array.isArray(version?.loaders) ? version.loaders.map((item) => String(item).toLowerCase()) : []
+    return loaders.includes(String(loader).toLowerCase())
   }
-  function versionRow(version) {
+  /** 折叠的不兼容版本组：默认收起，展开后才创建行，避免一次渲染上百条。 */
+  function otherVersionsGroup(rows) {
+    const list = h('div', { class: 'lp-version-list', hidden: !othersOpen },
+      ...(othersOpen ? rows.map((version) => versionRow(version)) : []))
+    const toggle = h('button', {
+      class: 'lp-version-group-toggle',
+      type: 'button',
+      'aria-expanded': String(othersOpen),
+      title: othersOpen ? '收起其他 MC 版本的版本文件' : '展开其他 MC 版本的版本文件',
+      onclick: () => { othersOpen = !othersOpen; renderVersions() }
+    },
+    icon(othersOpen ? 'chevron-down' : 'chevron-right', { size: 12 }),
+    h('span', {}, `其他版本（${rows.length}）`),
+    h('b', {}, othersOpen ? '收起' : '展开'))
+    return h('div', { class: 'lp-version-group' }, toggle, list)
+  }
+  function renderVersions(back = null) {
+    if (!project) return
+    const head = back || backBar(project)
+    const mc = filterMc()
+    const total = versions.length
+    if (!total) {
+      status.textContent = '该内容没有可用的版本文件'
+      results.replaceChildren(head, emptyBlock('没有可用的版本',
+        '该项目暂时没有公开的下载文件，换一个项目或来源再试。',
+        btn('返回搜索结果', { size: 'sm', onClick: () => search() }), 'filter'))
+      return
+    }
+    if (!mc) {
+      // 选了“全部版本”就无法判断适配性：平铺全部版本，不伪造“当前实例可用”。
+      status.textContent = `共 ${total} 个版本 · 当前筛选为全部 MC 版本`
+      results.replaceChildren(head, h('div', { class: 'lp-version-group' },
+        h('div', { class: 'lp-version-group-head' },
+          h('span', {}, '全部版本'),
+          h('span', { class: 'badge' }, `${total} 个`)),
+        tip(`当前筛选为“全部 MC 版本”，未按实例版本分组；安装记录仍使用实例版本 ${instanceMc || '未知'}。`),
+        h('div', { class: 'lp-version-list' }, ...versions.map((version) => versionRow(version)))
+      ))
+      return
+    }
+    const partition = partitionVersions(versions, { mc, loader: isMod ? loader : '', kind })
+    const compatible = partition.compatible
+    const others = partition.others
+    if (!compatible.length) {
+      status.textContent = `${project.title || ''} · 没有适配 ${mc} 的版本（共 ${total} 个）`
+      const empty = h('div', { class: 'lp-version-empty' },
+        h('b', {}, `该内容没有适配 ${mc} 的版本`),
+        h('p', {}, `该项目共有 ${total} 个版本文件，可能只支持其它 MC 版本或加载器。${instanceMc && instanceMc !== mc ? `安装到实例时会记录为 ${instanceMc}。` : ''}`),
+        othersOpen ? null : btn('查看全部版本', { size: 'sm', variant: 'primary', iconName: 'list', onClick: () => { othersOpen = true; renderVersions() } })
+      )
+      const group = h('div', { class: 'lp-version-group' },
+        h('div', { class: 'lp-version-group-head' },
+          h('span', {}, `适配 ${mc} 的版本`),
+          h('span', { class: 'badge' }, '0 个')),
+        empty
+      )
+      results.replaceChildren(head, group, ...(othersOpen && others.length ? [otherVersionsGroup(others)] : []))
+      return
+    }
+    status.textContent = `${project.title || ''} · 适配 ${mc} 的版本 ${compatible.length} 个 · 共 ${total} 个版本`
+    const switchBtn = btn(onlyCompatible ? '显示全部版本' : '只看适配版本', {
+      size: 'xs',
+      variant: 'ghost',
+      iconName: onlyCompatible ? 'list' : 'filter',
+      title: onlyCompatible ? '显示其它 MC 版本的版本文件' : '只显示适配当前筛选的版本',
+      onClick: () => { onlyCompatible = !onlyCompatible; renderVersions() }
+    })
+    const groupHead = h('div', { class: 'lp-version-group-head' },
+      h('span', {}, `适配 ${mc} 的版本`),
+      h('span', { class: 'badge ok' }, `${compatible.length} 个`),
+      kind === 'mods' && loader ? h('span', { class: 'lp-vc-badge accent', title: '当前实例加载器' }, loaderLabel(t.inst)) : null,
+      switchBtn
+    )
+    const compatibleGroup = h('div', { class: 'lp-version-group' }, groupHead,
+      h('div', { class: 'lp-version-list' }, ...compatible.map((version) => versionRow(version, {
+        compatible: true,
+        current: isCurrentVersion(version, mc),
+        recommended: String(version.id) === partition.recommendedId
+      }))))
+    const extra = !onlyCompatible && others.length ? [otherVersionsGroup(others)] : []
+    results.replaceChildren(head, compatibleGroup, ...extra)
+  }
+  function versionRow(version, { compatible = false, current = false, recommended = false } = {}) {
     const file = (version.files || []).find((item) => item.primary) || (version.files || [])[0]
     const installBtn = btn('安装到实例', { size: 'sm', variant: 'primary', iconName: 'download', disabled: !file })
     if (file) installBtn.onclick = () => install(version, file, installBtn)
-    return rowEl('lp-mod-version',
+    const tags = versionTagBadges(version, { mc: filterMc(), loader: isMod ? loader : '', kind, recommended, current })
+      .map((item) => h('span', { class: 'badge ' + (item.tone || ''), title: item.title }, item.text))
+    return rowEl('lp-mod-version' + (compatible ? ' is-compatible' : '') + (current ? ' is-current' : '') + (recommended ? ' is-recommended' : ''),
       mainEl(
         titleEl(h('b', { title: version.name || version.number || '' }, version.name || version.number || '未命名版本'),
           version.type ? badge(KINDS[version.type] || version.type) : null,
+          ...tags,
           file ? chip(fmtBytes(file.size), 'lp-chip mono') : null),
-        metaEl([(version.gameVersions || []).join(', '), (version.loaders || []).join(', '), version.date ? agoOf(version.date) : '']),
+        metaEl([(version.gameVersions || []).join(', '), (version.loaders || []).join(', '), version.date ? '发布于 ' + agoOf(version.date) : '']),
         file ? h('div', { class: 'lp-hint mono', title: file.name }, file.name) : tip('没有可用的下载文件')
       ),
       actEl(installBtn)
     )
+  }
+  /** 版本下拉的数据源：Mojang 版本清单；失败时退回内置常用版本，并说明原因。 */
+  async function loadComboVersions() {
+    try {
+      const data = await coreApi.get('/api/launcher/versions?type=all&limit=400')
+      if (t.life.dead || !modal.panel.isConnected) return
+      const list = Array.isArray(data) ? data : (data?.items || [])
+      const ids = list
+        .map((item) => String(typeof item === 'string' ? item : item?.id || '').trim())
+        .filter((id) => isMinecraftVersion(id))
+      if (!ids.length) throw new Error('宁愿用内置列表，也不使用空版本清单')
+      combo.setVersions(ids)
+      comboHint.hidden = true
+    } catch (error) {
+      if (t.life.dead || !modal.panel.isConnected) return
+      combo.setVersions(MC_FALLBACK_VERSIONS)
+      comboHint.hidden = false
+      comboHint.textContent = `未能读取 Mojang 版本列表（${error?.message || '网络不可用'}），已使用内置常用版本；也可以直接输入版本号。`
+    }
   }
   async function install(version, file, button) {
     if (!project) return
@@ -725,6 +927,7 @@ function openContentInstall(t, kind, onDone, { initialQuery = '' } = {}) {
           project: project.title,
           version: version.number || version.name || '',
           loader: t.inst.loader || '',
+          // 必须写实例的真实 MC 版本（不能用实例名或筛选值）。
           gameversion: t.inst.mc || '',
           type: conf.type,
           source,
@@ -744,6 +947,7 @@ function openContentInstall(t, kind, onDone, { initialQuery = '' } = {}) {
   }
   showHint()
   search()
+  void loadComboVersions()
 }
 function watchDownload(t, jobId, done) {
   if (!jobId) { done(true, '下载任务已提交'); return }

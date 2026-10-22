@@ -3,10 +3,11 @@
 //   2) SEA 单可执行       - 工具箱入口被打包进 node.exe，public 内嵌为 asset
 //   3) esbuild CJS bundle - 中间产物（构建中间形态）
 //
-// exe 模式 (SEA) 重要约定（让 .exe 旁边保持干净——只有一个 exe）：
+// exe 模式 (SEA) 重要约定（配置/运行时都在用户目录，exe 旁只放游戏目录）：
 //   - 数据（settings/monitors/...）→ %LOCALAPPDATA%\MC Toolbox\data
 //   - 运行时（解压后的 public）    → %LOCALAPPDATA%\MC Toolbox\runtime
 //   - 仅客户端 mod 库             → %USERPROFILE%\Documents\MC Toolbox\client-mods\
+//   - 游戏目录（首次进入时选择）   → <exe 同级>\.minecraft（可在启动器设置里更换）
 //
 // dev 模式：全部留在项目根内的 data/ runtime/ public/，便于开发。
 
@@ -210,6 +211,43 @@ import { AUTHOR } from './build-meta.js'
 import { SHELL_INTEGRITY } from './integrity.gen.js'
 import { verifyShellIntegrity } from './integrity.js'
 
+// ---------------------------------------------------------------------------
+// 写入稳定性：旧版本仍在运行时更新 runtime 资源
+//
+// 重新构建后 exe 会重新解压 runtime，此时旧进程还打开着 runtime/host/host.exe，
+// 直接覆盖会得到 EBUSY / EPERM。Windows 不允许覆盖正在运行的 exe，但允许把它
+// 改名让位，所以先 rename 到 *.old-<ts> 再写新文件（旧文件删不掉也无害）。
+// 另外对杀毒扫描 / 索引器造成的瞬时占用做几次退避重试。
+// ---------------------------------------------------------------------------
+const WRITE_RETRY_DELAYS = [80, 200, 500, 1200]
+const TRANSIENT_WRITE_CODES = new Set(['EPERM', 'EBUSY', 'EACCES'])
+
+export async function writeFileWithRetry(dest, data, encoding) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return encoding ? await fsp.writeFile(dest, data, encoding) : await fsp.writeFile(dest, data)
+    } catch (e) {
+      if (!TRANSIENT_WRITE_CODES.has(String(e?.code || '')) || attempt >= WRITE_RETRY_DELAYS.length) throw e
+      if (attempt === 0) {
+        // 通常是被旧版本进程占用：让位而不是硬碰。
+        try { await fsp.rename(dest, `${dest}.old-${Date.now()}`) } catch {}
+      }
+      await new Promise((r) => setTimeout(r, WRITE_RETRY_DELAYS[attempt]))
+    }
+  }
+}
+
+async function mkdirWithRetry(dir) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fsp.mkdir(dir, { recursive: true })
+    } catch (e) {
+      if (!TRANSIENT_WRITE_CODES.has(String(e?.code || '')) || attempt >= WRITE_RETRY_DELAYS.length) throw e
+      await new Promise((r) => setTimeout(r, WRITE_RETRY_DELAYS[attempt]))
+    }
+  }
+}
+
 async function extractAssetIfNeeded(assetKey, target) {
   const stamp = path.join(target, '.asset-version')
   let need = true
@@ -226,9 +264,9 @@ async function extractAssetIfNeeded(assetKey, target) {
   // 避免「移除功能/文件」后旧目录仍残留在磁盘上被扫描到。
   // 用逐文件删除而不是 fs.rm：避免部分环境下「整目录批量删除」被安全策略拦下。
   await removeTree(target)
-  await fsp.mkdir(target, { recursive: true })
+  await mkdirWithRetry(target)
   await extractTarGz(tgz, target)
-  await fsp.writeFile(stamp, ASSET_VERSION, 'utf8')
+  await writeFileWithRetry(stamp, ASSET_VERSION, 'utf8')
   console.log(`[SEA] 已解压 ${assetKey} 到 ${target}（${(tgz.length / 1024).toFixed(1)} KB → ${countFiles(target)} 个文件）`)
   return true
 }
@@ -254,7 +292,7 @@ async function extractTarGz(tgzBuf, target) {
   const inflated = await promisify(zlib.gunzip)(tgzBuf)
   let offset = 0
   let nextLongName = null
-  await fsp.mkdir(target, { recursive: true })
+  await mkdirWithRetry(target)
 
   while (offset + 512 <= inflated.length) {
     const header = inflated.subarray(offset, offset + 512)
@@ -291,12 +329,12 @@ async function extractTarGz(tgzBuf, target) {
 
     const dest = path.join(target, name.replace(/^\.\//, ''))
     if (typeFlag === '5' || name.endsWith('/')) {
-      await fsp.mkdir(dest, { recursive: true })
+      await mkdirWithRetry(dest)
       continue
     }
     if (typeFlag === '2') continue
-    await fsp.mkdir(path.dirname(dest), { recursive: true })
-    await fsp.writeFile(dest, data)
+    await mkdirWithRetry(path.dirname(dest))
+    await writeFileWithRetry(dest, data)
   }
 }
 
@@ -433,9 +471,9 @@ async function migrateLegacyLayout() {
   }
 
   const targets = { configDir: newConfig, dataDir: newData, modsDir: newClientModsDir }
-  await fsp.mkdir(newConfig, { recursive: true })
-  await fsp.mkdir(newData, { recursive: true })
-  await fsp.mkdir(newClientModsDir, { recursive: true })
+  await mkdirWithRetry(newConfig)
+  await mkdirWithRetry(newData)
+  await mkdirWithRetry(newClientModsDir)
 
   // 1) exe 旁 data/ → 按类别拆到 config / data / client-mods
   await migrateDataDir(legacyData, targets)
@@ -463,7 +501,7 @@ export const HOST_EXE = isSEA
 export async function init() {
   await migrateLegacyLayout()
   if (!isSEA) return
-  await fsp.mkdir(_seaRuntimeDir(), { recursive: true })
+  await mkdirWithRetry(_seaRuntimeDir())
   await extractAssetIfNeeded(ASSET_PUBLIC, path.join(_seaRuntimeDir(), 'public'))
   await verifyShellIntegrity(PUBLIC_DIR, SHELL_INTEGRITY, AUTHOR)
   await extractAssetIfNeeded(ASSET_HOST, path.join(_seaRuntimeDir(), 'host'))

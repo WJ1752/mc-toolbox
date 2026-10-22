@@ -344,7 +344,7 @@ export function javaCompatible(required, major) {
 /* ------------------------------------------------------------------ */
 
 export const LAUNCHER_BRAND = 'MC-Toolbox'
-export const LAUNCHER_VERSION = '1.8.0'
+export const LAUNCHER_VERSION = '1.9.0'
 
 export function offlineUuid(name) {
   const md5 = crypto.createHash('md5').update(`OfflinePlayer:${name}`).digest()

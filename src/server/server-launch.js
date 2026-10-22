@@ -8,10 +8,16 @@ import { RUNTIME_DIR } from './paths.js'
 const exec = promisify(execFile)
 export function requiredJava(runtime) {
   if (runtime?.cleanroom === true || runtime?.loader === 'cleanroom') return /^0\.[0-5]\./.test(runtime.loaderVersion || '') ? 21 : 25
-  const parts = /^1\.(\d+)(?:\.(\d+))?$/.exec(runtime?.mc || '')
-  if (!parts) throw new Error('请填写有效的 Minecraft 版本')
-  const minor = Number(parts[1]), patch = Number(parts[2] || 0)
-  return minor > 20 || (minor === 20 && patch >= 5) ? 21 : minor >= 18 ? 17 : minor === 17 ? 16 : 8
+  const mc = String(runtime?.mc || '')
+  // 1.x 旧版本；2026 起 MC 使用 26.x 年份版本号（与启动器的 requiredJavaMajor 保持一致）。
+  if (/^1\.\d+/.test(mc)) {
+    const parts = /^1\.(\d+)(?:\.(\d+))?/.exec(mc)
+    const minor = Number(parts[1]), patch = Number(parts[2] || 0)
+    return minor > 20 || (minor === 20 && patch >= 5) ? 21 : minor >= 18 ? 17 : minor === 17 ? 16 : 8
+  }
+  const modern = /^(\d+)\.(\d+)/.exec(mc)
+  if (!modern) throw new Error('请填写有效的 Minecraft 版本')
+  return Number(modern[1]) >= 26 ? 25 : 21
 }
 
 export function validateMemory(memory = '4G', minMemory = '1G') {
@@ -27,7 +33,7 @@ export function validateMemory(memory = '4G', minMemory = '1G') {
 
 export async function probeJava(executable) {
   try {
-    const { stdout, stderr } = await exec(executable, ['-XshowSettings:properties', '-version'], { windowsHide: true, timeout: 6000, maxBuffer: 128 * 1024 })
+    const { stdout, stderr } = await exec(executable, ['-XshowSettings:properties', '-version'], { windowsHide: true, timeout: 15000, maxBuffer: 256 * 1024 })
     const output = stdout + stderr
     const version = /(?:java|openjdk) version "([^"]+)"/.exec(output)?.[1] || /java.version\s*=\s*(\S+)/.exec(output)?.[1]
     const major = version?.startsWith('1.') ? Number(version.split('.')[1]) : Number(version?.split(/[.+_-]/)[0])
@@ -203,7 +209,7 @@ try {
       [void]$process.Start()
       $stderr = $process.StandardError.ReadToEndAsync()
       $stdout = $process.StandardOutput.ReadToEndAsync()
-      if (!$process.WaitForExit(6000)) { $process.Kill(); continue }
+      if (!$process.WaitForExit(15000)) { $process.Kill(); continue }
       $output = $stderr.Result + $stdout.Result
       if ($output -match '(?:java|openjdk) version "([^"]+)"') {
         $version = $Matches[1]

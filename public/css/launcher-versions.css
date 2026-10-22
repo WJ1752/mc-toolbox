@@ -1,0 +1,260 @@
+/* 启动器 v1.9 · MC 版本选择器与内容版本列表
+ * 与 launcher.css 分离，避免并行改动冲突；所有颜色取自 tokens.css。 */
+
+/* ---------------- PCL 风格版本下拉框 ---------------- */
+.lp-vc {
+  position: relative;
+  flex: 1 1 190px;
+  min-width: 150px;
+  max-width: 280px;
+}
+.lp-vc-input {
+  width: 100%;
+  padding-right: 26px !important;
+}
+.lp-vc-input.is-invalid {
+  border-color: var(--redstone) !important;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--redstone) 35%, transparent);
+}
+.lp-vc-caret {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  color: var(--mute);
+  pointer-events: none;
+  display: inline-flex;
+}
+.lp-vc.is-open .lp-vc-caret { color: var(--accent); }
+.lp-vc-menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--line-hi);
+  border-radius: var(--r-1);
+  background: var(--surface);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .38);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.lp-vc-menu[hidden] { display: none; }
+.lp-vc-group {
+  padding: 5px 7px 3px;
+  font-size: 9px;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--mute);
+  font-family: var(--font-mono);
+}
+.lp-vc-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  background: transparent;
+  color: var(--dim);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+.lp-vc-item:hover,
+.lp-vc-item.is-focus { background: var(--surface-2); color: var(--text); }
+.lp-vc-item.is-active { border-color: var(--accent-line); background: var(--accent-soft); color: var(--text); }
+.lp-vc-item.is-current .lp-vc-item-text { color: var(--accent); font-weight: 600; }
+.lp-vc-item-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lp-vc-badges { display: inline-flex; gap: 3px; flex: none; }
+.lp-vc-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 15px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  color: var(--mute);
+  font-size: 8.5px;
+  white-space: nowrap;
+}
+.lp-vc-badge.accent { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.lp-vc-badge.warn { color: var(--gold); border-color: color-mix(in srgb, var(--gold) 40%, var(--line)); }
+.lp-vc-hint {
+  padding: 3px 2px 0;
+  font-size: 10px;
+  line-height: 1.5;
+  color: var(--gold);
+}
+.lp-vc-hint[hidden] { display: none; }
+
+/* 顶部筛选条件 */
+.lp-filter-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 10.5px;
+  color: var(--dim);
+}
+.lp-filter-line b { color: var(--accent); font-weight: 600; }
+.lp-filter-line .lp-vc-badge { height: 16px; }
+.lp-filter-line .spacer { flex: 1; }
+
+/* ---------------- 兼容 / 其他版本分组 ---------------- */
+.lp-version-group { display: flex; flex-direction: column; gap: 3px; margin-top: 8px; }
+.lp-version-group:first-of-type { margin-top: 2px; }
+.lp-version-group-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 1px;
+  font-size: 10px;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--mute);
+}
+.lp-version-group-head::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+.lp-version-group-head .badge { text-transform: none; letter-spacing: 0; }
+.lp-version-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 7px;
+  border: 1px dashed var(--line-hi);
+  border-radius: var(--r-1);
+  background: color-mix(in srgb, var(--surface-2) 55%, transparent);
+  color: var(--mute);
+  font-size: 10.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.lp-version-group-toggle:hover { color: var(--text); border-color: var(--accent-line); }
+.lp-version-group-toggle b { color: var(--dim); }
+.lp-version-list { display: flex; flex-direction: column; gap: 3px; }
+.lp-version-list[hidden] { display: none; }
+
+/* 版本行：当前 .lp-row 只有基础布局，这里补齐边框/强调 */
+.lp-row.lp-mod-version {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+}
+.lp-row.lp-mod-version:hover { border-color: var(--line-hi); background: var(--surface-3); }
+.lp-row.lp-mod-version.is-compatible {
+  border-color: color-mix(in srgb, var(--emerald) 34%, var(--line));
+  background: color-mix(in srgb, var(--emerald) 4%, var(--surface-2));
+}
+.lp-row.lp-mod-version.is-current {
+  border-color: var(--accent-line);
+  box-shadow: inset 2px 0 0 var(--accent);
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface-2));
+}
+.lp-row.lp-mod-version.is-recommended {
+  background: linear-gradient(90deg, var(--accent-soft), transparent 42%), var(--surface-2);
+}
+.lp-row.lp-mod-version .lp-mod-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.lp-row.lp-mod-version .lp-mod-title { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; min-width: 0; }
+.lp-row.lp-mod-version .lp-mod-title b {
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.lp-row.lp-mod-version .lp-mod-meta { font-size: 9.5px; color: var(--mute); }
+.lp-version-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 14px;
+  border: 1px dashed var(--line-hi);
+  border-radius: var(--r-1);
+  background: color-mix(in srgb, var(--surface-2) 50%, transparent);
+}
+.lp-version-empty b { font-size: 12px; color: var(--dim); }
+.lp-version-empty p { font-size: 10.5px; color: var(--mute); line-height: 1.6; }
+
+/* 窄窗：动作按钮换行，避免横向溢出 */
+@media (max-width: 900px) {
+  .lp-vc { max-width: none; flex: 1 1 100%; }
+  .lp-vc-menu { max-height: 240px; }
+  .lp-row.lp-mod-version { grid-template-columns: minmax(0, 1fr); }
+  .lp-row.lp-mod-version .lp-mod-actions { justify-content: flex-start; }
+}
+
+/* 亮色主题下阴影稍微收敛 */
+:root[data-theme="light"] .lp-vc-menu { box-shadow: 0 12px 28px rgba(32, 28, 22, .16); }
+
+/* ---------------- 内容安装弹窗：筛选行 / 兼容分组补充（v1.9 · 代理 E） ---------------- */
+
+/* 分组标题里的“只看适配版本 / 显示全部版本”按钮与加载器徽章 */
+.lp-version-group-head .btn {
+  flex: none;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.lp-version-group-head .lp-vc-badge {
+  flex: none;
+  height: 16px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* 当前实例加载器徽章用强调色，和普通加载器信息区分开 */
+.lp-row.lp-mod-version.is-compatible .badge.info,
+.lp-row.lp-mod-version.is-current .badge.info {
+  color: var(--accent);
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+/* “其他版本（N）”折叠条右侧的展开/收起提示 */
+.lp-version-group-toggle b { margin-left: auto; font-weight: 500; }
+
+/* 空态里的“查看全部版本”按钮与说明之间留一点距离 */
+.lp-version-empty > .btn { margin-top: 2px; }
+
+/* 版本回退提示（gameVersionNotice）：沿用表单提示的左侧竖线，改成金色警告色 */
+.lp-version-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  border-left-color: var(--gold);
+  background: color-mix(in srgb, var(--gold) 7%, transparent);
+}
+.lp-version-notice svg { flex: none; margin-top: 1px; color: var(--gold); }
+
+/* 窄窗：分组标题允许换行，避免徽章 + 按钮撑出横向滚动 */
+@media (max-width: 900px) {
+  .lp-filter-line { font-size: 10px; }
+  .lp-version-group-head { flex-wrap: wrap; row-gap: 4px; }
+  .lp-version-group-head::after { display: none; }
+  .lp-version-group-head .lp-vc-badge { display: none; }
+  .lp-version-group-head .btn { margin-left: auto; }
+  .lp-version-group-toggle { font-size: 10px; }
+  .lp-version-empty { padding: 12px; }
+}

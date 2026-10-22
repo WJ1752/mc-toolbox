@@ -197,7 +197,7 @@ async function postForm(url, body, { signal } = {}) {
 async function postJson(url, body, { signal, headers = {} } = {}) {
   const response = await httpFetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'User-Agent': 'MC-Toolbox/1.8.0', ...headers },
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'User-Agent': 'MC-Toolbox/1.9.0', ...headers },
     body: JSON.stringify(body),
     signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000)
   })
@@ -246,7 +246,7 @@ async function completeMicrosoft(msToken, refreshToken, clientId, flow = 'azure'
   }
 
   const profileRes = await httpFetch('https://api.minecraftservices.com/minecraft/profile', {
-    headers: { Authorization: 'Bearer ' + login.data.access_token, Accept: 'application/json', 'User-Agent': 'MC-Toolbox/1.8.0' },
+    headers: { Authorization: 'Bearer ' + login.data.access_token, Accept: 'application/json', 'User-Agent': 'MC-Toolbox/1.9.0' },
     signal: AbortSignal.timeout(30000)
   })
   const profile = await profileRes.json().catch(() => null)
@@ -389,7 +389,7 @@ export function normalizeAuthServer(input) {
 async function fetchAuthlibProfile(server, uuid, { signal } = {}) {
   try {
     const response = await httpFetch(`${server}/sessionserver/session/minecraft/profile/${uuid}`, {
-      headers: { Accept: 'application/json', 'User-Agent': 'MC-Toolbox/1.8.0' },
+      headers: { Accept: 'application/json', 'User-Agent': 'MC-Toolbox/1.9.0' },
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20000)]) : AbortSignal.timeout(20000)
     })
     if (!response.ok) return { skin: '', cape: '' }
@@ -492,7 +492,7 @@ export async function ensureAuthlibInjector(server, { signal } = {}) {
   let meta = null
   try {
     const response = await httpFetch('https://authlib-injector.yushi.moe/artifact/latest.json', {
-      headers: { Accept: 'application/json', 'User-Agent': 'MC-Toolbox/1.8.0' },
+      headers: { Accept: 'application/json', 'User-Agent': 'MC-Toolbox/1.9.0' },
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(20000)]) : AbortSignal.timeout(20000)
     })
     if (response.ok) meta = await response.json()

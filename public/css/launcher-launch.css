@@ -1,0 +1,387 @@
+/* 启动器 v1.9 · 启动阶段进度、可操作错误与整合包导出
+ * 与 launcher.css 分离，避免并行改动冲突；只使用 tokens.css 中的变量。 */
+
+/* ---------------- 首页启动进度 ---------------- */
+.lp-launch-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+}
+.lp-launch-progress.is-failed {
+  border-color: color-mix(in srgb, var(--redstone) 45%, var(--line));
+  background: color-mix(in srgb, var(--redstone) 7%, var(--surface-2));
+}
+.lp-launch-progress.is-running {
+  border-color: color-mix(in srgb, var(--emerald) 32%, var(--line));
+  background: color-mix(in srgb, var(--emerald) 5%, var(--surface-2));
+}
+.lp-launch-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--dim);
+}
+.lp-launch-progress-head b {
+  font-size: 10.5px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lp-launch-progress-head .lp-hint { margin: 0; font-size: 9.5px; }
+.lp-launch-phase {
+  font-size: 9.5px;
+  color: var(--mute);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.lp-launch-progress .bar { height: 4px; }
+.lp-launch-cancel {
+  flex: none;
+  margin-left: auto;
+  max-height: 20px;
+  font-size: 9px;
+  padding: 0 6px;
+}
+.lp-launch-error-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  margin-top: 2px;
+  padding: 5px 7px;
+  border: 1px solid color-mix(in srgb, var(--redstone) 35%, var(--line));
+  border-radius: var(--r-1);
+  background: color-mix(in srgb, var(--redstone) 6%, transparent);
+  color: var(--redstone);
+  font-size: 10px;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.lp-launch-error-line:hover { background: color-mix(in srgb, var(--redstone) 11%, transparent); }
+.lp-launch-error-line span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------------- 启动失败面板 ---------------- */
+.lp-launch-error-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.lp-launch-error-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--redstone) 40%, var(--line));
+  border-radius: var(--r-1);
+  background: color-mix(in srgb, var(--redstone) 7%, var(--surface-2));
+}
+.lp-launch-error-summary > svg { color: var(--redstone); flex: none; margin-top: 2px; }
+.lp-launch-error-summary b { display: block; font-size: 12px; color: var(--text); margin-bottom: 2px; }
+.lp-launch-error-summary p { font-size: 10.5px; color: var(--dim); line-height: 1.6; overflow-wrap: anywhere; }
+.lp-launch-error-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  font-size: 10.5px;
+  color: var(--dim);
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.lp-launch-error-detail code,
+.lp-launch-error-detail .mono { font-family: var(--font-mono); font-size: 9.5px; color: var(--mute); }
+.lp-launch-error-detail .lp-subhead { margin: 2px 0 3px; }
+.lp-error-missing {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--mute);
+  max-height: 150px;
+  overflow-y: auto;
+}
+.lp-error-missing li { overflow-wrap: anywhere; }
+.lp-error-code {
+  display: inline-flex;
+  align-items: center;
+  height: 15px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  color: var(--mute);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+}
+.lp-error-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.lp-error-actions .btn { flex: none; }
+.lp-crash-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--redstone) 34%, var(--line));
+  border-radius: var(--r-1);
+  background: color-mix(in srgb, var(--redstone) 5%, var(--surface-2));
+}
+.lp-crash-panel b { font-size: 11.5px; color: var(--text); }
+.lp-crash-panel p { font-size: 10.5px; color: var(--dim); line-height: 1.6; }
+.lp-crash-panel .lp-row-actions { margin-top: 2px; }
+
+/* ---------------- 整合包导出 ---------------- */
+.lp-export-form {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-width: 0;
+}
+.lp-export-form .lp-field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.lp-export-form .lp-field-row > label {
+  flex: none;
+  width: 72px;
+  font-size: 10.5px;
+  color: var(--mute);
+}
+.lp-export-form .lp-inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--dim);
+}
+.lp-export-form .lp-inline-check input { accent-color: var(--accent); }
+.lp-export-format {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.lp-export-format-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  cursor: pointer;
+}
+.lp-export-format-option.is-active {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+.lp-export-format-option input { margin-top: 2px; accent-color: var(--accent); }
+.lp-export-format-option b { display: block; font-size: 11px; color: var(--text); }
+.lp-export-format-option span { font-size: 9.5px; color: var(--mute); line-height: 1.5; }
+.lp-export-path {
+  flex: 1 1 260px;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+.lp-export-job {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+}
+.lp-export-job.is-done { border-color: color-mix(in srgb, var(--emerald) 34%, var(--line)); }
+.lp-export-job.is-failed { border-color: color-mix(in srgb, var(--redstone) 38%, var(--line)); }
+.lp-export-job-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.lp-export-job-head b { font-size: 11px; }
+.lp-export-job-head .badge { margin-left: auto; }
+.lp-export-done {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 10px;
+  color: var(--dim);
+}
+.lp-export-done .mono { font-family: var(--font-mono); font-size: 9.5px; color: var(--mute); overflow-wrap: anywhere; }
+
+/* 窄窗 */
+@media (max-width: 900px) {
+  .lp-launch-progress { padding: 5px 6px; }
+  .lp-export-form .lp-field-row > label { width: 100%; }
+  .lp-export-form .btn { flex: 1 1 auto; }
+}
+
+/* ==================================================================
+ * v1.9 补充：只追加本代理新增的 DOM 所需样式，不重复定义 .lp-launch。
+ * ================================================================== */
+
+/* hidden 属性需要覆盖这些元素的 display，否则进度块收起无效。 */
+.lp-launch-progress[hidden],
+.lp-launch-progress .bar[hidden],
+.lp-launch-error-line[hidden],
+.lp-launch-cancel[hidden] { display: none !important; }
+
+.lp-launch-progress-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--accent);
+}
+.lp-launch-progress.is-failed .lp-launch-progress-icon { color: var(--redstone); }
+.lp-launch-progress.is-running .lp-launch-progress-icon { color: var(--emerald); }
+.lp-launch-progress-head > b { flex: 1; min-width: 0; }
+.lp-launch-progress .spinner { width: 10px; height: 10px; border-width: 1.5px; }
+.lp-launch-progress .lp-launch-phase { margin-top: 1px; }
+.lp-launch-progress .lp-launch-error-line { margin-top: 3px; }
+.lp-launch-error-line b { flex: none; font-size: 9px; color: var(--redstone); }
+
+/* 启动按钮内的 loading 圆环：只作用于子元素，不覆盖 .lp-launch 本体。 */
+.lp-launch .spinner {
+  border-color: color-mix(in srgb, var(--accent-ink) 28%, transparent);
+  border-top-color: var(--accent-ink);
+}
+
+/* hero 状态灯：准备中 / 失败 */
+.lp-hero-status.preparing { color: var(--gold); }
+.lp-hero-status.preparing i { background: var(--gold); box-shadow: 0 0 6px color-mix(in srgb, var(--gold) 55%, transparent); }
+.lp-hero-status.failed { color: var(--redstone); }
+.lp-hero-status.failed i { background: var(--redstone); box-shadow: 0 0 6px color-mix(in srgb, var(--redstone) 55%, transparent); }
+
+/* 概览：启动失败诊断槽（空槽不占位） */
+.lp-overview-launch { min-width: 0; }
+.lp-overview-launch:empty { display: none; }
+.lp-overview-launch .lp-card-body { padding-bottom: 10px; }
+
+/* 结构化错误面板补充 */
+.lp-launch-error-summary-main { flex: 1; min-width: 0; }
+.lp-launch-error-summary-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 2px;
+}
+.lp-launch-error-summary-title b { margin-bottom: 0; overflow-wrap: anywhere; }
+.lp-error-path-row {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: 6px;
+  align-items: baseline;
+  padding: 2px 0;
+  border-top: 1px solid color-mix(in srgb, var(--line) 45%, transparent);
+}
+.lp-error-path-row:first-of-type { border-top: 0; }
+.lp-error-path-row > span { color: var(--mute); font-size: 9.5px; white-space: nowrap; }
+.lp-error-path-row > code {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--dim);
+  overflow-wrap: anywhere;
+}
+.lp-launch-error-panel .lp-error-actions { margin-top: 1px; }
+.lp-launch-error-panel .lp-crash-panel .mono {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--mute);
+  overflow-wrap: anywhere;
+}
+
+/* 导出弹窗补充 */
+.lp-export-option-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.lp-export-option-main > span { overflow-wrap: anywhere; }
+/* “包含内容”行的勾选标签不能被上面的 72px 字段标签宽度限制。 */
+.lp-export-form .lp-field-row > label.lp-inline-check {
+  width: auto;
+  flex: none;
+  font-size: 10.5px;
+  color: var(--dim);
+}
+.lp-export-form .lp-export-path {
+  flex: 1 1 240px;
+  padding: 3px 6px;
+  border: 1px dashed var(--line);
+  border-radius: var(--r-1);
+  background: color-mix(in srgb, var(--surface-3) 55%, transparent);
+  min-height: 20px;
+  display: flex;
+  align-items: center;
+}
+.lp-export-form .lp-launch-error-line { cursor: default; }
+.lp-export-job-slot { display: flex; flex-direction: column; gap: 6px; }
+.lp-export-job-slot:empty { display: none; }
+.lp-export-job .bar { height: 5px; margin: 1px 0; }
+.lp-export-job-head > b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lp-export-job .lp-hint { margin: 0; }
+.lp-export-job .lp-launch-error-line { cursor: default; }
+.lp-export-job-log {
+  margin: 0;
+  padding: 5px 7px;
+  max-height: 96px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--bg-3);
+  color: var(--mute);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.lp-export-done .btn { flex: none; }
+.lp-export-done > span { min-width: 0; overflow-wrap: anywhere; }
+
+/* 窄窗：阶段文案换行，路径与表单不溢出 */
+@media (max-width: 900px) {
+  .lp-launch-progress-head b {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    line-height: 1.45;
+  }
+  .lp-launch-cancel { margin-left: 0; }
+  .lp-launch-error-summary { flex-wrap: wrap; }
+  .lp-error-path-row { grid-template-columns: 1fr; gap: 1px; }
+  .lp-error-path-row > span { white-space: normal; }
+  .lp-launch-error-summary-title b { white-space: normal; }
+  .lp-export-form .lp-export-path { flex-basis: 100%; }
+  .lp-export-job-head { flex-wrap: wrap; }
+  .lp-export-job-head .badge { margin-left: 0; }
+  .lp-export-done { align-items: flex-start; }
+}
+

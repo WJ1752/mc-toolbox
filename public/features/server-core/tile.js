@@ -1,4 +1,5 @@
-import { h, clear, fmtBytes } from '/js/core/dom.js'
+import { h, clear } from '/js/core/dom.js'
+import { jobProgress, jobMetaText, jobStatusLabel } from '/js/core/jobs.js'
 import { api } from '/js/core/api.js'
 import { toast } from '/js/core/toast.js'
 import { pickDir } from '/js/core/dirpicker.js'
@@ -23,15 +24,6 @@ const LOADER_HINT = {
   neoforge: 'Forge 社区新版分支',
   quilt: 'Fabric 衍生加载器',
   paper: '高性能插件服务端'
-}
-
-const STATUS_LABEL = {
-  queued: '排队中',
-  running: '下载中',
-  installing: '安装中',
-  done: '已完成',
-  failed: '失败',
-  cancelled: '已取消'
 }
 
 const EMPTY_JOBS = '暂无下载任务'
@@ -495,32 +487,21 @@ function createServerCore(ctx, { expanded }) {
   }
 
   function jobCard(job) {
-    const label = STATUS_LABEL[job.status] || job.status || '未知'
+    const label = jobStatusLabel(job)
     const kind = job.status === 'done' ? 'ok' : job.status === 'failed' ? 'bad' : (job.status === 'running' || job.status === 'installing') ? 'info' : ''
     const dotKind = job.status === 'done' ? 'ok' : job.status === 'failed' ? 'bad' : (job.status === 'running' || job.status === 'installing' || job.status === 'queued') ? 'info' : ''
     const installing = job.status === 'installing'
-    const pct = job.total ? Math.min(100, Math.round((job.received / job.total) * 100)) : 0
-    const instPct = typeof job.installProgress === 'number' ? job.installProgress : null
-    const barValue = installing ? instPct : pct
-    const indeterminate = installing && instPct == null
-    const bar = progress(indeterminate ? null : barValue, {
+    const pct = jobProgress(job)
+    const indeterminate = pct === null
+    const bar = progress(pct, {
       className: 'j-bar',
-      title: indeterminate ? '正在安装' : `${Math.round(barValue || 0)}%`
+      title: indeterminate ? '进度未知' : `${Math.round(pct)}%`
     })
     if (job.status === 'done') bar.state('ok')
     else if (job.status === 'failed') bar.state('bad')
 
-    let meta
-    if (installing) {
-      meta = instPct == null ? '正在安装，请稍候…' : `正在安装 · ${Math.round(instPct)}%`
-    } else {
-      meta = `${fmtBytes(job.received)} / ${job.total ? fmtBytes(job.total) : '?'} · ${pct}%`
-      if (job.status === 'running') {
-        const speed = fmtSpeed(job.speed)
-        if (speed) meta += ` · ${speed}`
-        if (job.threads != null) meta += ` · ${job.threads} 线程`
-      }
-    }
+    let meta = jobMetaText(job)
+    if (job.status === 'running' && Number(job.threads) > 1) meta += ` · ${Number(job.threads)} 线程`
 
     const dirLine = job.dir
       ? h('div', { class: 'j-meta mono', title: job.dir }, job.dir)
@@ -647,11 +628,6 @@ function createServerCore(ctx, { expanded }) {
 // ---------------- 共享格式 ----------------
 function option(value, label) {
   return h('option', { value }, label)
-}
-
-function fmtSpeed(bps) {
-  if (!bps || bps <= 0) return ''
-  return fmtBytes(bps) + '/s'
 }
 
 function readSettings(ctx) {

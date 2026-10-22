@@ -4,6 +4,8 @@ const UA = 'mc-toolbox/1.0 (local toolbox)'
 const TIMEOUT = 25000
 
 const MC_MANIFEST = 'https://piston-meta.mojang.com/mc/game/version_manifest_v2.json'
+const BMCL_API = 'https://bmclapi2.bangbang93.com'
+const MC_MANIFESTS = [`${BMCL_API}/mc/game/version_manifest_v2.json`, MC_MANIFEST]
 const FABRIC_META = 'https://meta.fabricmc.net/v2'
 const QUILT_META = 'https://meta.quiltmc.org/v3'
 const FORGE_PROMOS = 'https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json'
@@ -23,16 +25,60 @@ export const LOADERS = [
 ]
 
 async function request(url, { json = true, signal, timeout = TIMEOUT } = {}) {
-  const res = await httpFetch(url, {
-    headers: { 'User-Agent': UA, Accept: json ? 'application/json' : '*/*' },
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout),
-    redirect: 'follow'
-  })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`HTTP ${res.status} ${text.slice(0, 120)}`)
+  let lastError = null
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await httpFetch(url, {
+        headers: { 'User-Agent': UA, Accept: json ? 'application/json' : '*/*' },
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout),
+        redirect: 'follow'
+      })
+      if (!res.ok) {
+        const text = await res.text().catch(() => '')
+        const error = new Error(`HTTP ${res.status} ${text.slice(0, 120)}`)
+        error.status = res.status
+        throw error
+      }
+      return json ? res.json() : res.text()
+    } catch (e) {
+      if (signal?.aborted) throw e
+      lastError = e
+      // 4xx 重试没有意义；超时已经等满设定时间，再重试只会更慢。
+      if (e?.status && e.status >= 400 && e.status < 500) break
+      if (e?.name === 'TimeoutError' || e?.name === 'AbortError') break
+      if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 500))
+    }
   }
-  return json ? res.json() : res.text()
+  throw lastError || new Error('请求失败：' + url)
+}
+
+/** 版本清单优先走 BMCLAPI 镜像，官方地址兜底（与启动器使用同一数据源）。 */
+async function requestManifest(signal) {
+  let lastError = null
+  for (const url of MC_MANIFESTS) {
+    try {
+      return await request(url, { signal })
+    } catch (e) {
+      if (signal?.aborted) throw e
+      lastError = e
+    }
+  }
+  throw new Error('获取 MC 版本清单失败：' + (lastError?.message || '网络不可用'))
+}
+
+/** 版本 JSON（piston-meta）同样先镜像；按版本号构造 BMCLAPI 地址。 */
+async function requestVersionJson(mc, url, signal) {
+  const urls = [...new Set([`${BMCL_API}/version/${encodeURIComponent(mc)}/json`, url].filter(Boolean))]
+  let lastError = null
+  for (const target of urls) {
+    try {
+      return await request(target, { signal })
+    } catch (e) {
+      if (signal?.aborted) throw e
+      lastError = e
+    }
+  }
+  throw new Error(`获取 Minecraft ${mc} 版本信息失败：${lastError?.message || '网络不可用'}`)
 }
 
 // ---------------- MC 版本清单（带内存缓存） ----------------
@@ -40,7 +86,7 @@ let mcCache = { at: 0, releases: null }
 
 export async function listGameVersions() {
   if (mcCache.releases && Date.now() - mcCache.at < 10 * 60 * 1000) return mcCache.releases
-  const data = await request(MC_MANIFEST)
+  const data = await requestManifest()
   const releases = (data.versions || [])
     .filter((v) => v.type === 'release')
     .map((v) => ({ id: v.id, type: v.type }))
@@ -49,7 +95,7 @@ export async function listGameVersions() {
 }
 
 async function findManifestEntry(mc, signal) {
-  const data = await request(MC_MANIFEST, { signal })
+  const data = await requestManifest(signal)
   const v = (data.versions || []).find((x) => x.id === mc)
   if (!v) throw new Error('未找到 MC 版本：' + mc)
   return v
@@ -120,25 +166,51 @@ async function forgeLoaders(mc) {
   return out
 }
 
+// NeoForge 的 maven 目录：1.20.1 发布在 net/neoforged/forge（版本号 1.20.1-47.1.x），
+// 1.20.2+ 才移到 net/neoforged/neoforge（版本号 20.2.x / 21.1.x …）。
+// 官方 maven.neoforged.net 在中国大陆经常整段不可达，所以先走 BMCLAPI 镜像再回退官方。
+const NEO_MAVEN_BASES = [
+  'https://bmclapi2.bangbang93.com/maven/net/neoforged',
+  'https://maven.neoforged.net/releases/net/neoforged'
+]
+
+async function neoforgeMetadata(group) {
+  let lastError = null
+  for (const base of NEO_MAVEN_BASES) {
+    try {
+      return await request(`${base}/${group}/maven-metadata.xml`, { json: false, timeout: 12000 })
+    } catch (e) {
+      lastError = e
+    }
+  }
+  throw new Error(`NeoForge 版本元数据获取失败（官方 maven 与 BMCLAPI 镜像都不可用）：${lastError?.message || ''}`)
+}
+
 /** NeoForge：maven-metadata 里按 MC 前缀筛选 */
 async function neoforgeLoaders(mc) {
-  const xml = await request(`${NEO_MAVEN}/maven-metadata.xml`, { json: false })
+  const legacy = String(mc) === '1.20.1'
+  const xml = await neoforgeMetadata(legacy ? 'forge' : 'neoforge')
   const versions = []
   const re = /<version>([^<]+)<\/version>/g
   let m
   while ((m = re.exec(xml)) !== null) versions.push(m[1])
-  const prefix = mcVersionToNeoPrefix(mc)
-  const matched = versions.filter((v) => v.startsWith(prefix + '.') && !v.includes('-'))
+  const prefix = `${mcVersionToNeoPrefix(mc)}.`
+  const matched = versions
+    .map((raw) => (legacy ? (raw.startsWith(`${mc}-`) ? raw.slice(mc.length + 1) : '') : raw))
+    .filter((v) => v && v.startsWith(prefix) && !v.includes('-'))
   if (!matched.length) throw new Error(`该 MC 版本没有可用的 NeoForge：${mc}`)
   // 版本号倒序（新的在前）
   matched.sort(compareVersionDesc)
-  return matched.slice(0, 30).map((v) => ({ version: v, stable: true }))
+  return [...new Set(matched)].slice(0, 30).map((v) => ({ version: v, stable: true }))
 }
 
 /** 1.21.1 -> 21.1 ；1.21 -> 21.0 ；1.20.4 -> 20.4 ；1.20.1 是唯一的 Forge 编号 47.1 */
 function mcVersionToNeoPrefix(mc) {
-  if (String(mc) === '1.20.1') return '47.1'
-  let p = String(mc).replace(/^1\./, '')
+  const clean = String(mc)
+  if (clean === '1.20.1') return '47.1'
+  // NeoForge 没有 20.3 分支，1.20.3 与 1.20.4 共用 20.4.x
+  if (clean === '1.20.3') return '20.4'
+  let p = clean.replace(/^1\./, '')
   if (!p.includes('.')) p += '.0'
   return p
 }
@@ -216,7 +288,7 @@ export async function resolveDownload({ loader, mc, loaderVersion, cleanroom = f
 
   if (loader === 'vanilla') {
     const entry = await findManifestEntry(mc, signal)
-    const meta = await request(entry.url, { signal })
+    const meta = await requestVersionJson(mc, entry.url, signal)
     const url = meta?.downloads?.server?.url
     if (!url) throw new Error('该版本没有官方服务端核心')
     const name = `minecraft_server.${mc}.jar`
@@ -246,7 +318,7 @@ export async function resolveDownload({ loader, mc, loaderVersion, cleanroom = f
     const it = Array.isArray(installers) ? installers[0] : null
     if (!it?.url) throw new Error('获取 Quilt 安装器失败')
     const entry = await findManifestEntry(mc, signal)
-    const meta = await request(entry.url, { signal })
+    const meta = await requestVersionJson(mc, entry.url, signal)
     const serverUrl = meta?.downloads?.server?.url
     if (!serverUrl) throw new Error('该版本没有官方服务端核心')
     return {
@@ -270,8 +342,11 @@ export async function resolveDownload({ loader, mc, loaderVersion, cleanroom = f
   if (loader === 'forge') {
     if (!loaderVersion) throw new Error('缺少 Forge 版本')
     const full = `${mc}-${loaderVersion}`
+    const relative = `net/minecraftforge/forge/${encodeURIComponent(full)}/forge-${encodeURIComponent(full)}-installer.jar`
     return {
       url: `${FORGE_MAVEN}/${encodeURIComponent(full)}/forge-${encodeURIComponent(full)}-installer.jar`,
+      // maven.minecraftforge.net 在国内常被墙，优先走 BMCLAPI 同路径镜像
+      mirrors: [`https://bmclapi2.bangbang93.com/maven/${relative}`],
       filename: `forge-${full}-installer.jar`,
       note: '下载安装器后自动安装服务端到目标目录',
       postCommand: javaCmd(['--installServer', '{dir}'])
@@ -280,9 +355,16 @@ export async function resolveDownload({ loader, mc, loaderVersion, cleanroom = f
 
   if (loader === 'neoforge') {
     if (!loaderVersion) throw new Error('缺少 NeoForge 版本')
+    // 1.20.1 的 NeoForge 发布在 net.neoforged:forge（版本号带 MC 前缀），1.20.2+ 才用 neoforge
+    const legacy = String(mc) === '1.20.1'
+    const group = legacy ? 'forge' : 'neoforge'
+    const version = legacy ? `${mc}-${loaderVersion}` : String(loaderVersion)
+    const artifact = legacy ? `forge-${version}` : `neoforge-${version}`
+    const relative = `net/neoforged/${group}/${encodeURIComponent(version)}/${artifact}-installer.jar`
     return {
-      url: `${NEO_MAVEN}/${encodeURIComponent(loaderVersion)}/neoforge-${encodeURIComponent(loaderVersion)}-installer.jar`,
-      filename: `neoforge-${loaderVersion}-installer.jar`,
+      url: `${NEO_MAVEN.replace(/\/neoforge$/, '')}/${group}/${encodeURIComponent(version)}/${artifact}-installer.jar`,
+      mirrors: [`https://bmclapi2.bangbang93.com/maven/${relative}`],
+      filename: `${artifact}-installer.jar`,
       note: '下载安装器后自动安装服务端到目标目录',
       postCommand: javaCmd(['--installServer', '{dir}'])
     }

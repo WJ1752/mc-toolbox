@@ -1,7 +1,8 @@
 import { api } from './core/api.js'
 import { h, clear, $, debounce, escapeHtml } from './core/dom.js'
 import { toast } from './core/toast.js'
-import { TileGrid } from './core/grid.js'
+import { TileGrid, resolveTileColumn } from './core/grid.js'
+import { isActiveJob, jobMetaText, jobProgress, jobStatusLabel } from './core/jobs.js'
 import { setChartTimeFormat } from './core/chart.js'
 import { initSettings } from './core/settings.js'
 import { openModal, confirmDialog, isModalOpen, setDangerConfirmEnabled } from './core/modal.js'
@@ -26,16 +27,17 @@ const state = {
   author: 'Rinkore28',
   bench: null,
   jobs: [],
+  launcherJobs: [],
   page: 'launcher',
   launcher: null
 }
 
 const SETTINGS_BY_FEATURE = {
   'server-status': 'network',
-  'latency-monitor': 'monitor',
-  'client2server': 'c2s',
+  'latency-monitor': 'network',
+  'client2server': 'servers',
   'community-download': 'community',
-  'server-core': 'servercore',
+  'server-core': 'servers',
   'i18n': 'i18n',
   'save-editor': 'data',
   'server-manager': 'features'
@@ -57,6 +59,7 @@ function applySettings() {
   const s = state.settings
   if (!s) return
   const cols = Math.max(1, Math.min(4, Number(s.general.tileColumns) || 1))
+  const adaptive = s.general.adaptiveTiles === true
   document.documentElement.dataset.theme = s.general.theme || 'dark'
   document.documentElement.style.setProperty('--accent', s.general.accent || '#c07a4a')
   document.documentElement.style.setProperty('--tile-cols', String(cols))
@@ -64,9 +67,50 @@ function applySettings() {
   setChartTimeFormat(s.general.timeFormat === '12h')
   setDangerConfirmEnabled(s.general.confirmDanger !== false)
   grid?.setAnimations(s.general.animations !== false)
+  grid?.setAdaptive?.(adaptive)
   grid?.relayout?.()
   syncColumnControl(cols)
+  syncLayoutModeControl(adaptive)
   updateTileActionLabels()
+}
+
+// 工具条「手动 / 自适应」按钮与设置页双向同步：只改排列方式，
+// 不动 layout 顺序、不丢 col、不重新挂载磁贴。
+function syncLayoutModeControl(adaptive) {
+  const el = document.getElementById('btnLayoutMode')
+  if (!el) return
+  const on = adaptive === true
+  el.textContent = on ? '自适应' : '手动'
+  el.classList.toggle('active', on)
+  el.setAttribute('aria-pressed', String(on))
+  el.title = on
+    ? '当前：自适应磁贴（自动排到最短列）· 点击切换为手动列布局'
+    : '当前：手动列布局（拖动只影响目标列）· 点击切换为自适应'
+}
+
+let adaptiveSaving = false
+
+async function toggleAdaptiveTiles() {
+  if (!state.settings || adaptiveSaving) return
+  const prev = state.settings.general.adaptiveTiles === true
+  const next = !prev
+  const button = document.getElementById('btnLayoutMode')
+  adaptiveSaving = true
+  if (button) button.disabled = true
+  // 先乐观切换，失败时回滚；请求期间禁用按钮，避免连点产生乱序 PUT。
+  state.settings.general.adaptiveTiles = next
+  applySettings()
+  try {
+    await api.put('/api/settings', { general: { adaptiveTiles: next } })
+    toast(next ? '已切换为自适应磁贴' : '已切换为手动列布局', 'info')
+  } catch (e) {
+    state.settings.general.adaptiveTiles = prev
+    applySettings()
+    toast('保存布局模式失败：' + e.message, 'err')
+  } finally {
+    adaptiveSaving = false
+    if (button) button.disabled = false
+  }
 }
 
 function syncColumnControl(cols, effective) {
@@ -81,17 +125,18 @@ function syncColumnControl(cols, effective) {
     b.classList.toggle('active', on)
     b.setAttribute('aria-pressed', String(on))
     b.title = Number(b.dataset.cols) === active && fitted && fitted < active
-      ? `每行 ${b.dataset.cols} 列（当前窗口只能放下 ${fitted} 列）`
-      : `每行 ${b.dataset.cols} 列`
+      ? `最大 ${b.dataset.cols} 列（当前窗口只能放下 ${fitted} 列）`
+      : `最大 ${b.dataset.cols} 列`
   }
-  wrap.title = fitted ? `每行磁贴数（当前 ${fitted} 列）` : '每行磁贴数'
+  wrap.title = fitted ? `最大列数（当前 ${fitted} 列）` : '最大列数'
 }
 
 const persistLayout = debounce(async () => {
   if (!state.settings) return
   const layout = grid.order().map((id) => {
     const t = state.tiles.get(id)
-    return { id, w: t?.w || 1, h: t?.h || 1, collapsed: !!t?.collapsed }
+    // 保存用户列位，而不是窗口变窄时 clamp 后的显示列。
+    return { id, w: t?.w || 1, h: t?.h || 1, collapsed: !!t?.collapsed, col: tileColumnOf(t) }
   })
   state.settings.layout = layout
   try {
@@ -101,23 +146,58 @@ const persistLayout = debounce(async () => {
   }
 }, 400)
 
+function tileColumnOf(tile) {
+  const n = Number.parseInt(tile?.el?.dataset?.col ?? '', 10)
+  return Number.isFinite(n) && n >= 0 ? n : 0
+}
+
 /* ------------------------------------------------------------------ */
 /* tiles                                                               */
 /* ------------------------------------------------------------------ */
 
+function maxTileColumns() {
+  return Math.max(1, Math.min(4, Number(state.settings?.general?.tileColumns) || 1))
+}
+
+// syncTiles 按 layout 顺序挂载磁贴，再补上未记录的可见功能；老配置缺少
+// col 时用这个顺序的下标分配初始列，首次加载后由 persistLayout 写回。
+function visibleFeatureOrder() {
+  const wanted = (state.features || []).filter((f) => f.enabled && f.visible)
+  const wantedIds = new Set(wanted.map((f) => f.id))
+  const order = (state.settings?.layout || []).map((l) => l.id).filter((id) => wantedIds.has(id))
+  for (const f of wanted) if (!order.includes(f.id)) order.push(f.id)
+  return order
+}
+
+function savedTileColumn(saved) {
+  if (!saved || saved.col === null || saved.col === undefined || saved.col === '') return null
+  const n = Number(saved.col)
+  return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : null
+}
+
+function initialTileColumn(feature, saved) {
+  // 全新磁贴（layout 中没有记录）追加到第一列底部；老配置缺少 col 时按
+  // layout 顺序均匀分到各列（默认最大列数为 1，即全部第一列）。
+  if (!saved) return 0
+  const index = visibleFeatureOrder().indexOf(feature.id)
+  return resolveTileColumn(null, index, maxTileColumns())
+}
+
 function tileSize(feature) {
-  const columns = Math.max(1, Number(state.settings.general?.tileColumns) || 1)
+  const columns = maxTileColumns()
   const saved = (state.settings.layout || []).find((l) => l.id === feature.id)
   const fallback = {
     w: feature.size?.w || 1,
     h: feature.size?.h || 1,
     collapsed: state.settings.general?.defaultCollapsed !== false
   }
-  if (!saved) return { ...fallback, w: columns > 1 ? 1 : fallback.w }
+  const col = savedTileColumn(saved) ?? initialTileColumn(feature, saved)
+  if (!saved) return { ...fallback, w: columns > 1 ? 1 : fallback.w, col }
   return {
     w: columns > 1 ? 1 : (saved.w || 1),
     h: saved.h || 1,
-    collapsed: saved.collapsed === undefined ? fallback.collapsed : !!saved.collapsed
+    collapsed: saved.collapsed === undefined ? fallback.collapsed : !!saved.collapsed,
+    col
   }
 }
 
@@ -212,7 +292,7 @@ function createTile(feature) {
     onclick: (e) => { e.stopPropagation(); tileMenu(e, feature.id) }
   }, icon('more', { size: 15 }))
 
-  const el = h('section', { class: 'tile', dataset: { id: feature.id } },
+  const el = h('section', { class: 'tile', dataset: { id: feature.id, col: String(size.col) } },
     h('header', { class: 'tile-head' },
       iconEl,
       title,
@@ -578,6 +658,12 @@ async function syncTiles() {
   if (sorted.length) grid.setOrder(sorted)
   updateWorkspaceMeta()
   buildRail()
+  // 只有老布局缺少 col（或布局为空）时才回写一次；避免每次启动都多发一个
+  // PUT /api/settings，减少与设置页保存的竞争。
+  const savedLayout = state.settings.layout || []
+  const needsColSave = (savedLayout.length === 0 && wanted.length > 0)
+    || savedLayout.some((entry) => wantedIds.has(entry.id) && savedTileColumn(entry) === null)
+  if (needsColSave) persistLayout()
 }
 
 /* ------------------------------------------------------------------ */
@@ -667,7 +753,8 @@ function setPage(page, { silent = false } = {}) {
   const workspaceEl = document.getElementById('workspace')
   if (!launcherEl || !railEl || !workspaceEl) return
   const changed = state.page !== page
-  if (page === 'launcher') {
+  if (changed) {
+    // 设置页是独立覆盖层；切换页面时一并收起，避免盖住新页面。
     closeBench()
     closeSettingsPage()
     closeContextMenuSafe()
@@ -732,7 +819,21 @@ function initSettingsUI() {
       bus.emit('settings:changed', s)
       if (meta.silent !== true) flashSaved()
     },
+    // 启动器设置写在 launcher.json：保存后同步启动器状态（目录、默认内存等）。
+    onLauncherSaved: async (next) => {
+      try { await state.launcher?.applySettings?.(next) } catch (e) { console.warn('[launcher] apply settings', e) }
+    },
+    onLauncherRootChanged: async () => {
+      try { await state.launcher?.refresh?.() } catch (e) { console.warn('[launcher] refresh after root', e) }
+    },
     onAnimationsChange: (v) => grid.setAnimations(v),
+    // 设置页的「自适应磁贴」需要即时生效；保存成功后 onSaved 还会再同步一次。
+    onAdaptiveChange: (v) => {
+      if (state.settings?.general) state.settings.general.adaptiveTiles = v
+      grid?.setAdaptive?.(v)
+      grid?.relayout?.()
+      syncLayoutModeControl(v)
+    },
     onReload: async () => {
       const data = await api.get('/api/features')
       state.features = data.items
@@ -792,58 +893,21 @@ async function refreshEngineStatus() {
   }
 }
 
-function jobStatusLabel(job) {
-  return {
-    queued: '排队中',
-    running: '下载中',
-    installing: '安装中',
-    done: '已完成',
-    failed: '失败',
-    cancelled: '已取消',
-    cancelling: '正在取消'
-  }[job.status] || job.status
-}
-
-function jobMeta(job) {
-  if (job.status === 'running') {
-    const pct = job.total ? Math.round((job.received / job.total) * 100) : 0
-    const speed = job.speed ? ` · ${fmtSpeed(job.speed)}` : ''
-    return `${pct}% · ${formatBytes(job.received)} / ${job.total ? formatBytes(job.total) : '?'}${speed}`
-  }
-  if (job.status === 'installing') return job.installProgress != null ? `安装 ${Math.round(job.installProgress)}%` : '安装中…'
-  if (job.status === 'done') return `已完成 · ${formatBytes(job.total || job.received)}`
-  if (job.status === 'failed') return job.error || '失败'
-  return jobStatusLabel(job)
-}
-
-function formatBytes(n) {
-  if (!n && n !== 0) return '-'
-  const u = ['B', 'KB', 'MB', 'GB']
-  let i = 0
-  let v = n
-  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++ }
-  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`
-}
-
-function fmtSpeed(bps) {
-  if (!bps || bps <= 0) return ''
-  if (bps >= 1024 * 1024) return (bps / 1024 / 1024).toFixed(1) + ' MB/s'
-  if (bps >= 1024) return (bps / 1024).toFixed(1) + ' KB/s'
-  return Math.round(bps) + ' B/s'
-}
-
-function activeJobs() {
-  return state.jobs.filter((j) => ['queued', 'running', 'installing'].includes(j.status))
+function activeJobCount() {
+  return state.jobs.filter(isActiveJob).length + state.launcherJobs.filter(isActiveJob).length
 }
 
 async function refreshJobs() {
-  try {
-    const data = await api.get('/api/community/jobs')
-    state.jobs = data.items || []
-  } catch {
-    return
-  }
-  const n = activeJobs().length
+  // 状态栏同时统计社区下载与启动器安装任务；单个来源失败时只降级该来源，
+  // 不影响另一个来源的计数。
+  const [community, launcher] = await Promise.allSettled([
+    api.get('/api/community/jobs'),
+    api.get('/api/launcher/jobs')
+  ])
+  if (community.status !== 'fulfilled' && launcher.status !== 'fulfilled') return
+  if (community.status === 'fulfilled') state.jobs = community.value?.items || []
+  if (launcher.status === 'fulfilled') state.launcherJobs = launcher.value?.items || []
+  const n = activeJobCount()
   const text = document.getElementById('sbTaskText')
   if (text) text.textContent = n ? `任务 ${n} 进行中` : '任务 0'
   if (isDrawerOpen()) renderTaskDrawer(document.getElementById('drawerBody'))
@@ -891,11 +955,12 @@ async function clearAllJobs() {
 }
 
 function jobRow(job) {
-  const pct = job.total ? Math.min(100, Math.round((job.received / job.total) * 100)) : 0
-  const installing = job.status === 'installing'
-  const barPct = installing ? job.installProgress : pct
+  // 统一口径：进度、字节、速度、耗时全部来自 core/jobs.js。
+  const pct = jobProgress(job)
+  const barPct = pct === null ? null : Math.max(0, Math.min(100, pct))
+  const indeterminate = barPct === null && isActiveJob(job)
   const fill = h('i', { style: (barPct == null ? {} : { width: barPct + '%' }) })
-  const bar = h('div', { class: 'bar' + (barPct == null ? ' indeterminate' : '') + ' j-bar' }, fill)
+  const bar = h('div', { class: 'bar' + (indeterminate ? ' indeterminate' : '') + ' j-bar' }, fill)
   const actions = h('div', { class: 'j-actions' })
   if (['queued', 'running'].includes(job.status)) {
     actions.appendChild(btn('取消', { size: 'xs', variant: 'danger', onClick: () => cancelJob(job.id) }))
@@ -912,7 +977,7 @@ function jobRow(job) {
     h('span', { class: 'dot ' + kind, title: jobStatusLabel(job) }),
     h('div', { class: 'j-main' },
       h('div', { class: 'j-title', title: job.filename }, job.filename),
-      h('div', { class: 'j-meta' }, jobMeta(job)),
+      h('div', { class: 'j-meta' }, jobMetaText(job)),
       bar,
       job.error ? h('div', { class: 'j-error' }, job.error) : null
     ),
@@ -924,11 +989,24 @@ function renderTaskDrawer(bodyEl) {
   if (!bodyEl) return
   clear(bodyEl)
   const items = state.jobs
-  const running = items.filter((j) => ['queued', 'running', 'installing'].includes(j.status))
-  const finished = items.filter((j) => !['queued', 'running', 'installing'].includes(j.status))
+  // 启动器安装任务不混进社区列表，只在顶部提示数量。
+  const launcherActive = state.launcherJobs.filter(isActiveJob)
+  const running = items.filter(isActiveJob)
+  const finished = items.filter((j) => !isActiveJob(j))
+  const totalActive = running.length + launcherActive.length
   const count = document.getElementById('drawerCount')
-  if (count) { count.textContent = String(running.length); count.hidden = running.length === 0 }
+  if (count) { count.textContent = String(totalActive); count.hidden = totalActive === 0 }
+  if (launcherActive.length) {
+    bodyEl.appendChild(h('div', {
+      class: 'overline',
+      style: { padding: '6px 2px', color: 'var(--gold)', display: 'flex', alignItems: 'center', gap: '6px' }
+    },
+      h('span', { class: 'dot warn' }),
+      `启动器任务 ${launcherActive.length} 个进行中 · 在启动器 → 下载中心查看`
+    ))
+  }
   if (!items.length) {
+    if (launcherActive.length) return
     bodyEl.appendChild(h('div', { class: 'empty-state' },
       icon('download', { size: 22 }),
       h('div', { class: 'es-title' }, '没有任务'),
@@ -980,10 +1058,10 @@ function commandItems() {
     })
   }
   if (state.page !== 'launcher') {
-    items.push({ group: '页面', label: '打开启动器', hint: 'Launch Bay', iconName: 'play', run: () => setPage('launcher') })
+    items.push({ group: '页面', label: '回到启动器主页', hint: 'Launch Bay', iconName: 'home', run: () => setPage('launcher') })
   }
   if (state.page !== 'workbench') {
-    items.push({ group: '页面', label: '打开工作台', hint: 'The Bench', iconName: 'workspace', run: () => setPage('workbench') })
+    items.push({ group: '页面', label: '打开工作台', hint: 'The Bench · 磁贴工具', iconName: 'workspace', run: () => setPage('workbench') })
   }
   for (const f of state.features.filter((x) => x.enabled)) {
     items.push({
@@ -1122,6 +1200,22 @@ function bindToolbar() {
       document.getElementById('workspace').scrollTo({ top: 0, behavior: 'smooth' })
     }
   }
+  const homeBtn = document.getElementById('btnHome')
+  if (homeBtn) {
+    clear(homeBtn)
+    homeBtn.appendChild(icon('home', { size: 18 }))
+    homeBtn.onclick = () => setPage('launcher')
+  }
+  const brandHome = document.getElementById('brandHome')
+  if (brandHome) {
+    brandHome.onclick = () => setPage('launcher')
+    brandHome.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault()
+        setPage('launcher')
+      }
+    }
+  }
   const collapseBtn = document.getElementById('btnCollapseAll')
   if (collapseBtn) {
     collapseBtn.onclick = () => {
@@ -1129,6 +1223,8 @@ function bindToolbar() {
       setAllCollapsed(!tiles.every((t) => t.collapsed))
     }
   }
+  const layoutModeBtn = document.getElementById('btnLayoutMode')
+  if (layoutModeBtn) layoutModeBtn.onclick = toggleAdaptiveTiles
   const closeSettings = document.getElementById('btnCloseSettings')
   if (closeSettings) closeSettings.onclick = () => closeSettingsPage()
   const commandBtn = document.getElementById('btnCommand')
@@ -1152,7 +1248,7 @@ function buildColumnControl() {
   if (!wrap) return
   clear(wrap)
   for (let n = 1; n <= 4; n++) {
-    const b = h('button', { class: 'btn btn-sm', type: 'button', dataset: { cols: String(n) }, title: `${n} 列` }, String(n))
+    const b = h('button', { class: 'btn btn-sm', type: 'button', dataset: { cols: String(n) }, title: `最大 ${n} 列` }, String(n))
     b.onclick = async () => {
       if (!state.settings) return
       state.settings.general.tileColumns = n
@@ -1221,6 +1317,7 @@ async function boot() {
     onChange: () => persistLayout(),
     animations: state.settings.general.animations !== false,
     masonry: true,
+    adaptive: state.settings.general.adaptiveTiles === true,
     onColumnsChange: (effective, preferred) => syncColumnControl(preferred, effective)
   })
 
@@ -1236,7 +1333,7 @@ async function boot() {
   await syncTiles()
 
   try {
-    state.launcher = await initLauncherPage({ switchPage: setPage })
+    state.launcher = await initLauncherPage({ switchPage: setPage, openSettings: openSettingsPage })
     bindPageSwitch()
     setPage('launcher', { silent: true })
   } catch (e) {

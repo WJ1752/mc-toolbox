@@ -17,6 +17,7 @@ import {
   createInstance,
   findInstance,
   updateInstance,
+  deleteInstance,
   instancePaths,
   ensureInstanceDirs,
   publicInstance
@@ -42,6 +43,7 @@ import { downloadFromMirrors, runPool } from './download.js'
 import { pickJava } from './java.js'
 import { readZipIndex, extractZip } from '../pack-converter.js'
 import { hydrateCurseForgeFiles } from '../curseforge-pack.js'
+import { resolveOnlinePack } from './pack-online.js'
 
 const jobs = new Map()
 const FINISHED = new Set(['done', 'failed', 'cancelled'])
@@ -60,6 +62,30 @@ function clamp(value, min = 0, max = 100) {
   return Math.max(min, Math.min(max, Number(value) || 0))
 }
 
+function formatBytes(bytes) {
+  const n = Math.max(0, Number(bytes) || 0)
+  if (n >= 1024 ** 3) return `${Math.round((n / 1024 ** 3) * 10) / 10} GB`
+  if (n >= 1024 ** 2) return `${Math.round((n / 1024 ** 2) * 10) / 10} MB`
+  if (n >= 1024) return `${Math.round(n / 1024)} KB`
+  return `${n} B`
+}
+
+async function sha512File(file, signal) {
+  const hash = crypto.createHash('sha512')
+  for await (const chunk of fs.createReadStream(file)) {
+    signal?.throwIfAborted()
+    hash.update(chunk)
+  }
+  return hash.digest('hex')
+}
+
+/** 在线整合包文件名只取 basename，避免接口返回的路径逃出缓存目录。 */
+function safePackFilename(name, fallback = 'pack.mrpack') {
+  const base = path.basename(String(name || '')).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim()
+  if (!base || base === '.' || base === '..') return fallback
+  return base
+}
+
 class InstallJob {
   constructor(opts) {
     this.id = newId()
@@ -71,8 +97,12 @@ class InstallJob {
     this.indeterminate = false
     this.received = 0
     this.total = 0
-    this.startedAt = Date.now()
+    // createdAt 是排队时刻，startedAt 只在 runJob 真正开跑时写入：
+    // 排队时间不能算进「已进行」，否则界面会出现「已进行 9.7 小时」。
+    this.createdAt = Date.now()
+    this.startedAt = 0
     this.finishedAt = 0
+    this.updatedAt = this.createdAt
     this.error = ''
     this.instanceId = opts.instanceId || ''
     this.name = opts.name || ''
@@ -84,6 +114,10 @@ class InstallJob {
     this.controller = new AbortController()
     this.cancelRequested = false
     this.child = null
+    this.openWhenDone = opts.openWhenDone === true
+    this.lockedPhase = ''
+    // 逻辑阶段（锁定顶层阶段时仍随内部子阶段变化），用于判断何时清零字节。
+    this.phaseKey = this.phase
   }
 
   get signal() { return this.controller.signal }
@@ -92,12 +126,31 @@ class InstallJob {
     const line = { seq: ++this.logSeq, t: nowTime(), text: String(text ?? ''), kind }
     this.logs.push(line)
     if (this.logs.length > 1500) this.logs.splice(0, this.logs.length - 1500)
+    // 安装器输出 / 日志同样算「有进展」，避免长阶段被误判为无响应。
+    // 任务结束后不再改写 updatedAt，保持「最后活动时间 = finishedAt」。
+    if (!this.finishedAt) this.updatedAt = Date.now()
     return line
   }
 
   phaseLabel(phase, detail) {
-    this.phase = phase
+    // 在线整合包把「安装加载器」作为固定顶层阶段，期间内部细分只更新 detail。
+    // phaseKey 始终记录真正的阶段：顶层阶段变化，或锁定阶段内切换到
+    // 「下载依赖库 / 下载资源文件」等子阶段时，必须清零字节，避免上一阶段
+    // 的 60 MB 整合包残留到下一阶段，出现详情 599 MB、字节 60 MB 的错位。
+    const next = String(phase ?? '')
+    const changed = next !== this.phaseKey
+    this.phaseKey = next
+    if (!this.lockedPhase) this.phase = next
+    if (changed) this.resetBytes()
     if (detail) this.detail = detail
+    this.updatedAt = Date.now()
+  }
+
+  /** 阶段切换时重置本阶段字节计数。 */
+  resetBytes() {
+    this.received = 0
+    this.total = 0
+    this.updatedAt = Date.now()
   }
 
   set(progress, detail, { indeterminate = false } = {}) {
@@ -110,11 +163,15 @@ class InstallJob {
       this.progress = clamp(progress)
     }
     if (detail !== undefined) this.detail = detail
+    this.updatedAt = Date.now()
   }
 
   bytes(received, total) {
     this.received = Math.max(0, Math.round(Number(received) || 0))
-    if (total !== undefined) this.total = Math.max(0, Math.round(Number(total) || 0))
+    // total 未知（undefined / null / 0）时归零，不能沿用上一阶段的总量，
+    // 否则 received 属于新阶段、total 还停在旧阶段，百分比就会失真。
+    this.total = Math.max(0, Math.round(Number(total) || 0))
+    this.updatedAt = Date.now()
   }
 
   public({ includeLogs = true } = {}) {
@@ -128,14 +185,17 @@ class InstallJob {
       indeterminate: this.indeterminate,
       received: this.received,
       total: this.total,
+      createdAt: this.createdAt,
       startedAt: this.startedAt,
       finishedAt: this.finishedAt,
+      updatedAt: this.updatedAt,
       error: this.error,
       instanceId: this.instanceId,
       name: this.name,
       mc: this.mc,
       loader: this.loader,
       loaderVersion: this.loaderVersion,
+      openWhenDone: this.openWhenDone === true,
       logSeq: this.logSeq,
       logs: includeLogs ? this.logs.slice(-200) : undefined
     }
@@ -145,6 +205,7 @@ class InstallJob {
 function finishJob(job, status, error = '') {
   if (job.finishedAt) return
   job.finishedAt = Date.now()
+  job.updatedAt = job.finishedAt
   job.status = status
   job.error = error || ''
   job.controller = new AbortController()
@@ -166,9 +227,22 @@ function runJob(job, task) {
   setImmediate(async () => {
     if (job.cancelRequested) {
       finishJob(job, 'cancelled')
+      try { await job.cleanup?.() } catch {}
+      if (job.createdInstanceId && job.createdInstanceId === job.instanceId) {
+        try {
+          deleteInstance(job.instanceId)
+          job.log('已清理未完成的实例，可直接重新安装', 'warn')
+          job.instanceId = ''
+        } catch {}
+      } else if (job.instanceId) {
+        try { updateInstance(job.instanceId, { installing: false }) } catch {}
+      }
       return
     }
     job.status = 'running'
+    // 只有真正开始执行才写 startedAt；排队等待通过 createdAt 展示。
+    job.startedAt = Date.now()
+    job.updatedAt = job.startedAt
     job.log('任务开始')
     try {
       await task(job)
@@ -192,7 +266,16 @@ function runJob(job, task) {
       }
     } finally {
       try { await job.cleanup?.() } catch {}
-      if (job.instanceId) {
+      // 整合包安装失败 / 取消时，本次任务刚创建的实例没有任何可用文件，
+      // 留在列表里只会变成「点不动的重复实例」。连同目录一起删掉，方便直接重装。
+      const unfinished = ['failed', 'cancelled'].includes(job.status)
+      if (unfinished && job.createdInstanceId && job.createdInstanceId === job.instanceId) {
+        try {
+          deleteInstance(job.instanceId)
+          job.log('已清理未完成的实例，可直接重新安装', 'warn')
+          job.instanceId = ''
+        } catch {}
+      } else if (job.instanceId) {
         try { updateInstance(job.instanceId, { installing: false }) } catch {}
       }
     }
@@ -213,7 +296,7 @@ export function getJobDelta(id, after = 0) {
 
 export function listJobs() {
   return [...jobs.values()]
-    .sort((a, b) => b.startedAt - a.startedAt)
+    .sort((a, b) => (b.startedAt || b.createdAt) - (a.startedAt || a.createdAt))
     .map((job) => job.public({ includeLogs: false }))
 }
 
@@ -227,6 +310,7 @@ export function cancelJob(id) {
   job.cancelRequested = true
   job.status = 'cancelling'
   job.detail = '正在取消并清理…'
+  job.updatedAt = Date.now()
   job.log('收到取消请求，正在停止下载 / 安装器…', 'warn')
   try { job.controller.abort(new Error('已取消')) } catch {}
   killChild(job.child)
@@ -246,6 +330,7 @@ function progressIn(job, from, to, ratio, detail) {
   const value = clamp(from + (to - from) * Math.max(0, Math.min(1, Number(ratio) || 0)))
   job.progress = value
   job.indeterminate = false
+  job.updatedAt = Date.now()
 }
 
 function artifactUrls(artifact, source) {
@@ -654,6 +739,7 @@ async function installVersionFiles(job, instId, root, versionId, { source, from,
   updateInstance(instId, { versionId, jarVersion })
   const paths = ensureInstanceDirs(findInstance(instId))
 
+  const libFrom = from + (to - from) * 0.02
   const clientJar = path.join(root, 'versions', jarVersion, `${jarVersion}.jar`)
   if (!fs.existsSync(clientJar)) {
     // Very old versions or imported instances may need the client jar.
@@ -661,13 +747,21 @@ async function installVersionFiles(job, instId, root, versionId, { source, from,
     const info = meta?.downloads?.client
     if (!info?.url) throw new Error('缺少客户端 JAR，且该版本没有下载地址')
     job.log('补下载客户端 JAR：' + jarVersion)
+    // 与其它下载阶段使用同一套计数：detail、received/total 都来自本次下载。
+    job.phaseLabel('下载客户端 JAR', jarVersion)
     await downloadFromMirrors(candidateUrls(info.url, { source }), clientJar, {
       sha1: info.sha1, size: info.size, signal: job.signal,
-      verify: getSettings().verify !== false, retries: getSettings().retries || 0
+      verify: getSettings().verify !== false, retries: getSettings().retries || 0,
+      onProgress: ({ received, total }) => {
+        const totalBytes = Number(total) || 0
+        if (totalBytes > 0) {
+          progressIn(job, from, libFrom, received / totalBytes, `客户端 JAR · ${formatBytes(received)} / ${formatBytes(totalBytes)}`)
+        }
+        job.bytes(received, totalBytes)
+      }
     })
   }
 
-  const libFrom = from + (to - from) * 0.02
   const libTo = from + (to - from) * (getSettings().downloadAssets === false ? 0.92 : 0.38)
   await downloadLibraries(job, effective, paths, { source, from: libFrom, to: libTo })
   await downloadLogging(job, root, effective, { source })
@@ -820,7 +914,7 @@ async function installForgeLike(job, inst, loader, mc, loaderVersion, root, { so
 async function installInstanceCore(job, instId, { from = 0, to = 100, source } = {}) {
   const inst = findInstance(instId)
   if (!inst) throw new Error('实例不存在')
-  const root = launcherRoot()
+  const root = inst.root ? path.resolve(inst.root) : launcherRoot()
   const settings = getSettings()
   const sourceMode = source || settings.source
   const mc = inst.mc
@@ -915,6 +1009,7 @@ export function startInstall({ name = '', mc, loader = 'vanilla', loaderVersion 
     loader,
     loaderVersion
   })
+  job.createdInstanceId = inst.id
   runJob(job, async () => {
     await installInstanceCore(job, inst.id, { from: 0, to: 100 })
   })
@@ -985,6 +1080,8 @@ export function startModUpdates(instanceId, items = []) {
           doneBytes += delta
           if (total) progressIn(job, 0, 99, doneBytes / total, `下载更新 · ${Math.round(doneBytes / 1048576 * 10) / 10} / ${Math.round(total / 1048576 * 10) / 10} MB`)
           else progressIn(job, 0, 99, done / list.length, `下载更新 ${done + 1}/${list.length}`)
+          // 下载中心需要 received/total 才能显示真实字节进度；与其它阶段共用同一字段。
+          job.bytes(doneBytes, total)
         }
       })
       if (oldPath !== target && fs.existsSync(oldPath)) await fsp.rm(oldPath, { force: true })
@@ -1015,7 +1112,7 @@ export function startRepair(instanceId) {
   const job = new InstallJob({ type: 'repair', instanceId, name: inst.name, mc: inst.mc, loader: inst.loader, loaderVersion: inst.loaderVersion })
   runJob(job, async () => {
     job.log('开始检查并修复文件')
-    await installVersionFiles(job, instanceId, inst.baseDir || launcherRoot(), inst.versionId, {
+    await installVersionFiles(job, instanceId, inst.baseDir || inst.root || launcherRoot(), inst.versionId, {
       source: getSettings().source,
       from: 0,
       to: 100
@@ -1049,11 +1146,30 @@ function loaderFromCurseForge(manifest) {
   return { mc, loader: match[1].toLowerCase(), loaderVersion: match[2] }
 }
 
-async function readPackMeta(file) {
+function packKindLabel(kind) {
+  if (kind === 'modrinth') return 'Modrinth'
+  if (kind === 'curseforge') return 'CurseForge'
+  if (kind === 'toolbox') return 'MC Toolbox'
+  return '未知'
+}
+
+function parsePackJson(text, name) {
+  try {
+    const value = JSON.parse(text)
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('内容不是对象')
+    return value
+  } catch {
+    throw new Error(`${name} 无法解析，整合包可能已损坏`)
+  }
+}
+
+export async function readPackMeta(file) {
+  if (!looksLikeZip(file)) throw new Error('整合包不是有效的 ZIP 文件，可能已损坏')
   let entries = {}
-  try { entries = await readJarEntries(file, ['modrinth.index.json', 'manifest.json'], { maxBytes: 24 * 1024 * 1024 }) } catch {}
+  const stats = {}
+  try { entries = await readJarEntries(file, ['modrinth.index.json', 'manifest.json'], { maxBytes: 24 * 1024 * 1024, stats }) } catch {}
   if (entries['modrinth.index.json']) {
-    const index = JSON.parse(entries['modrinth.index.json'].toString('utf8'))
+    const index = parsePackJson(entries['modrinth.index.json'].toString('utf8'), 'modrinth.index.json')
     const deps = index.dependencies || {}
     const loader = loaderFromDependencies(deps)
     return {
@@ -1065,8 +1181,45 @@ async function readPackMeta(file) {
     }
   }
   if (entries['manifest.json']) {
-    const manifest = JSON.parse(entries['manifest.json'].toString('utf8'))
-    if (manifest.manifestType !== 'minecraftModpack') throw new Error('不是受支持的 CurseForge 整合包')
+    const manifest = parsePackJson(entries['manifest.json'].toString('utf8'), 'manifest.json')
+    if (manifest.manifestType === 'mc-toolbox') {
+      // MC Toolbox 导出的通用 ZIP：用 manifest.minecraft / manifest.files 还原
+      // 一份与 mrpack 等价的 index，后续下载 / 覆盖文件流程可以直接复用。
+      const minecraft = manifest.minecraft && typeof manifest.minecraft === 'object' ? manifest.minecraft : {}
+      const runtime = loaderFromCurseForge({
+        minecraft: { ...minecraft, version: String(minecraft.version || '') }
+      })
+      const files = Array.isArray(manifest.files) ? manifest.files : []
+      const dependencies = { minecraft: String(runtime.mc || '') }
+      if (runtime.loader !== 'vanilla' && runtime.loaderVersion) {
+        const dependencyKey = runtime.loader === 'fabric'
+          ? 'fabric-loader'
+          : runtime.loader === 'quilt' ? 'quilt-loader' : runtime.loader
+        dependencies[dependencyKey] = runtime.loaderVersion
+      }
+      const index = {
+        formatVersion: Number(manifest.formatVersion) || 1,
+        game: 'minecraft',
+        versionId: String(manifest.versionId || runtime.mc || ''),
+        name: String(manifest.name || ''),
+        summary: String(manifest.summary || ''),
+        files,
+        dependencies
+      }
+      return {
+        kind: 'toolbox',
+        manifest,
+        index,
+        name: manifest.name || path.basename(file, path.extname(file)),
+        mc: String(runtime.mc || ''),
+        loader: runtime.loader,
+        loaderVersion: runtime.loaderVersion,
+        overrides: String(manifest.overrides || 'overrides') || 'overrides'
+      }
+    }
+    if (manifest.manifestType !== 'minecraftModpack') {
+      throw new Error('不是受支持的整合包：manifest.json 的类型不是 minecraftModpack / mc-toolbox')
+    }
     const runtime = loaderFromCurseForge(manifest)
     return {
       kind: 'curseforge',
@@ -1075,12 +1228,13 @@ async function readPackMeta(file) {
       ...runtime
     }
   }
+  if (!stats.zip) throw new Error('无法读取整合包目录：文件可能未下载完整或已损坏')
   throw new Error('无法识别整合包：缺少 modrinth.index.json 或 manifest.json')
 }
 
-async function copyPackOverrides(tempDir, gameDir, kind, job) {
+async function copyPackOverrides(tempDir, gameDir, kind, job, { overrides = 'overrides' } = {}) {
   const metadata = new Set(['manifest.json', 'modlist.html', 'modrinth.index.json'])
-  const dirs = ['overrides', 'client-overrides', 'server-overrides']
+  const dirs = [...new Set([overrides, 'overrides', 'client-overrides', 'server-overrides'].filter(Boolean))]
   let copied = 0
   const copyEntry = async (source, target) => {
     job.signal.throwIfAborted()
@@ -1105,19 +1259,22 @@ async function copyPackOverrides(tempDir, gameDir, kind, job) {
   // CurseForge exports sometimes put content at the archive root.
   for (const name of await fsp.readdir(tempDir)) {
     if (dirs.includes(name) || metadata.has(name)) continue
-    if (kind === 'modrinth' && !foundOverride) continue
+    if ((kind === 'modrinth' || kind === 'toolbox') && !foundOverride) continue
     await copyEntry(path.join(tempDir, name), path.join(gameDir, name))
   }
   return copied
 }
 
-async function downloadModrinthPackFiles(job, index, gameDir, { from, to }) {
+async function downloadModrinthPackFiles(job, index, gameDir, { from, to, phase = '下载整合包文件', noun = '整合包文件' } = {}) {
   const files = (index.files || []).filter((item) => item?.env?.client !== 'unsupported')
-  if (!files.length) return 0
+  job.phaseLabel(phase, `${files.length} 个文件`)
+  if (!files.length) {
+    job.log(`${noun}清单为空，无需下载`)
+    return 0
+  }
   const total = files.reduce((sum, item) => sum + (Number(item.fileSize) || 0), 0)
   let done = 0
   let bytes = 0
-  job.phaseLabel('下载整合包文件', `${files.length} 个文件`)
   await runPool(files, async (item) => {
     job.signal.throwIfAborted()
     const rel = String(item.path || '').replace(/\\/g, '/').replace(/^\/+/, '')
@@ -1144,13 +1301,17 @@ async function downloadModrinthPackFiles(job, index, gameDir, { from, to }) {
             const delta = Math.max(0, received - last)
             last = received
             bytes += delta
-            if (total) progressIn(job, from, to, bytes / total, `整合包文件 ${done + 1}/${files.length} · ${path.basename(rel)}`)
+            if (total) progressIn(job, from, to, bytes / total, `${noun} ${done + 1}/${files.length} · ${path.basename(rel)}`)
             job.bytes(bytes, total)
           }
         })
         const digest = crypto.createHash(algorithm)
         for await (const chunk of fs.createReadStream(targetTemp)) digest.update(chunk)
-        if (digest.digest('hex').toLowerCase() !== String(hash).toLowerCase()) throw new Error('哈希校验失败')
+        if (digest.digest('hex').toLowerCase() !== String(hash).toLowerCase()) {
+          // 删掉坏文件，后续镜像才会真正重新下载而不是复用同一个小文件。
+          await fsp.rm(targetTemp, { force: true }).catch(() => {})
+          throw new Error('哈希校验失败')
+        }
         lastError = null
         break
       } catch (e) {
@@ -1160,10 +1321,184 @@ async function downloadModrinthPackFiles(job, index, gameDir, { from, to }) {
     }
     if (lastError) throw new Error(`整合包文件 ${rel} 下载失败：${lastError.message}`)
     done++
-    if (done % 10 === 0 || done === files.length) job.log(`整合包文件 ${done}/${files.length}`)
+    if (done % 10 === 0 || done === files.length) job.log(`${noun} ${done}/${files.length}`)
   }, getSettings().concurrency, job.signal)
-  job.log(`整合包文件下载完成（${files.length} 个）`, 'ok')
+  job.log(`${noun}下载完成（${files.length} 个）`, 'ok')
   return done
+}
+
+async function downloadCurseForgePackFiles(job, meta, paths, { from, to, phase = '补齐 CurseForge 文件', apiKey = '' }) {
+  job.phaseLabel(phase, '通过清单文件 ID 下载')
+  job.set(from + (to - from) * 0.1, '正在按清单补齐 CurseForge 文件…')
+  const manifestFile = path.join(paths.gameDir, 'manifest.json')
+  let manifestInstalled = false
+  try {
+    // hydrateCurseForgeFiles expects the manifest at its root; keep it out of
+    // the game directory afterwards so the instance stays clean.
+    if (!fs.existsSync(manifestFile)) {
+      await fsp.writeFile(manifestFile, JSON.stringify(meta.manifest, null, 2), 'utf8')
+      manifestInstalled = true
+    }
+    await hydrateCurseForgeFiles(paths.gameDir, ({ progress, detail }) => {
+      const raw = Number(progress)
+      const ratio = Number.isFinite(raw) ? Math.max(0, Math.min(1, (raw - 28) / 15)) : null
+      if (ratio !== null) progressIn(job, from, to, ratio, detail || '正在补齐 CurseForge 文件…')
+      else job.set(null, detail || '正在补齐 CurseForge 文件…', { indeterminate: true })
+    }, job.signal, {
+      apiKey: apiKey || store.get('settings', {})?.community?.cfApiKey || ''
+    })
+  } finally {
+    if (manifestInstalled) await fsp.rm(manifestFile, { force: true }).catch(() => {})
+  }
+}
+
+async function extractPackOverrides(job, file, tempRoot, paths, meta, { from, to, phase = '解压整合包覆盖文件' }) {
+  job.phaseLabel(phase, '正在解压 overrides')
+  job.set(from, `${phase}…`, { indeterminate: false })
+  await extractZip(file, tempRoot, (ratio) => progressIn(job, from, to, ratio, phase), job.signal)
+  const copied = await copyPackOverrides(tempRoot, paths.gameDir, meta.kind, job, { overrides: meta.overrides })
+  job.log(`覆盖文件已复制（${copied} 个）`)
+}
+
+/**
+ * 整合包安装公共流程：识别清单 → 创建实例 → 安装加载器 → 下载清单文件 /
+ * 解压覆盖文件 → 写入完成标记。startPackInstall 与 startOnlinePackInstall
+ * 都走这里，只是准备文件的阶段和进度区间不同。
+ */
+async function runPackInstall(job, options = {}) {
+  const settings = getSettings()
+  const {
+    prepare,
+    file: initialFile = '',
+    name = '',
+    memory = {},
+    minMemory,
+    javaPath = '',
+    group = '',
+    tempRoot = path.join(launcherRoot(), 'cache', 'packs', job.id),
+    source = settings.source,
+    cfApiKey = '',
+    ranges = {},
+    order = 'extract-first',
+    labels = {},
+    finalPhase = '',
+    lockInstallPhase = false
+  } = options
+
+  const installRange = Array.isArray(ranges.install) ? ranges.install : [0, 62]
+  const downloadRange = Array.isArray(ranges.download) ? ranges.download : [72, 96]
+  const extractRange = Array.isArray(ranges.extract) ? ranges.extract : [62, 72]
+  const finishProgress = Number(ranges.finish) || 98
+
+  let file = String(initialFile || '')
+  let meta = null
+  if (typeof prepare === 'function') {
+    const prepared = await prepare(job)
+    file = String(prepared?.file || file)
+    meta = prepared?.meta || null
+  }
+  if (!file) throw new Error('缺少整合包文件')
+  if (!fs.existsSync(file)) throw new Error('整合包文件不存在：' + file)
+  if (!meta) {
+    job.log('读取整合包：' + path.basename(file))
+    meta = await readPackMeta(file)
+  }
+  job.log(`识别为 ${packKindLabel(meta.kind)} 整合包 · ${meta.name}`)
+  if (!meta.mc) throw new Error('整合包没有声明 Minecraft 版本')
+  const instName = String(name || meta.name || '整合包').trim()
+  job.mc = meta.mc
+  job.loader = meta.loader
+  job.loaderVersion = meta.loaderVersion
+  job.name = instName
+  const inst = createInstance({
+    name: instName,
+    mc: meta.mc,
+    loader: meta.loader,
+    loaderVersion: meta.loaderVersion,
+    memory: {
+      min: Number(memory.min ?? minMemory) || settings.defaultMinMemory,
+      max: Number(memory.max) || settings.defaultMemory
+    },
+    javaPath,
+    group,
+    versionId: meta.mc,
+    installing: true
+  })
+  job.instanceId = inst.id
+  job.createdInstanceId = inst.id
+  job.log(`已创建实例：${inst.name}（${meta.mc} · ${meta.loader}${meta.loaderVersion ? ' ' + meta.loaderVersion : ''}）`)
+  try {
+    await fsp.mkdir(tempRoot, { recursive: true })
+  } catch (e) {
+    throw new Error('无法创建整合包临时目录：' + e.message)
+  }
+
+  // 安装加载器与基础版本文件。
+  const installPhase = labels.install || ''
+  if (installPhase) job.phaseLabel(installPhase, `${meta.mc} · ${meta.loader}`)
+  if (lockInstallPhase) job.lockedPhase = installPhase || '安装加载器'
+  try {
+    await installInstanceCore(job, inst.id, { from: installRange[0], to: installRange[1], source: source || settings.source })
+  } finally {
+    if (lockInstallPhase) job.lockedPhase = ''
+  }
+  job.signal.throwIfAborted()
+  if (installPhase) job.phaseLabel(installPhase, '加载器与基础文件已就绪')
+  progressIn(job, installRange[1], installRange[1], 1, '加载器安装完成')
+
+  const current = findInstance(inst.id)
+  if (!current) throw new Error('实例已不存在，整合包安装中止')
+  const paths = instancePaths(current)
+  await fsp.mkdir(paths.gameDir, { recursive: true })
+
+  const downloadContents = async () => {
+    if (meta.kind === 'modrinth' || meta.kind === 'toolbox') {
+      await downloadModrinthPackFiles(job, meta.index, paths.gameDir, {
+        from: downloadRange[0],
+        to: downloadRange[1],
+        phase: labels.download || '下载整合包文件',
+        noun: labels.downloadNoun || '整合包文件'
+      })
+    } else {
+      await downloadCurseForgePackFiles(job, meta, paths, {
+        from: downloadRange[0],
+        to: downloadRange[1],
+        phase: labels.download || '补齐 CurseForge 文件',
+        apiKey: cfApiKey
+      })
+    }
+  }
+  const extractOverrides = async () => {
+    await extractPackOverrides(job, file, tempRoot, paths, meta, {
+      from: extractRange[0],
+      to: extractRange[1],
+      phase: labels.extract || '解压整合包覆盖文件'
+    })
+  }
+
+  if (order === 'download-first') {
+    await downloadContents()
+    job.signal.throwIfAborted()
+    await extractOverrides()
+  } else {
+    await extractOverrides()
+    job.signal.throwIfAborted()
+    await downloadContents()
+  }
+
+  await fsp.writeFile(path.join(paths.gameDir, '.mc-toolbox-pack.json'), JSON.stringify({
+    name: instName,
+    kind: meta.kind,
+    mc: meta.mc,
+    loader: meta.loader,
+    loaderVersion: meta.loaderVersion,
+    installedAt: Date.now()
+  }, null, 2), 'utf8')
+  job.set(finishProgress, '整合包安装完成，正在收尾…')
+  if (finalPhase) job.phaseLabel(finalPhase, '整合包安装完成')
+  job.log('整合包内容安装完成', 'ok')
+  updateInstance(inst.id, { installing: false, installedAt: Date.now() })
+  job.log('完成的实例：' + inst.name, 'ok')
 }
 
 export function startPackInstall({ source, name = '', memory = {}, minMemory, javaPath = '', group = '', uploaded = false }) {
@@ -1175,89 +1510,166 @@ export function startPackInstall({ source, name = '', memory = {}, minMemory, ja
     if (uploaded) await fsp.rm(path.dirname(source), { recursive: true, force: true }).catch(() => {})
   }
   runJob(job, async () => {
-    const file = source
-    if (!fs.existsSync(file)) throw new Error('整合包文件不存在：' + file)
-    job.log('读取整合包：' + path.basename(file))
-    const meta = await readPackMeta(file)
-    job.log(`识别为 ${meta.kind === 'modrinth' ? 'Modrinth' : 'CurseForge'} 整合包 · ${meta.name}`)
-    if (!meta.mc) throw new Error('整合包没有声明 Minecraft 版本')
-    const instName = String(name || meta.name || '整合包').trim()
-    const settings = getSettings()
-    job.mc = meta.mc
-    job.loader = meta.loader
-    job.loaderVersion = meta.loaderVersion
-    job.name = instName
-    const inst = createInstance({
-      name: instName,
-      mc: meta.mc,
-      loader: meta.loader,
-      loaderVersion: meta.loaderVersion,
-      memory: {
-        min: Number(memory.min ?? minMemory) || settings.defaultMinMemory,
-        max: Number(memory.max) || settings.defaultMemory
-      },
+    await runPackInstall(job, {
+      file: source,
+      name,
+      memory,
+      minMemory,
       javaPath,
       group,
-      versionId: meta.mc,
-      installing: true
+      tempRoot,
+      source: getSettings().source,
+      ranges: { install: [0, 62], extract: [62, 72], download: [72, 96], finish: 98 },
+      order: 'extract-first'
     })
-    job.instanceId = inst.id
-    job.log(`已创建实例：${inst.name}（${meta.mc} · ${meta.loader}${meta.loaderVersion ? ' ' + meta.loaderVersion : ''}）`)
-    await fsp.mkdir(tempRoot, { recursive: true })
+  })
+  return { job: job.public() }
+}
 
-    // Install the loader/version first.
-    await installInstanceCore(job, inst.id, { from: 0, to: 62, source: settings.source })
-    job.signal.throwIfAborted()
+/**
+ * 在线整合包安装：先解析并下载到 <launcherRoot>/cache/packs/<jobId>/，
+ * 校验后再交给 runPackInstall 走本地整合包相同的安装流程。
+ *
+ * 固定阶段：下载整合包 → 校验整合包 → 解析清单 → 安装加载器 →
+ * 下载模组 → 解压覆盖文件 → 完成。
+ * 下载阶段进度来自真实字节数，映射到 0–28%。
+ */
+export function startOnlinePackInstall({
+  source,
+  projectId,
+  versionId = '',
+  name = '',
+  memory = {},
+  minMemory,
+  javaPath = '',
+  group = '',
+  openWhenDone = false,
+  apiKey = '',
+  fetcher = null
+} = {}) {
+  const packSource = String(source || '').trim().toLowerCase()
+  if (packSource !== 'modrinth' && packSource !== 'curseforge') {
+    throw new Error('不支持的整合包来源：' + (source || '（空），请选择 Modrinth 或 CurseForge'))
+  }
+  const project = String(projectId || '').trim()
+  if (!project) throw new Error('缺少整合包项目 ID')
+  const settings = getSettings()
+  const resolvedApiKey = String(apiKey || store.get('settings', {})?.community?.cfApiKey || '').trim()
+  if (packSource === 'curseforge' && !resolvedApiKey) {
+    const error = new Error('未配置 CurseForge API Key。请在「设置 → 社区资源」填写 Eternal API Key，或改用 Modrinth 搜索整合包。')
+    error.code = 'CURSEFORGE_API_KEY'
+    throw error
+  }
 
-    const current = findInstance(inst.id)
-    const paths = instancePaths(current)
-    await fsp.mkdir(paths.gameDir, { recursive: true })
+  const job = new InstallJob({ type: 'pack', name: name || '在线整合包', mc: '', loader: 'vanilla', openWhenDone })
+  job.openWhenDone = openWhenDone === true
+  job.phaseLabel('下载整合包', '等待开始…')
+  job.set(null, '等待开始…', { indeterminate: true })
+  const cacheRoot = path.join(launcherRoot(), 'cache', 'packs', job.id)
+  job.cleanup = async () => {
+    await fsp.rm(cacheRoot, { recursive: true, force: true }).catch(() => {})
+  }
+  const fetchImpl = typeof fetcher === 'function' ? fetcher : undefined
 
-    job.phaseLabel('解压整合包覆盖文件', '正在解压 overrides')
-    job.set(64, '解压整合包覆盖文件…', { indeterminate: false })
-    await extractZip(file, tempRoot, (ratio) => progressIn(job, 62, 72, ratio, '解压整合包覆盖文件'), job.signal)
-    const copied = await copyPackOverrides(tempRoot, paths.gameDir, meta.kind, job)
-    job.log(`覆盖文件已复制（${copied} 个）`)
+  runJob(job, async () => {
+    try {
+      await runPackInstall(job, {
+        name,
+        memory,
+        minMemory,
+        javaPath,
+        group,
+        // 下载的整合包本体留在 <jobId>/<filename>，解压到独立子目录，避免把整包文件复制进游戏目录。
+        tempRoot: path.join(cacheRoot, 'unpacked'),
+        source: settings.source,
+        cfApiKey: resolvedApiKey,
+        ranges: { install: [28, 76], download: [76, 92], extract: [92, 98], finish: 98 },
+        order: 'download-first',
+        labels: {
+          install: '安装加载器',
+          download: '下载模组',
+          downloadNoun: '模组',
+          extract: '解压覆盖文件'
+        },
+        finalPhase: '完成',
+        lockInstallPhase: true,
+        prepare: async (task) => {
+          task.phaseLabel('下载整合包', '正在解析整合包信息…')
+          task.set(null, '正在获取整合包下载信息…', { indeterminate: true })
+          const pack = await resolveOnlinePack({
+            source: packSource,
+            projectId: project,
+            versionId,
+            apiKey: resolvedApiKey,
+            fetcher: fetchImpl,
+            signal: task.signal
+          })
+          task.signal.throwIfAborted()
+          const filename = safePackFilename(pack.filename)
+          task.log(`已解析在线整合包：${pack.project.title || pack.project.slug || project} · ${pack.version.name || pack.version.number || versionId || ''}`)
+          task.log('下载地址：' + pack.url)
+          try {
+            await fsp.mkdir(cacheRoot, { recursive: true })
+          } catch (e) {
+            throw new Error('无法创建整合包缓存目录：' + e.message)
+          }
+          const file = path.join(cacheRoot, filename)
+          const size = Number(pack.size) || 0
+          task.phaseLabel('下载整合包', `${filename}${size ? ' · ' + formatBytes(size) : ''}`)
+          task.set(0, '开始下载整合包…')
+          await downloadFromMirrors([pack.url], file, {
+            size,
+            sha1: pack.hashes?.sha1 || '',
+            signal: task.signal,
+            verify: !!pack.hashes?.sha1,
+            retries: settings.retries || 0,
+            onProgress: ({ received, total }) => {
+              const totalBytes = size || Number(total) || 0
+              if (totalBytes > 0) {
+                progressIn(task, 0, 28, received / totalBytes, `下载整合包 · ${formatBytes(received)} / ${formatBytes(totalBytes)}`)
+              } else {
+                task.set(null, `下载整合包 · ${formatBytes(received)}`, { indeterminate: true })
+              }
+              task.bytes(received, totalBytes)
+            }
+          })
+          const downloadedSize = (await fsp.stat(file)).size
+          task.log(`整合包下载完成：${formatBytes(downloadedSize)}`, 'ok')
 
-    if (meta.kind === 'modrinth') {
-      await downloadModrinthPackFiles(job, meta.index, paths.gameDir, { from: 72, to: 96 })
-    } else {
-      job.phaseLabel('补齐 CurseForge 文件', '通过清单文件 ID 下载')
-      job.set(76, '正在按清单补齐 CurseForge 文件…')
-      const manifestFile = path.join(paths.gameDir, 'manifest.json')
-      let manifestInstalled = false
-      try {
-        // hydrateCurseForgeFiles expects the manifest at its root; keep it out of
-        // the game directory afterwards so the instance stays clean.
-        if (!fs.existsSync(manifestFile)) {
-          await fsp.writeFile(manifestFile, JSON.stringify(meta.manifest, null, 2), 'utf8')
-          manifestInstalled = true
+          task.phaseLabel('校验整合包', '正在校验整合包完整性…')
+          task.set(null, pack.hashes?.sha512 ? '正在校验 SHA-512…' : '正在校验文件大小…', { indeterminate: true })
+          if (pack.hashes?.sha512) {
+            const digest = await sha512File(file, task.signal)
+            if (digest.toLowerCase() !== String(pack.hashes.sha512).toLowerCase()) {
+              throw new Error('整合包 SHA-512 校验失败，文件可能下载不完整，请重试或更换下载源')
+            }
+            task.log('SHA-512 校验通过', 'ok')
+          } else if (pack.hashes?.sha1) {
+            task.log('下载阶段已校验 SHA-1（接口未提供 SHA-512）', 'warn')
+          } else {
+            if (size > 0 && downloadedSize !== size) throw new Error(`整合包大小校验失败（${downloadedSize} / ${size} 字节）`)
+            task.log('整合包未提供哈希值，仅校验文件大小', 'warn')
+          }
+          task.signal.throwIfAborted()
+
+          task.phaseLabel('解析清单', '正在解析整合包清单…')
+          task.set(null, '正在读取整合包清单…', { indeterminate: true })
+          let meta
+          try {
+            meta = await readPackMeta(file)
+          } catch (e) {
+            throw new Error('解析整合包清单失败：' + (e.message || '文件格式不正确'))
+          }
+          if (!meta.mc) throw new Error('整合包没有声明 Minecraft 版本')
+          task.signal.throwIfAborted()
+          task.log(`清单解析完成：${meta.mc} · ${meta.loader}${meta.loaderVersion ? ' ' + meta.loaderVersion : ''}`, 'ok')
+          return { file, meta }
         }
-        await hydrateCurseForgeFiles(paths.gameDir, ({ progress, detail }) => {
-          const raw = Number(progress)
-          const ratio = Number.isFinite(raw) ? Math.max(0, Math.min(1, (raw - 28) / 15)) : null
-          if (ratio !== null) progressIn(job, 72, 96, ratio, detail || '正在补齐 CurseForge 文件…')
-          else job.set(null, detail || '正在补齐 CurseForge 文件…', { indeterminate: true })
-        }, job.signal, {
-          apiKey: store.get('settings', {}).community?.cfApiKey || ''
-        })
-      } finally {
-        if (manifestInstalled) await fsp.rm(manifestFile, { force: true }).catch(() => {})
-      }
+      })
+    } finally {
+      // 在任务进入 done / failed / cancelled 之前完成缓存清理，状态与目录保持一致。
+      try { await job.cleanup() } catch {}
     }
-
-    await fsp.writeFile(path.join(paths.gameDir, '.mc-toolbox-pack.json'), JSON.stringify({
-      name: instName,
-      kind: meta.kind,
-      mc: meta.mc,
-      loader: meta.loader,
-      loaderVersion: meta.loaderVersion,
-      installedAt: Date.now()
-    }, null, 2), 'utf8')
-    job.set(98, '整合包安装完成，正在收尾…')
-    job.log('整合包内容安装完成', 'ok')
-    updateInstance(inst.id, { installing: false, installedAt: Date.now() })
-    job.log('完成的实例：' + inst.name, 'ok')
   })
   return { job: job.public() }
 }
