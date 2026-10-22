@@ -112,9 +112,12 @@ export function listAccounts() {
 
 export function getInternalAccount(id = '') {
   const data = load()
-  const target = id || data.selected
-  const account = data.items.find((item) => item.id === target) || data.items[0] || null
-  return account
+  if (id) {
+    // 显式 id 只做精确匹配：旧页面/已删除账户的 id 不能静默落到别的账户上，
+    // 否则会刷新错人的令牌、用错账户启动游戏。
+    return data.items.find((item) => item.id === id) || null
+  }
+  return data.items.find((item) => item.id === data.selected) || data.items[0] || null
 }
 
 export function getSelectedAccount(id = '') {
@@ -341,7 +344,26 @@ export async function pollMicrosoftLogin(id) {
   return { status: 'done', account: addAccount(account) }
 }
 
+const refreshInFlight = new Map()
+
+/** 刷新期间账户可能被用户删除：写回前必须复查，否则会把已删账户「复活」。 */
+function accountExists(id) {
+  if (!id) return false
+  return load().items.some((item) => item.id === id)
+}
+
 export async function refreshMicrosoftAccount(account) {
+  const key = String(account?.id || '')
+  // 单飞：并发刷新同一个账户会重复使用同一个 refresh_token，微软可能轮换令牌。
+  if (key && refreshInFlight.has(key)) return refreshInFlight.get(key)
+  const task = doRefreshMicrosoft(account).finally(() => {
+    if (key) refreshInFlight.delete(key)
+  })
+  if (key) refreshInFlight.set(key, task)
+  return task
+}
+
+async function doRefreshMicrosoft(account) {
   if (!account?.refreshToken) {
     const error = new Error('微软账户缺少刷新令牌，请重新登录')
     error.code = 'AUTH_REFRESH_FAILED'
@@ -363,6 +385,11 @@ export async function refreshMicrosoftAccount(account) {
     throw error
   }
   const next = await completeMicrosoft(result.data.access_token, result.data.refresh_token || account.refreshToken, clientId, flow)
+  if (!accountExists(account.id)) {
+    const error = new Error('账户已被删除，刷新结果已丢弃')
+    error.code = 'AUTH_ACCOUNT_REMOVED'
+    throw error
+  }
   addAccount({ ...account, ...next, id: account.id, createdAt: account.createdAt }, { select: false })
   return getInternalAccount(account.id)
 }
@@ -450,6 +477,11 @@ export async function refreshAuthlibAccount(account) {
     ...textures,
     validatedAt: Date.now()
   }
+  if (!accountExists(account.id)) {
+    const error = new Error('账户已被删除，刷新结果已丢弃')
+    error.code = 'AUTH_ACCOUNT_REMOVED'
+    throw error
+  }
   addAccount(next, { select: false })
   return getInternalAccount(account.id)
 }
@@ -469,7 +501,7 @@ export async function ensureFreshAccount(account) {
         clientToken: account.clientToken || ''
       })
       if (result.ok) {
-        addAccount({ ...account, validatedAt: Date.now() }, { select: false })
+        if (accountExists(account.id)) addAccount({ ...account, validatedAt: Date.now() }, { select: false })
         return getInternalAccount(account.id)
       }
     } catch {}

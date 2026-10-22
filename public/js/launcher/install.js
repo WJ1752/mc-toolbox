@@ -738,7 +738,11 @@ function buildView(ctx, container) {
     try {
       const memory = readMemory(packMinInput, packMaxInput)
       const result = await ctx.api.packUpload(file, {
-        name: packNameInput.value.trim(), maxMemory: memory.error ? 0 : memory.max,
+        name: packNameInput.value.trim(),
+        maxMemory: memory.error ? 0 : memory.max,
+        // 上传走 query 参数，之前只传了最大内存，分组/初始内存会被静默丢掉。
+        minMemory: memory.error ? 0 : memory.min,
+        group: packGroupInput.value.trim(),
         onProgress: ({ loaded, total, ratio }) => {
           if (disposed) return
           const pct = Number.isFinite(ratio) ? Math.max(0, Math.min(1, ratio)) * 100 : 0
@@ -821,8 +825,12 @@ function buildView(ctx, container) {
   function refreshCfGuide() {
     const cf = search.source === 'curseforge'
     show(packCfHint, cf)
-    const community = stateOf().settings?.community
-    const known = community && typeof community.cfApiKey === 'string' ? !!community.cfApiKey.trim() : null
+    // 启动器设置里没有 community 段：Key 是否已配置由 bootstrap 的 community 标志给出。
+    const snapshot = stateOf()
+    const community = snapshot.settings?.community
+    const known = community && typeof community.cfApiKey === 'string'
+      ? !!community.cfApiKey.trim()
+      : (typeof snapshot.community?.cfApiKeySet === 'boolean' ? snapshot.community.cfApiKeySet : null)
     const configured = known === true || search.cfOk
     show(packCfGuide, cf && (search.cfKey || known === false))
     packCfHint.textContent = configured
@@ -1205,16 +1213,22 @@ function buildView(ctx, container) {
     notified.add(job.id + '|failed')
     notified.add(job.id + '|cancelled')
     let misses = 0
+    // 只取增量日志：这个轮询只用状态字段，不需要每 1.2 秒重传上千行安装器日志。
+    let logCursor = 0
     const tick = async () => {
       if (disposed) return
       try {
-        const data = await ctx.api.job(job.id, 0)
+        const data = await ctx.api.job(job.id, logCursor)
         if (disposed) return
         if (!data) {
           stopPackJobWatch(job.id)
           notify('安装任务已结束，请到实例列表或下载中心查看结果', 'info')
           void reloadState()
           return
+        }
+        if (Array.isArray(data.logs) && data.logs.length) {
+          const lastSeq = Number(data.logs[data.logs.length - 1]?.seq) || 0
+          if (lastSeq > logCursor) logCursor = lastSeq
         }
         misses = 0
         inlinePack.update(data)

@@ -54,8 +54,12 @@ export function mirrorUrl(url) {
     // 旧实现把哈希当成版本号拼 /version/<hash>/json，镜像端始终 404。
     return `${base}/v1/packages/${m[1]}/${m[2]}`
   }
-  if ((m = /^https?:\/\/piston-(?:meta|data)\.mojang\.com\/v1\/objects\/([0-9a-f]{40})(?:\?.*)?$/i.exec(raw))) {
-    return `${base}/assets/${m[1].slice(0, 2)}/${m[1]}`
+  if ((m = /^https?:\/\/piston-(?:meta|data)\.mojang\.com\/v1\/objects\/([0-9a-f]{40})(?:\/([^/?#]+))?(?:\?.*)?$/i.exec(raw))) {
+    // BMCLAPI 按 /v1/objects/<hash>/<文件名> 镜像 piston-data 对象（客户端 JAR、
+    // client_mappings、日志配置都走这里）；旧实现拼 /assets/<xx>/<hash>，镜像端
+    // 永远 404，等于这些地址没有镜像候选。没有文件名的对象无法镜像。
+    const hash = m[1].toLowerCase()
+    return m[2] ? `${base}/v1/objects/${hash}/${m[2]}` : ''
   }
   if ((m = /^https?:\/\/resources\.download\.minecraft\.net\/([0-9a-f]{2})\/([0-9a-f]{40})(?:\?.*)?$/i.exec(raw))) {
     return `${base}/assets/${m[1].toLowerCase()}/${m[2].toLowerCase()}`
@@ -76,7 +80,9 @@ export function candidateUrls(url, { source } = {}) {
   if (!original) return []
   if (mode === 'official') return [original]
   const mirrored = mirrorUrl(original)
-  if (mode === 'bmclapi') return [mirrored || original]
+  // 即使选了 BMCL 镜像也保留官方地址兜底：单个文件镜像缺失/404 时
+  // 不能直接让整个安装失败。
+  if (mode === 'bmclapi') return [...new Set([mirrored, original].filter(Boolean))]
   return [...new Set([mirrored, original].filter(Boolean))]
 }
 

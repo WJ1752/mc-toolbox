@@ -142,14 +142,25 @@ function parseQuiltMeta(buf) {
 
 function parseModsToml(buf) {
   const text = buf.toString('utf8')
-  const modId = /^\s*modId\s*=\s*["']([^"']+)["']/m.exec(text)
-  const displayName = /^\s*displayName\s*=\s*["']([^"']+)["']/m.exec(text)
-  const version = /^\s*version\s*=\s*["']([^"']+)["']/m.exec(text)
-  if (!modId) return null
   const isNeo = /neoforge/i.test(text) || / NeoForge/i.test(text)
+  // 只从 [[mods]] 块里取 modid：TOML 允许 [[dependencies.*]] 排在 [[mods]] 之前，
+  // 直接全文找第一个 modId 会把依赖 ID 当成宿主 modid，依赖它的模组全部误报缺失。
+  const modBlocks = [...text.matchAll(/\[\[mods\]\]([\s\S]*?)(?=\n\s*\[\[|$)/gi)]
+  const mods = []
+  for (const match of modBlocks) {
+    const block = match[1]
+    const id = /^\s*modId\s*=\s*["']([^"']+)["']/im.exec(block)?.[1]
+    if (!id) continue
+    mods.push({
+      modid: id,
+      name: /^\s*displayName\s*=\s*["']([^"']+)["']/im.exec(block)?.[1] || id,
+      version: (/^\s*version\s*=\s*["']([^"']+)["']/im.exec(block)?.[1] || '').replace(/\$\{[^}]+\}/g, '')
+    })
+  }
+  if (!mods.length) return null
   const dependencies = []
-  // Forge/NeoForge use repeated [[dependencies.<modid>]] blocks. Parsing the
-  // blocks instead of the whole file also handles multiple mods in one jar.
+  // Forge/NeoForge 用重复的 [[dependencies.<modid>]] 块；type / side 必须一起解析，
+  // 否则 optional、incompatible、仅客户端依赖都会被当成「必需依赖」。
   const blocks = [...text.matchAll(/\[\[dependencies\.[^\]]+\]\]([\s\S]*?)(?=\n\s*\[\[|$)/gi)]
   for (const match of blocks) {
     const block = match[1]
@@ -157,12 +168,18 @@ function parseModsToml(buf) {
     if (!id) continue
     const range = /^\s*versionRange\s*=\s*["']([^"']*)["']/im.exec(block)?.[1] || ''
     const mandatory = /^\s*mandatory\s*=\s*(true|false)/im.exec(block)?.[1]
-    addDependency(dependencies, { id, versionRange: range, mandatory: mandatory !== 'false' })
+    const type = (/^\s*type\s*=\s*["']([^"']+)["']/im.exec(block)?.[1] || '').toLowerCase()
+    const side = (/^\s*side\s*=\s*["']([^"']+)["']/im.exec(block)?.[1] || '').toUpperCase()
+    // incompatible 的语义是「装了才冲突」，未安装才是正确状态，不能要求存在。
+    if (type === 'incompatible' || type === 'discouraged') continue
+    const optional = type === 'optional' || mandatory === 'false' || side === 'CLIENT'
+    addDependency(dependencies, { id, versionRange: range, mandatory: !optional })
   }
   return {
-    modid: modId[1],
-    name: displayName ? displayName[1] : modId[1],
-    version: version ? version[1].replace(/\$\{[^}]+\}/g, '') : null,
+    modid: mods[0].modid,
+    modids: mods.map((item) => item.modid),
+    name: mods[0].name,
+    version: mods[0].version || null,
     loader: isNeo ? 'neoforge' : 'forge',
     environment: '*',
     dependencies: uniqueDependencies(dependencies)
@@ -275,6 +292,10 @@ export async function readModMeta(filePath, runtime = {}, depth = 0) {
       const file = path.join(tmp, `${i++}.jar`); await fsp.writeFile(file, bytes)
       const child = await readModMeta(file, runtime, depth + 1)
       if (!child) continue
+      // 纯客户端的嵌套模块（jar-in-jar）不能把宿主拖下水：既不把它的 modid
+      // 并进宿主（否则宿主可能因「客户端 mod 库」整包被删），也不把它的
+      // 客户端依赖强加给服务端转换。
+      if (child.environment === 'client') continue
       meta.modids = [...new Set([...(meta.modids || [meta.modid]), ...(child.modids || [child.modid])].filter(Boolean))]
       meta.dependencies = uniqueDependencies([...meta.dependencies, ...child.dependencies])
       meta.providedVersions = { ...meta.providedVersions, [child.modid?.toLowerCase()]: child.version, ...child.providedVersions }

@@ -45,6 +45,7 @@ import {
   defaultExportDir
 } from './pack-export.js'
 import { findModUpdates, resolveMissingDependencies } from './updates.js'
+import { store } from '../store.js'
 import {
   prepareLaunch,
   startInstance,
@@ -93,6 +94,12 @@ function instanceOf(id) {
   return inst
 }
 
+/** 游戏还在跑的时候不要动实例目录：删除/复制/修复都会和正在写的文件打架。 */
+function assertInstanceIdle(id, action = '操作') {
+  const busy = listSessions().find((item) => item.instanceId === id && ['starting', 'running'].includes(item.status))
+  if (busy) throw new Error(`实例正在运行，无法${action}；请先退出游戏`)
+}
+
 function safeInt(value, fallback = 0) {
   const n = Number(value)
   return Number.isFinite(n) ? Math.round(n) : fallback
@@ -124,10 +131,13 @@ function filterSettings(settings) {
 async function launcherStatusPayload() {
   const instances = listInstances()
   const accountsInfo = accounts.listAccounts()
+  // 存下来的选中项可能指向已被删除、或仍在安装中而不在列表里的实例。
+  const stored = getSelectedInstanceId()
+  const selectedInstance = instances.some((item) => item.id === stored) ? stored : (instances[0]?.id || '')
   return {
     instances,
     accounts: accountsInfo,
-    selectedInstance: getSelectedInstanceId() || instances[0]?.id || '',
+    selectedInstance,
     sessions: listSessions(),
     jobs: listJobs(),
     running: hasRunningGame(),
@@ -143,6 +153,10 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
     return {
       ...data,
       settings: filterSettings(getSettings()),
+      // 社区资源的 Key 在全局设置里，前端需要知道「是否已配置」才能正确显示提示。
+      community: {
+        cfApiKeySet: !!String(store.get('settings', {})?.community?.cfApiKey || '').trim()
+      },
       defaultDirs: defaultMinecraftDirs(),
       system: {
         platform: process.platform,
@@ -243,10 +257,12 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
   })
   on('DELETE', '/api/launcher/instances/:id', async (_req, params) => {
     instanceOf(params.id)
+    assertInstanceIdle(params.id, '删除')
     return deleteInstance(params.id)
   })
   on('POST', '/api/launcher/instances/:id/duplicate', async (req, params) => {
     const body = await readBody(req)
+    assertInstanceIdle(params.id, '复制')
     return await duplicateInstance(params.id, { name: body.name || '' })
   })
   on('POST', '/api/launcher/instances/:id/select', async (_req, params) => {
@@ -255,6 +271,7 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
   })
   on('POST', '/api/launcher/instances/:id/repair', async (_req, params) => {
     instanceOf(params.id)
+    assertInstanceIdle(params.id, '修复')
     return startRepair(params.id)
   })
 
@@ -558,6 +575,9 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
         source: uploaded.file,
         name: query.name || '',
         memory: { max: safeInt(query.maxMemory, 0) || undefined },
+        minMemory: safeInt(query.minMemory, 0) || undefined,
+        group: query.group || '',
+        javaPath: query.javaPath || '',
         uploaded: true
       })
     } catch (e) {

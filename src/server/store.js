@@ -49,15 +49,44 @@ export const store = {
     if (cache.has(name)) return cache.get(name)
     ensureDirSync(name)
     const file = fileOf(name)
-    let value
+    let raw = null
+    let readError = null
     try {
-      value = JSON.parse(fs.readFileSync(file, 'utf8'))
-    } catch {
+      raw = fs.readFileSync(file, 'utf8')
+    } catch (e) {
+      readError = e
+    }
+    let value
+    if (raw === null && readError && readError.code !== 'ENOENT') {
+      // 文件存在但读不出来（被占用 / 无权限）：绝不能覆盖，先用默认值顶上。
+      console.warn('[store] 读取失败，本次使用默认值', name, readError.message)
+      value = fallback
+    } else if (raw === null) {
       value = fallback
       try {
         fs.writeFileSync(file, JSON.stringify(fallback, null, 2), 'utf8')
       } catch (e) {
         console.warn('[store] 初始化失败', name, e.message)
+      }
+    } else {
+      try {
+        value = JSON.parse(raw)
+      } catch (e) {
+        // 文件损坏：先把原文件备份成 .bad-时间戳，再写默认值。
+        // 直接覆盖会让用户以为实例/设置被删光了。
+        value = fallback
+        try {
+          const backup = `${file}.bad-${Date.now()}`
+          fs.renameSync(file, backup)
+          console.warn(`[store] ${name} 解析失败，原文件已备份到 ${backup}：${e.message}`)
+        } catch (renameError) {
+          console.warn('[store] 备份损坏文件失败', name, renameError.message)
+        }
+        try {
+          fs.writeFileSync(file, JSON.stringify(fallback, null, 2), 'utf8')
+        } catch (writeError) {
+          console.warn('[store] 初始化失败', name, writeError.message)
+        }
       }
     }
     cache.set(name, value)

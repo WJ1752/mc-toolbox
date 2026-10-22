@@ -32,6 +32,10 @@ const ROOT_SUBDIRS = { configDir: 'config', clientModsDir: 'client-mods', dataDi
 const FILE_OWNERS = {
   'settings.json': 'configDir',
   'monitors.json': 'configDir',
+  // 启动器状态与账户也写在配置目录；不登记的话会被当成运行数据，
+  // 恢复 dataDir 时会挡住「目标目录不是空的」。
+  'launcher.json': 'configDir',
+  'launcherAccounts.json': 'configDir',
   'clientmods.json': 'clientModsDir',
   'history.json': 'dataDir'
 }

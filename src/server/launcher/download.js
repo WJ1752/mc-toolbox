@@ -101,8 +101,13 @@ export async function fetchToFile(url, target, {
       }
       clearTimeout(stallTimer)
       stallTimer = null
-      if (size > 0 && received !== size) throw new Error(`长度校验失败（${received} / ${size} 字节）`)
-      if (sha1 && digest.digest('hex').toLowerCase() !== String(sha1).toLowerCase()) throw new Error('SHA-1 校验失败')
+      // 有 SHA-1 时以哈希为准：清单里的 size 可能来自另一次上传，差几个字节
+      // 并不代表内容不对。没有哈希可用时才退回长度校验。
+      if (sha1) {
+        if (digest.digest('hex').toLowerCase() !== String(sha1).toLowerCase()) throw new Error('SHA-1 校验失败')
+      } else if (size > 0 && received !== size) {
+        throw new Error(`长度校验失败（${received} / ${size} 字节）`)
+      }
       await handle.close(); handle = null
       signal?.throwIfAborted()
       await fsp.rename(partial, target)

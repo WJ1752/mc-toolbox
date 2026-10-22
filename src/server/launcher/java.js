@@ -147,8 +147,9 @@ export async function pickJava({ required = 0, preferred = '', force = false, pr
   return exact || sorted[0] || null
 }
 
-export async function javaForInstance(instance, { required = 0, force = false } = {}) {
-  return pickJava({ required, preferred: instance?.javaPath || '', force })
+export async function javaForInstance(instance, { required = 0, force = false, preferred = '' } = {}) {
+  // 实例级 javaPath 优先，其次才是设置里的默认 Java。
+  return pickJava({ required, preferred: instance?.javaPath || preferred || '', force })
 }
 
 export function clearJavaCache() {

@@ -9,6 +9,7 @@ import { store } from './src/server/store.js'
 import { DEFAULT_SETTINGS } from './src/server/defaults.js'
 import { stopSync as stopI18n } from './src/server/i18n.js'
 import { shutdownServers } from './src/server/server-manager.js'
+import { pruneUnfinishedInstances } from './src/server/launcher/install.js'
 
 const argPort = (process.argv.find((a) => a.startsWith('--port=')) || '').split('=')[1]
 const START_PORT = Number(process.env.MC_TOOLBOX_PORT || argPort || 8756)
@@ -136,6 +137,13 @@ async function main() {
   }
 
   startEngine()
+
+  // 上次进程异常退出时可能留下「安装中」的实例：没有任务在跑，也不会再完成。
+  // 复位标记让它以「需要修复」出现，不直接删目录（多开时另一个进程可能正在装它）。
+  try {
+    const recovered = pruneUnfinishedInstances()
+    if (recovered) console.log(`[恢复] ${recovered} 个未完成的实例已标记为需要修复`)
+  } catch {}
 
   const server = http.createServer((req, res) => {
     requestHandler(req, res).catch((e) => {
@@ -280,8 +288,9 @@ async function main() {
       if (shuttingDown) { clearInterval(timer); return }
       const now = Date.now()
 
-      // 1) 前端主动请求停止（关窗 / 页面卸载）
-      if (clientHeartbeat.shutdown) {
+      // 1) 前端主动请求停止（关窗 / 页面卸载）。
+      // 刷新页面也会发这个通知，所以等一个心跳宽限期：新页面的心跳会撤销它。
+      if (clientHeartbeat.shutdown && now - clientHeartbeat.last > 6000) {
         clearInterval(timer)
         console.log('')
         console.log('  [关闭] 应用窗口已关闭（前端通知），正在退出服务…')

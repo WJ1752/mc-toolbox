@@ -117,6 +117,48 @@ function mergeDefaults(value) {
   return out
 }
 
+/**
+ * 一次性迁移：把 instances/<id>/{game,natives,logs} 搬到 versions/<实例名>/。
+ * 单独导出便于测试；失败时保留旧布局，下次启动再试。
+ * @returns {boolean} 是否有字段被改动
+ */
+export function migrateInstanceLayout(data, { root } = {}) {
+  if (!data || data.layoutVersion === 2) return false
+  const fallbackRoot = root ? path.resolve(root) : currentRootFor(data)
+  let dirty = false
+  let pending = false
+  for (const inst of (data.instances || [])) {
+    if (!inst || typeof inst !== 'object' || inst.folder) continue
+    const instRoot = path.resolve(inst.root || fallbackRoot)
+    try {
+      const folder = allocateInstanceFolder(instRoot, inst.name, inst.id, '', [
+        inst.versionId,
+        `${inst.mc}-${inst.loader}`
+      ])
+      const legacyDir = path.join(instRoot, 'instances', String(inst.id))
+      const target = path.join(instRoot, 'versions', folder)
+      // 先写归属标记再搬文件：中途失败时下次仍复用同一个目录，
+      // 不会每次重试都多出一个 -2、-3 空目录。
+      writeInstanceMarker(target, inst)
+      if (fs.existsSync(legacyDir)) {
+        // 有文件被占用时不能把实例切到新目录：否则模组/存档留在旧目录，
+        // 实例页看起来像丢档。保持旧布局，下次启动重试。
+        if (!moveInstanceDir(legacyDir, target)) throw new Error('实例目录被占用，迁移未完成')
+      } else {
+        fs.mkdirSync(target, { recursive: true })
+      }
+      inst.folder = folder
+      writeInstanceMarker(target, inst)
+      dirty = true
+    } catch {
+      // 目录被占用时先保持旧布局，下次启动再迁移。
+      pending = true
+    }
+  }
+  if (!pending) { data.layoutVersion = 2; dirty = true }
+  return dirty
+}
+
 export function getState() {
   const data = store.get(STORE_KEY, { version: 1, settings: { ...DEFAULT_LAUNCHER_SETTINGS }, instances: [], selectedInstance: '' })
   let dirty = false
@@ -130,6 +172,8 @@ export function getState() {
   for (const inst of data.instances) {
     if (inst && !inst.root) { inst.root = legacyRoot; dirty = true }
   }
+  // 一次性迁移：instances/<id>/game 这类难读的目录搬到 versions/<实例名>/。
+  if (migrateInstanceLayout(data, { root: legacyRoot })) dirty = true
   if (dirty) store.set(STORE_KEY, data)
   return data
 }
@@ -190,9 +234,98 @@ export function launcherRoot() {
 /* Instance paths                                                      */
 /* ------------------------------------------------------------------ */
 
+// 实例目录的归属标记：versions/ 下还有真正的版本文件夹，靠它区分两者，
+// 也用来判断某个名字是否已被别的实例占用。
+const INSTANCE_MARKER = '.mc-toolbox-instance.json'
+
+/** 把实例名变成合法的文件夹名（Windows 非法字符、结尾点号、保留名）。 */
+export function safeInstanceFolderName(name) {
+  let base = String(name || '')
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[. ]+$/, '')
+  if (!base) base = 'instance'
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(base)) base = '_' + base
+  return base.slice(0, 64).trim() || 'instance'
+}
+
+function readFolderOwner(dir) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(dir, INSTANCE_MARKER), 'utf8'))
+    return String(parsed?.id || '')
+  } catch { return '' }
+}
+
+function writeInstanceMarker(dir, inst) {
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, INSTANCE_MARKER), JSON.stringify({
+      id: inst.id,
+      name: inst.name,
+      versionId: inst.versionId || '',
+      updated: Date.now()
+    }, null, 2), 'utf8')
+  } catch {}
+}
+
+/**
+ * 为实例在 versions/ 下挑一个可读且不冲突的文件夹名。
+ * 真版本文件夹（1.20.1-fabric 等）与其它实例都不能被占用。
+ */
+export function allocateInstanceFolder(root, name, id, current = '', reserved = []) {
+  const base = safeInstanceFolderName(name)
+  const blocked = new Set(reserved.map((item) => String(item || '').toLowerCase()).filter(Boolean))
+  for (let index = 1; index <= 999; index++) {
+    const candidate = index === 1 ? base : `${base}-${index}`
+    if (current && candidate === current) return candidate
+    if (blocked.has(candidate.toLowerCase())) continue
+    const dir = path.join(root, 'versions', candidate)
+    if (!fs.existsSync(dir)) return candidate
+    if (readFolderOwner(dir) === id) return candidate
+  }
+  return `${base}-${String(id).slice(0, 8)}`
+}
+
+function moveDirContents(from, to) {
+  let moved = true
+  for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+    const src = path.join(from, entry.name)
+    const dest = path.join(to, entry.name)
+    try {
+      if (fs.existsSync(dest)) { moved = false; continue }
+      fs.renameSync(src, dest)
+    } catch { moved = false }
+  }
+  return moved
+}
+
+/** 把旧布局 instances/<id>/{game,natives,logs} 迁移到 versions/<实例名>/。 */
+function moveInstanceDir(legacyDir, target) {
+  fs.mkdirSync(target, { recursive: true })
+  const game = path.join(legacyDir, 'game')
+  let moved = true
+  if (fs.existsSync(game)) {
+    moved = moveDirContents(game, target) && moved
+    // game/ 搬空后要删掉，否则外层空目录会一直留在 instances/ 下。
+    try { if (!fs.readdirSync(game).length) fs.rmdirSync(game) } catch {}
+  }
+  for (const sub of ['natives', 'logs']) {
+    const src = path.join(legacyDir, sub)
+    if (!fs.existsSync(src)) continue
+    const dest = path.join(target, sub)
+    if (!fs.existsSync(dest)) { try { fs.renameSync(src, dest) } catch { moved = false } }
+    else moved = moveDirContents(src, dest) && moved
+  }
+  try {
+    if (fs.existsSync(legacyDir) && !fs.readdirSync(legacyDir).length) fs.rmdirSync(legacyDir)
+  } catch {}
+  return moved
+}
+
 export function instanceDir(id) {
   const inst = findInstance(id)
-  return path.join(inst?.root ? path.resolve(inst.root) : launcherRoot(), 'instances', id)
+  return instancePaths(inst).ownDir
 }
 
 /**
@@ -200,15 +333,21 @@ export function instanceDir(id) {
  * Imported instances may point at an existing .minecraft (baseDir); shared
  * versions/libraries/assets are read from there, while our logs/natives stay
  * inside the instance's own launcher root.
+ *
+ * 新布局：实例独占 `<root>/versions/<实例名>/`（游戏文件就在这一层），
+ * 版本 JSON / 库 / 资源仍然共享。没有 folder 的旧实例退回 instances/<id>。
  */
 export function instancePaths(inst) {
   const root = inst?.root ? path.resolve(inst.root) : launcherRoot()
   const baseDir = inst?.baseDir ? path.resolve(inst.baseDir) : root
-  const ownDir = path.join(root, 'instances', inst.id)
   const external = !!inst?.baseDir
+  const folder = String(inst?.folder || '')
+  const ownDir = folder
+    ? path.join(root, 'versions', folder)
+    : path.join(root, 'instances', String(inst?.id || ''))
   const gameDir = inst?.gameDir
     ? path.resolve(inst.gameDir)
-    : external ? baseDir : path.join(ownDir, 'game')
+    : external ? baseDir : (folder ? ownDir : path.join(ownDir, 'game'))
   const versionId = String(inst?.versionId || inst?.mc || '')
   // jarVersion 只信任实例显式记录的值；缺失时用候选列表兜底，不再静默当成空串。
   const jarVersion = String(inst?.jarVersion || '').trim()
@@ -258,6 +397,7 @@ export function ensureInstanceDirs(inst) {
   for (const dir of dirs) {
     fs.mkdirSync(dir, { recursive: true })
   }
+  writeInstanceMarker(p.ownDir, inst)
   return p
 }
 
@@ -277,6 +417,8 @@ export function normalizeInstance(input = {}) {
   const mc = String(input.mc || '').trim()
   return {
     id: input.id || randomId(),
+    // 实例在 versions/ 下的文件夹名，与实例名同步；空串表示还是旧的 instances/<id> 布局。
+    folder: String(input.folder || ''),
     name: String(input.name || '').trim() || (mc ? `${mc} ${loader === 'vanilla' ? '' : loader}`.trim() : '新实例'),
     group: String(input.group || '').trim(),
     mc,
@@ -369,9 +511,19 @@ export function publicInstance(inst) {
   return result
 }
 
-export function listInstances({ includePaths = true } = {}) {
+/**
+ * 安装中的实例在完成前不该出现在侧栏：并发安装两个整合包时，先完成的那个
+ * 一刷新列表，另一个半成品会跟着冒出来，点进去只有「需要修复」和缺文件。
+ * 安装完成后 runJob 会把 installing 置回 false，实例才正式进入列表。
+ */
+export function filterVisibleInstances(list, { includeInstalling = false } = {}) {
+  const items = Array.isArray(list) ? list : []
+  return includeInstalling ? items.slice() : items.filter((item) => item && item.installing !== true)
+}
+
+export function listInstances({ includePaths = true, includeInstalling = false } = {}) {
   const data = getState()
-  return (data.instances || [])
+  return filterVisibleInstances(data.instances, { includeInstalling })
     .map((item) => normalizeInstance(item))
     .sort((a, b) => (b.lastPlayed || b.created) - (a.lastPlayed || a.created))
     .map((item) => includePaths ? publicInstance(item) : item)
@@ -381,12 +533,54 @@ export function createInstance(input) {
   const data = getState()
   const inst = normalizeInstance(input)
   if (!inst.mc) throw new Error('缺少 Minecraft 版本')
+  // 目录用可读名称：versions/<实例名>，撞上真版本文件夹或别的实例就加后缀。
+  inst.folder = allocateInstanceFolder(path.resolve(inst.root), inst.name, inst.id, '', [
+    inst.versionId,
+    `${inst.mc}-${inst.loader}`
+  ])
   data.instances = data.instances || []
-  data.instances.push(inst)
-  if (!data.selectedInstance) data.selectedInstance = inst.id
-  saveState(data)
+  // 先建目录再入库：建目录失败（盘符不可用、路径被占）时不能留下幽灵实例。
   ensureInstanceDirs(inst)
+  data.instances.push(inst)
+  // 安装中的实例还没进列表，把它设为当前实例只会让前端选中一个不存在的条目。
+  if (!data.selectedInstance && inst.installing !== true) data.selectedInstance = inst.id
+  saveState(data)
   return publicInstance(inst)
+}
+
+/**
+ * 实例改名时同步目录名：versions/<实例名>。目录被游戏占用时保留旧名，
+ * 只改显示名，下次改名会再次尝试。
+ */
+function syncInstanceFolder(current, next) {
+  const root = path.resolve(next.root || launcherRoot())
+  const reserved = [next.versionId, `${next.mc}-${next.loader}`]
+  try {
+    if (!current.folder) {
+      const folder = allocateInstanceFolder(root, next.name, next.id, '', reserved)
+      const legacy = path.join(root, 'instances', String(current.id))
+      const target = path.join(root, 'versions', folder)
+      writeInstanceMarker(target, next)
+      if (fs.existsSync(legacy)) {
+        if (!moveInstanceDir(legacy, target)) throw new Error('实例目录被占用')
+      } else {
+        fs.mkdirSync(target, { recursive: true })
+      }
+      next.folder = folder
+      writeInstanceMarker(target, next)
+      return
+    }
+    const folder = allocateInstanceFolder(root, next.name, next.id, current.folder, reserved)
+    if (folder === current.folder) { next.folder = current.folder; return }
+    const from = path.join(root, 'versions', current.folder)
+    const to = path.join(root, 'versions', folder)
+    if (fs.existsSync(from)) fs.renameSync(from, to)
+    else fs.mkdirSync(to, { recursive: true })
+    next.folder = folder
+    writeInstanceMarker(to, next)
+  } catch {
+    next.folder = current.folder
+  }
 }
 
 export function updateInstance(id, patch = {}) {
@@ -395,6 +589,7 @@ export function updateInstance(id, patch = {}) {
   if (index < 0) throw new Error('实例不存在')
   const current = normalizeInstance(data.instances[index])
   const next = normalizeInstance({ ...current, ...patch, id: current.id, created: current.created })
+  if (patch.name !== undefined && next.name !== current.name) syncInstanceFolder(current, next)
   next.updated = Date.now()
   data.instances[index] = next
   saveState(data)
@@ -410,7 +605,9 @@ export function deleteInstance(id) {
   if (data.selectedInstance === id) data.selectedInstance = data.instances[0]?.id || ''
   saveState(data)
   let removed = false
-  if (!inst.external) {
+  // ownDir 始终归启动器所有（外部实例只借用它放 natives / 日志），可以安全删除；
+  // 外部实例的游戏目录是用户的 .minecraft，绝不在这里删。
+  {
     const dir = instancePaths(inst).ownDir
     try {
       if (fs.existsSync(dir)) { fs.rmSync(dir, { recursive: true, force: true }); removed = true }
@@ -428,6 +625,8 @@ export async function duplicateInstance(id, { name = '' } = {}) {
   const copy = normalizeInstance({
     ...source,
     id: randomId(),
+    // 拷贝要用自己的目录，不能继承源实例的 folder。
+    folder: '',
     name: name || `${source.name} 副本`,
     created: Date.now(),
     updated: Date.now(),
@@ -436,6 +635,10 @@ export async function duplicateInstance(id, { name = '' } = {}) {
     launches: 0,
     installedAt: Date.now()
   })
+  copy.folder = allocateInstanceFolder(path.resolve(copy.root), copy.name, copy.id, '', [
+    copy.versionId,
+    `${copy.mc}-${copy.loader}`
+  ])
   const sourcePaths = instancePaths(source)
   const copyPaths = instancePaths(copy)
   if (!source.external && fs.existsSync(sourcePaths.gameDir)) {
@@ -443,14 +646,22 @@ export async function duplicateInstance(id, { name = '' } = {}) {
     await fsp.cp(sourcePaths.gameDir, copyPaths.gameDir, { recursive: true, force: true })
   }
   if (source.external) {
-    // External instances cannot be copied safely; share the existing base and
-    // give the clone its own isolated game directory instead.
+    // 外部实例的版本/库还在原 .minecraft（baseDir 保持共享），但副本必须有
+    // 自己的游戏目录，否则在副本里改模组/存档会直接改到导入目录。
     copy.baseDir = source.baseDir
     copy.external = true
-    copy.gameDir = ''
+    copy.gameDir = path.join(path.resolve(copy.root), 'versions', copy.folder, 'game')
     copy.versionId = source.versionId
     copy.jarVersion = source.jarVersion
+    copy.mcSource = source.mcSource
     ensureInstanceDirs(copy)
+    // 只复制实例内容，不复制整个 .minecraft（libraries / assets 可能有几个 GB）。
+    const keep = ['mods', 'config', 'defaultconfigs', 'saves', 'resourcepacks', 'shaderpacks', 'options.txt', 'servers.dat', 'screenshots']
+    for (const name of keep) {
+      const from = path.join(sourcePaths.gameDir, name)
+      if (!fs.existsSync(from)) continue
+      await fsp.cp(from, path.join(copy.gameDir, name), { recursive: true, force: true }).catch(() => {})
+    }
   }
   data.instances.push(copy)
   saveState(data)

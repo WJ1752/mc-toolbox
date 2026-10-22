@@ -171,7 +171,9 @@ export function confirmDialog(message, { title = '确认操作', danger = false,
     const api = openModal({
       title,
       size: 'sm',
-      body: h('div', { class: 'confirm-body', style: { fontSize: '12.5px', lineHeight: '1.7', whiteSpace: 'pre-wrap' }, html: message }),
+      // 用文本节点而不是 innerHTML：实例名、远端项目标题都来自不可信来源，
+      // 当 HTML 渲染等于存储型 XSS。
+      body: h('div', { class: 'confirm-body', style: { fontSize: '12.5px', lineHeight: '1.7', whiteSpace: 'pre-wrap' } }, String(message ?? '')),
       buttons: [
         { label: cancelText, class: 'btn-ghost', onClick: () => finish(false) },
         { label: okText, class: danger ? 'btn-danger' : 'btn-primary', onClick: () => finish(true) }

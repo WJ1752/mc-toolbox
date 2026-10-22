@@ -13,7 +13,16 @@ test('BMCLAPI mirror mapping covers manifest, version JSON, assets and libraries
     'https://bmclapi2.bangbang93.com/v1/packages/abc/1.20.1.json'
   )
   const hash = '0123456789abcdef0123456789abcdef01234567'
-  assert.equal(mirrorUrl(`https://piston-data.mojang.com/v1/objects/${hash}`), `https://bmclapi2.bangbang93.com/assets/01/${hash}`)
+  // piston-data 对象按 /v1/objects/<hash>/<文件名> 镜像；没有文件名的对象无法镜像。
+  assert.equal(mirrorUrl(`https://piston-data.mojang.com/v1/objects/${hash}`), '')
+  assert.equal(
+    mirrorUrl(`https://piston-data.mojang.com/v1/objects/${hash}/client.jar`),
+    `https://bmclapi2.bangbang93.com/v1/objects/${hash}/client.jar`
+  )
+  assert.equal(
+    mirrorUrl(`https://piston-data.mojang.com/v1/objects/${hash}/client.txt`),
+    `https://bmclapi2.bangbang93.com/v1/objects/${hash}/client.txt`
+  )
   assert.equal(mirrorUrl(`https://resources.download.minecraft.net/01/${hash}`), `https://bmclapi2.bangbang93.com/assets/01/${hash}`)
   assert.equal(
     mirrorUrl('https://libraries.minecraft.net/com/mojang/brigadier/1.3.10/brigadier-1.3.10.jar'),
@@ -33,8 +42,10 @@ test('BMCLAPI mirror mapping covers manifest, version JSON, assets and libraries
 test('source selection produces fallback chains', () => {
   const url = 'https://libraries.minecraft.net/foo/bar.jar'
   assert.deepEqual(candidateUrls(url, { source: 'official' }), [url])
+  // 即使选定 BMCL 镜像也保留官方地址兜底：单个文件镜像 404 时安装不能整体失败。
   assert.deepEqual(candidateUrls(url, { source: 'bmclapi' }), [
-    'https://bmclapi2.bangbang93.com/maven/foo/bar.jar'
+    'https://bmclapi2.bangbang93.com/maven/foo/bar.jar',
+    url
   ])
   assert.deepEqual(candidateUrls(url, { source: 'auto' }), [
     'https://bmclapi2.bangbang93.com/maven/foo/bar.jar',

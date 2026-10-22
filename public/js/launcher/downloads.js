@@ -318,7 +318,10 @@ function buildView(ctx, container) {
         size: 'xs', variant: 'primary', iconName: 'folder-open', onClick: () => openExportFolder(job)
       }))
     }
-    if (job.instanceId) actions.appendChild(btn('打开实例', { size: 'xs', variant: job.status === 'done' ? 'primary' : 'ghost', iconName: 'arrow-right', onClick: () => ctx.showInstance?.(job.instanceId) }))
+    // 只有实例真的在列表里（安装完成 / 修复中的已有实例）才给入口：
+    // 安装中的实例要等任务结束才进列表，失败实例会被服务端删掉。
+    const instanceVisible = !!job.instanceId && (ctx.getState?.().instances || []).some((item) => item.id === job.instanceId)
+    if (instanceVisible) actions.appendChild(btn('打开实例', { size: 'xs', variant: job.status === 'done' ? 'primary' : 'ghost', iconName: 'arrow-right', onClick: () => ctx.showInstance?.(job.instanceId) }))
     actions.appendChild(iconBtn('terminal', { size: 13, label: '查看任务日志', onClick: () => openLauncherLog(job) }))
     const sub = [job.phase, job.detail].filter(Boolean).join(' · ')
     const iconName = job.type === 'update' ? 'refresh' : job.type === 'pack' ? 'archive' : job.type === 'export' ? 'save' : 'download'

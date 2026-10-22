@@ -327,7 +327,8 @@ async function resolveJavaRuntime(inst, version, paths, { java = null } = {}) {
   if (java) return { java, javaMajor }
   let picked = null
   try {
-    picked = await javaForInstance(inst, { required: javaMajor })
+    // 实例没指定 Java 时用设置里的「默认 Java」，而不是直接按版本号挑一个。
+    picked = await javaForInstance(inst, { required: javaMajor, preferred: getSettings().defaultJava || '' })
   } catch (e) {
     if (isAbortError(e)) throw e
   }

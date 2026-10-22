@@ -39,16 +39,19 @@ const limiter = {
     const limit = Number(cfg.speedLimit) || 0 // KB/s
     if (limit <= 0) return
     const bytesPerSec = limit * 1024
+    // 单次读取可能比每秒配额还大（限速很低时几乎必然如此）：只按配额等待，
+    // 否则令牌永远攒不到 n，整个下载队列会永久卡死。
+    const need = Math.min(n, bytesPerSec)
     for (;;) {
       const now = Date.now()
       this.tokens = Math.min(bytesPerSec, this.tokens + ((now - this.last) / 1000) * bytesPerSec)
       this.last = now
-      if (this.tokens >= n) {
-        this.tokens -= n
+      if (this.tokens >= need) {
+        this.tokens -= need
         return
       }
-      const need = ((n - this.tokens) / bytesPerSec) * 1000
-      await sleep(Math.min(200, Math.max(5, need)))
+      const wait = ((need - this.tokens) / bytesPerSec) * 1000
+      await sleep(Math.min(200, Math.max(5, wait)))
     }
   }
 }

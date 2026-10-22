@@ -100,6 +100,7 @@ const state = {
   search: '',
   news: null,
   newsLoading: false,
+  community: null,
   lastJobState: new Map(),
   finishedNotified: new Set(),
   installController: null,
@@ -480,6 +481,7 @@ function pageCtx() {
       selectedId: state.selectedId,
       accounts: state.accounts,
       settings: state.settings,
+      community: state.community,
       sessions: state.sessions,
       jobs: state.jobs
     }),
@@ -591,6 +593,7 @@ function buildSkeleton() {
       icon('add', { size: 15 }), h('span', {}, '新建实例'))
   )
   head.querySelector('.lp-new').onclick = () => showView('install')
+  countEl = head.querySelector('#lpCount')
 
   accountWrapEl = h('div', { class: 'lp-account-slot' })
 
@@ -652,6 +655,7 @@ async function loadBootstrap({ silent = false } = {}) {
   state.loaders = data.loaders || []
   state.instances = data.instances || []
   state.accounts = data.accounts || { selected: '', items: [] }
+  state.community = data.community || null
   state.sessions = data.sessions || []
   state.jobs = data.jobs || []
   // 实例被删除后，旧的启动状态不再有意义。
@@ -791,6 +795,12 @@ function renderInstanceList() {
     )
     row.onclick = () => selectInstance(inst.id)
     row.ondblclick = () => { selectInstance(inst.id); launchSelected() }
+    // 右键：拦住浏览器/WebView 的默认菜单，换成实例操作菜单。
+    row.oncontextmenu = (event) => {
+      event.preventDefault()
+      if (state.selectedId !== inst.id) selectInstance(inst.id)
+      openInstanceMenu(event, inst)
+    }
     instanceListEl.appendChild(row)
   }
 }
@@ -958,6 +968,10 @@ async function showView(view) {
 /* ------------------------------------------------------------------ */
 
 function renderWelcome() {
+  if (!mainEl) return
+  // 直接 -- 从错误卡片的「返回」等入口进来时，mainEl 里可能还留着上一屏，
+  // 不清干净会叠出好几份欢迎页。
+  clear(mainEl)
   const account = selectedAccount()
   const wrap = h('div', { class: 'lp-welcome' })
   wrap.appendChild(h('div', { class: 'lp-welcome-hero' },
@@ -1021,7 +1035,8 @@ function renderHeroAndTabs() {
   if (detail?.error) {
     mainEl.appendChild(h('div', { class: 'lp-main-error' },
       icon('warning', { size: 24 }), h('b', {}, '读取实例失败'), h('p', {}, detail.error),
-      btn('返回', { onClick: () => renderWelcome() })
+      // 实例可能已被删除：清掉选中项并重新拉一次列表，而不是叠一层欢迎页。
+      btn('返回', { onClick: async () => { state.selectedId = ''; state.detail = null; await refreshAll() } })
     ))
     return
   }
@@ -1629,16 +1644,6 @@ async function renderOverview(container, inst) {
   }))
   loadRecentLog(logSlot, inst)
 
-  // News
-  const newsSlot = h('div', { class: 'lp-news-slot' })
-  left.appendChild(ui.sectionCard({
-    title: '版本动态',
-    subtitle: '来自 Mojang 官方 Java 版更新日志',
-    actions: btn('刷新', { size: 'sm', iconName: 'refresh', onClick: () => { state.news = null; renderNewsInto(newsSlot, { compact: false, force: true }) } }),
-    body: newsSlot
-  }))
-  renderNewsInto(newsSlot, { compact: false })
-
   // Quick actions
   const quick = h('div', { class: 'lp-quick-grid' })
   for (const [label, iconName, fn] of [
@@ -2165,8 +2170,10 @@ async function deleteInstanceAction(inst) {
     : `删除「${inst.name}」？将删除实例目录（模组、存档、截图、日志会一起删除），共享的版本文件与资源库不会删除。`
   if (!(await confirmDialog(message, { danger: true, okText: '删除实例' }))) return
   try {
-    await api.deleteInstance(inst.id)
-    toast('实例已删除', 'ok')
+    const result = await api.deleteInstance(inst.id)
+    // 目录被游戏/日志占用时服务端只能把实例从列表移除，必须如实告诉用户。
+    if (result?.warning) toast(result.warning, 'warn')
+    else toast('实例已删除', 'ok')
     state.selectedId = ''
     state.detail = null
     await refreshAll()
@@ -2177,13 +2184,28 @@ async function deleteInstanceAction(inst) {
 }
 
 function openInstanceMenu(e, inst) {
-  const rect = e.currentTarget?.getBoundingClientRect?.() || e.target.getBoundingClientRect()
+  // 右键用指针位置，按钮用按钮下沿，两种情况都贴着触发点弹出。
+  const pointer = e?.type === 'contextmenu' || e?.type === 'pointerdown'
+  const rect = e?.currentTarget?.getBoundingClientRect?.() || null
+  const x = pointer ? e.clientX : (rect ? rect.right - 8 : 0)
+  const y = pointer ? e.clientY : (rect ? rect.bottom + 4 : 0)
+  const running = isRunningSession(sessionOf(inst.id))
+  const busy = isPreparingLaunch(launchOf(inst.id))
+  const primary = running
+    ? { label: '停止游戏', iconName: 'stop', danger: true, onClick: () => stopSelected() }
+    : busy
+      ? { label: '正在启动…', iconName: 'play', disabled: true, onClick: () => {} }
+      : {
+          label: inst.installed ? '启动游戏' : '检查并修复文件',
+          iconName: inst.installed ? 'play' : 'refresh',
+          onClick: () => inst.installed ? launchSelected() : repairInstance(inst)
+        }
   openContextMenu({
-    x: rect.right - 8,
-    y: rect.bottom + 4,
+    x,
+    y,
     label: inst.name,
     items: [
-      { label: inst.installed ? '启动游戏' : '检查并修复文件', iconName: inst.installed ? 'play' : 'refresh', onClick: () => inst.installed ? launchSelected() : repairInstance(inst) },
+      primary,
       { label: '实例设置', iconName: 'settings', onClick: () => openInstanceSettings(inst) },
       { label: '打开游戏目录', iconName: 'folder-open', onClick: () => openPath(inst.paths?.gameDir || '') },
       { label: '打开日志目录', iconName: 'terminal', onClick: () => openPath(inst.paths?.logsDir || '') },
@@ -2191,9 +2213,9 @@ function openInstanceMenu(e, inst) {
       { label: '复制启动命令', iconName: 'copy', onClick: () => showCommandPreview(inst, true) },
       { label: '导出为整合包', iconName: 'archive', onClick: () => openPackExport(inst) },
       { label: '导出实例配置', iconName: 'save', onClick: () => exportInstance(inst) },
-      { label: '复制实例', iconName: 'copy', onClick: () => duplicateInstance(inst) },
+      { label: '复制实例', iconName: 'copy', disabled: running, title: running ? '请先退出游戏' : '', onClick: () => duplicateInstance(inst) },
       { separator: true },
-      { label: '删除实例', iconName: 'trash', danger: true, onClick: () => deleteInstanceAction(inst) }
+      { label: '删除实例', iconName: 'trash', danger: true, disabled: running, title: running ? '请先退出游戏' : '', onClick: () => deleteInstanceAction(inst) }
     ]
   })
 }
@@ -2426,6 +2448,11 @@ function detectJobChanges() {
       })
     } else if (finished.status === 'failed') {
       toast(`安装失败：${finished.error || finished.detail || '请查看任务日志'}`, 'err')
+      // 失败/取消时服务端会删掉这次新建的半成品实例；列表不刷新的话，
+      // 点进去只会看到「实例不存在」。
+      refreshAll().catch(() => {})
+    } else if (finished.status === 'cancelled') {
+      refreshAll().catch(() => {})
     }
   }
   const nav = navWrapEl?.querySelector('[data-nav="downloads"]')
@@ -2436,6 +2463,10 @@ function detectJobChanges() {
       badge.textContent = String(totalActive)
     } else badge?.remove()
   }
+  // 服务端只保留最近 50 个任务；清掉已消失任务的 id，避免长时间运行时集合无限增长。
+  const aliveJobIds = new Set(state.jobs.map((job) => job.id))
+  for (const id of [...state.finishedNotified]) if (!aliveJobIds.has(id)) state.finishedNotified.delete(id)
+  for (const id of [...state.lastJobState.keys()]) if (!aliveJobIds.has(id)) state.lastJobState.delete(id)
 }
 
 function emitStatus() {

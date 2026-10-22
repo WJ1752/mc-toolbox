@@ -11,6 +11,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import os from 'node:os'
 import { httpFetch } from '../http.js'
 import { readZipIndex, packDirectory } from '../pack-converter.js'
 import { readJarEntries } from '../zip.js'
@@ -236,7 +237,9 @@ export function startPackExport(instanceId, options = {}) {
   const paths = instancePaths(inst)
   if (!fs.existsSync(paths.gameDir)) throw new Error('实例游戏目录不存在：' + paths.gameDir)
   const outputDir = resolveOutputDir(options.outputDir)
-  if (inst.external && isInsideOrSame(outputDir, paths.baseDir)) {
+  // 外部实例的游戏目录通常整个 .minecraft；默认导出目录正好落在里面时
+  // （启动器根就是它）仍然允许：只有显式指定到游戏目录里才拒绝。
+  if (inst.external && isInsideOrSame(outputDir, paths.baseDir) && (options.outputDir || isInsideOrSame(outputDir, paths.gameDir))) {
     throw new Error('外部实例目录是只读的，导出目录不能放在游戏目录内：' + paths.baseDir)
   }
   const job = new ExportJob({
@@ -249,7 +252,12 @@ export function startPackExport(instanceId, options = {}) {
     loader: inst.loader,
     loaderVersion: inst.loaderVersion
   })
-  const stagingRoot = path.join(launcherRoot(), 'cache', 'export', job.id)
+  // 启动器根与实例游戏目录重合时（外部实例导入的就是启动器根），固定放在
+  // <root>/cache 的临时目录会被判成「位于游戏目录内」，改用系统临时目录。
+  let stagingRoot = path.join(launcherRoot(), 'cache', 'export', job.id)
+  if (isInsideOrSame(stagingRoot, paths.gameDir) || isInsideOrSame(paths.gameDir, stagingRoot)) {
+    stagingRoot = path.join(os.tmpdir(), 'mc-toolbox-export', job.id)
+  }
   job.stagingRoot = stagingRoot
   job.cleanup = async () => {
     await fsp.rm(stagingRoot, { recursive: true, force: true }).catch(() => {})

@@ -189,11 +189,17 @@ export async function importExisting({ dir = '', versionId = '', name = '', grou
     // 允许直接传 .minecraft 的上级目录。
     if (fs.existsSync(path.join(clean, '.minecraft', 'versions'))) wantedRoots.add(path.join(clean, '.minecraft'))
   }
-  const item = (wantedRoots.size
-    ? scan.items.find((entry) => wantedRoots.has(path.resolve(entry.root)) && entry.versionId === versionId)
-    : null)
-    || scan.items.find((entry) => entry.versionId === versionId)
-  if (!item) throw new Error('未找到要导入的版本')
+  // 指定了目录就只在该目录里找：找不到就报错，不能悄悄改用别的 .minecraft
+  // 里同名版本，否则用户以为导入的是自己选的目录。
+  const scoped = wantedRoots.size
+    ? scan.items.filter((entry) => wantedRoots.has(path.resolve(entry.root)))
+    : scan.items
+  const item = scoped.find((entry) => entry.versionId === versionId)
+  if (!item) {
+    throw new Error(wantedRoots.size
+      ? `在所选目录里没有找到版本 ${versionId || '（空）'}`
+      : '未找到要导入的版本')
+  }
   if (item.imported) throw new Error('该版本已经导入过了')
 
   const payload = buildImportedInstance(item, { name, group, mc: requestedMc })

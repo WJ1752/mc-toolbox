@@ -16,6 +16,7 @@ import {
   launcherRoot,
   createInstance,
   findInstance,
+  listInstances,
   updateInstance,
   deleteInstance,
   instancePaths,
@@ -39,7 +40,7 @@ import {
   BMCL_MAVEN
 } from './meta.js'
 import { collectLibraries, normalizeOs, requiredJavaMajor } from './launch-plan.js'
-import { downloadFromMirrors, runPool, sha1File } from './download.js'
+import { downloadFromMirrors, fetchToFile, runPool, sha1File } from './download.js'
 import { pickJava } from './java.js'
 import {
   isSeedableMojmapsProfile, patchJarEntry, patchMojmapsProcessor, readJarJson, resolveMojmapsCoordinate
@@ -249,18 +250,29 @@ function runJob(job, task) {
     job.log('任务开始')
     try {
       await task(job)
-      if (job.controller.signal.aborted || job.cancelRequested) {
+      // 任务体已经写完实例（例如整合包在收尾清理缓存）时，取消请求不能再
+      // 把它算成「取消」，否则 finally 会把一个装好的实例删掉。
+      if (!job.committed && (job.controller.signal.aborted || job.cancelRequested)) {
         finishJob(job, 'cancelled')
         job.log('任务已取消', 'warn')
         return
       }
+      if (job.committed && job.cancelRequested) job.log('安装已完成，忽略取消请求', 'warn')
       job.progress = 100
       job.indeterminate = false
       job.detail = job.type === 'pack' ? '整合包安装完成' : job.type === 'update' ? '模组更新完成' : '安装完成'
       job.log(job.detail, 'ok')
       finishJob(job, 'done')
+      // 整个任务成功后才让实例进列表：整合包装加载器只算完成一半。
+      if (job.instanceId) {
+        try { updateInstance(job.instanceId, { installing: false, installedAt: Date.now() }) } catch {}
+      }
     } catch (e) {
-      if (job.controller.signal.aborted || job.cancelRequested) {
+      if (job.committed) {
+        // 收尾阶段的失败（多为清理缓存）不影响已经装好的实例。
+        finishJob(job, 'done')
+        job.log('收尾清理失败，但安装内容已完成：' + e.message, 'warn')
+      } else if (job.controller.signal.aborted || job.cancelRequested) {
         finishJob(job, 'cancelled')
         job.log('任务已取消', 'warn')
       } else {
@@ -271,7 +283,7 @@ function runJob(job, task) {
       try { await job.cleanup?.() } catch {}
       // 整合包安装失败 / 取消时，本次任务刚创建的实例没有任何可用文件，
       // 留在列表里只会变成「点不动的重复实例」。连同目录一起删掉，方便直接重装。
-      const unfinished = ['failed', 'cancelled'].includes(job.status)
+      const unfinished = ['failed', 'cancelled'].includes(job.status) && !job.committed
       if (unfinished && job.createdInstanceId && job.createdInstanceId === job.instanceId) {
         try {
           deleteInstance(job.instanceId)
@@ -284,6 +296,29 @@ function runJob(job, task) {
     }
   })
   return job
+}
+
+/**
+ * 启动时恢复：上一次进程被杀掉时留下的「安装中」实例已经没有任务在跑，
+ * 也不会再完成。只把标记复位，让它在列表里以「需要修复」出现，交给用户决定
+ * 删除或重装 —— 多开时另一个进程可能正在安装同一个实例，直接删目录会丢数据。
+ */
+export function pruneUnfinishedInstances() {
+  const live = new Set(
+    [...jobs.values()]
+      .filter((job) => !FINISHED.has(job.status))
+      .map((job) => job.instanceId)
+      .filter(Boolean)
+  )
+  let recovered = 0
+  for (const inst of listInstances({ includeInstalling: true, includePaths: false })) {
+    if (!inst.installing || live.has(inst.id)) continue
+    try {
+      updateInstance(inst.id, { installing: false })
+      recovered++
+    } catch {}
+  }
+  return recovered
 }
 
 export function getJob(id) {
@@ -617,7 +652,17 @@ async function prepareInstallerMappings(job, installerFile, root, meta, { source
 }
 
 async function runInstallerOnce(job, javaPath, installerFile, root) {
-  const args = [...proxyJvmArgs(), '-jar', installerFile, '--installClient', root]
+  const args = [
+    ...proxyJvmArgs(),
+    // Windows 上 Java 的 stdout 默认是 GBK，中文路径/中文报错会在任务日志里
+    // 变成乱码；强制安装器用 UTF-8 输出（17 用 sun.*，18+ 用 stdout.*）。
+    '-Dfile.encoding=UTF-8',
+    '-Dstdout.encoding=UTF-8',
+    '-Dstderr.encoding=UTF-8',
+    '-Dsun.stdout.encoding=UTF-8',
+    '-Dsun.stderr.encoding=UTF-8',
+    '-jar', installerFile, '--installClient', root
+  ]
   job.phaseLabel('安装加载器', '正在运行官方安装器（下载并处理 libraries）…')
   job.set(null, '安装器正在工作…（此阶段耗时取决于网络）', { indeterminate: true })
   job.log(`执行安装器：${path.basename(installerFile)}`)
@@ -906,7 +951,9 @@ async function installVersionFiles(job, instId, root, versionId, { source, from,
     jarVersion,
     installedAt: Date.now()
   }, null, 2), 'utf8')
-  updateInstance(instId, { installedAt: Date.now(), versionId, jarVersion, installing: false })
+  // 只记录版本文件已就绪；installing 留到整个任务结束（runJob）再清，
+  // 否则整合包还在下载模组时实例就提前出现在侧栏了。
+  updateInstance(instId, { versionId, jarVersion })
   progressIn(job, from + (to - from) * 0.98, to, 1, '文件校验完成')
   job.log('版本文件准备完成', 'ok')
   return { versionId, jarVersion, effective }
@@ -963,7 +1010,15 @@ async function installForgeLike(job, inst, loader, mc, loaderVersion, root, { so
   await fsp.mkdir(cacheDir, { recursive: true })
   const installerFile = path.join(cacheDir, info.filename)
   job.phaseLabel('下载安装器', info.filename)
-  if (!fs.existsSync(installerFile) || (await fsp.stat(installerFile)).size < 1024) {
+  // 缓存只按大小判断会把「镜像错误页 / 被截断 / 被安全软件替换」的坏 jar 一直复用，
+  // 于是每次安装都稳定失败。这里先校验 ZIP 魔数，坏了就删掉重下。
+  let cachedInstaller = false
+  if (fs.existsSync(installerFile)) {
+    const stat = await fsp.stat(installerFile).catch(() => null)
+    cachedInstaller = !!stat && stat.size >= 1024 && looksLikeZip(installerFile)
+    if (!cachedInstaller) await fsp.rm(installerFile, { force: true }).catch(() => {})
+  }
+  if (!cachedInstaller) {
     job.log('下载官方安装器：' + info.filename)
     const urls = source === 'official'
       ? [info.url]
@@ -1090,11 +1145,12 @@ async function installInstanceCore(job, instId, { from = 0, to = 100, source } =
   }
 
   const current = findInstance(instId)
+  // 这里不写 installing：修复已有实例时它不是「新安装」，写 true 会让实例
+  // 从侧栏消失。新安装的 installing 由 createInstance 负责。
   updateInstance(instId, {
     versionId,
     loader,
     loaderVersion,
-    installing: true,
     installedAt: current?.installedAt || 0
   })
   job.log('版本 ID：' + versionId)
@@ -1235,7 +1291,7 @@ export function startRepair(instanceId) {
   const inst = findInstance(instanceId)
   if (!inst) throw new Error('实例不存在')
   if (!inst.versionId) throw new Error('实例没有版本 ID')
-  updateInstance(instanceId, { installing: true })
+  // 修复的是已有实例，不要置 installing：那会让它在修复期间从侧栏消失。
   const job = new InstallJob({ type: 'repair', instanceId, name: inst.name, mc: inst.mc, loader: inst.loader, loaderVersion: inst.loaderVersion })
   runJob(job, async () => {
     job.log('开始检查并修复文件')
@@ -1281,8 +1337,9 @@ function packKindLabel(kind) {
 }
 
 function parsePackJson(text, name) {
+  // Windows 记事本/部分打包工具会写入 UTF-8 BOM，JSON.parse 会直接失败。
   try {
-    const value = JSON.parse(text)
+    const value = JSON.parse(String(text || '').replace(/^\uFEFF/, ''))
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('内容不是对象')
     return value
   } catch {
@@ -1291,18 +1348,25 @@ function parsePackJson(text, name) {
 }
 
 export async function readPackMeta(file) {
-  if (!looksLikeZip(file)) throw new Error('整合包不是有效的 ZIP 文件，可能已损坏')
+  const source = String(file || '')
+  if (!source) throw new Error('缺少整合包文件路径')
+  if (!fs.existsSync(source)) throw new Error('整合包文件不存在：' + source)
+  if (!looksLikeZip(source)) throw new Error('整合包不是有效的 ZIP 文件，可能已损坏')
   let entries = {}
   const stats = {}
-  try { entries = await readJarEntries(file, ['modrinth.index.json', 'manifest.json'], { maxBytes: 24 * 1024 * 1024, stats }) } catch {}
+  try { entries = await readJarEntries(source, ['modrinth.index.json', 'manifest.json'], { maxBytes: 24 * 1024 * 1024, stats }) } catch {}
   if (entries['modrinth.index.json']) {
     const index = parsePackJson(entries['modrinth.index.json'].toString('utf8'), 'modrinth.index.json')
+    // 清单来自不可信压缩包：files 必须是数组，否则后面会抛出原生 TypeError。
+    if (index.files !== undefined && !Array.isArray(index.files)) {
+      throw new Error('modrinth.index.json 的 files 字段格式无效')
+    }
     const deps = index.dependencies || {}
     const loader = loaderFromDependencies(deps)
     return {
       kind: 'modrinth',
       index,
-      name: index.name || path.basename(file, path.extname(file)),
+      name: index.name || path.basename(source, path.extname(source)),
       mc: String(deps.minecraft || ''),
       ...loader
     }
@@ -1352,6 +1416,8 @@ export async function readPackMeta(file) {
       kind: 'curseforge',
       manifest,
       name: manifest.name || path.basename(file, path.extname(file)),
+      // CurseForge 允许自定义覆盖目录名，不读这个字段会导致配置/资源包不生效。
+      overrides: String(manifest.overrides || 'overrides') || 'overrides',
       ...runtime
     }
   }
@@ -1359,9 +1425,11 @@ export async function readPackMeta(file) {
   throw new Error('无法识别整合包：缺少 modrinth.index.json 或 manifest.json')
 }
 
-async function copyPackOverrides(tempDir, gameDir, kind, job, { overrides = 'overrides' } = {}) {
+export async function copyPackOverrides(tempDir, gameDir, kind, job, { overrides = 'overrides' } = {}) {
   const metadata = new Set(['manifest.json', 'modlist.html', 'modrinth.index.json'])
-  const dirs = [...new Set([overrides, 'overrides', 'client-overrides', 'server-overrides'].filter(Boolean))]
+  // 客户端实例只解压 overrides / client-overrides；server-overrides 属于服务端，
+  // 装进客户端会让服务端专用模组/配置污染实例。
+  const dirs = [...new Set(['overrides', 'client-overrides', normalizeOverridesDir(overrides)].filter(Boolean))]
   let copied = 0
   const copyEntry = async (source, target) => {
     job.signal.throwIfAborted()
@@ -1377,19 +1445,30 @@ async function copyPackOverrides(tempDir, gameDir, kind, job, { overrides = 'ove
   }
   let foundOverride = false
   for (const dir of dirs) {
-    const full = path.join(tempDir, dir)
+    const full = path.resolve(tempDir, dir)
+    if (!insideDir(tempDir, full)) continue
     if (fs.existsSync(full)) {
       foundOverride = true
       await copyEntry(full, gameDir)
     }
   }
-  // CurseForge exports sometimes put content at the archive root.
+  // CurseForge 有时把内容直接放在压缩包根目录；Modrinth / mc-toolbox 的根目录
+  // 只有 README、图标等杂项，不能复制进实例。
+  if (kind !== 'curseforge' || foundOverride) return copied
   for (const name of await fsp.readdir(tempDir)) {
     if (dirs.includes(name) || metadata.has(name)) continue
-    if ((kind === 'modrinth' || kind === 'toolbox') && !foundOverride) continue
     await copyEntry(path.join(tempDir, name), path.join(gameDir, name))
   }
   return copied
+}
+
+/** 清单里的 overrides 目录名来自压缩包，只接受安全的相对子目录。 */
+function normalizeOverridesDir(name) {
+  const raw = String(name || '').replace(/\\/g, '/').replace(/^\/+/, '').trim()
+  if (!raw) return 'overrides'
+  const parts = raw.split('/').filter(Boolean)
+  if (!parts.length || parts.some((part) => part === '..' || part === '.' || /:/.test(part))) return 'overrides'
+  return parts.join('/')
 }
 
 async function downloadModrinthPackFiles(job, index, gameDir, { from, to, phase = '下载整合包文件', noun = '整合包文件' } = {}) {
@@ -1414,37 +1493,46 @@ async function downloadModrinthPackFiles(job, index, gameDir, { from, to, phase 
     if (!urls.length) throw new Error('整合包文件缺少下载地址：' + rel)
     let last = 0
     const hash = hashes[algorithm]
-    // downloadFromMirrors verifies sha1 only; verify sha512 ourselves afterwards.
+    // fetchToFile 不认 sha512，这里下载完自己再算一次，sha1 也走同一套逻辑，
+    // 保证任何算法下都以哈希为准。
     const targetTemp = target
     let lastError = null
     for (const url of urls) {
-      try {
-        await downloadFromMirrors([url], targetTemp, {
-          size: Number(item.fileSize) || 0,
-          signal: job.signal,
-          verify: false,
-          retries: getSettings().retries || 0,
-          onProgress: ({ received }) => {
-            const delta = Math.max(0, received - last)
-            last = received
-            bytes += delta
-            if (total) progressIn(job, from, to, bytes / total, `${noun} ${done + 1}/${files.length} · ${path.basename(rel)}`)
-            job.bytes(bytes, total)
+      // 同一地址最多试两次：第一次内容不符（旧缓存/覆盖文件）时删掉再下一次。
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          // 这里不传 size：清单里的 fileSize 只用来显示进度。真实校验交给
+          // 下面的 sha1/sha512，否则清单大小与 CDN 文件差几个字节会误报失败。
+          await fetchToFile(url, targetTemp, {
+            signal: job.signal,
+            verify: false,
+            retries: getSettings().retries || 0,
+            onProgress: ({ received }) => {
+              const delta = Math.max(0, received - last)
+              last = received
+              bytes += delta
+              if (total) progressIn(job, from, to, bytes / total, `${noun} ${done + 1}/${files.length} · ${path.basename(rel)}`)
+              job.bytes(bytes, total)
+            }
+          })
+          const digest = crypto.createHash(algorithm)
+          for await (const chunk of fs.createReadStream(targetTemp)) digest.update(chunk)
+          if (digest.digest('hex').toLowerCase() !== String(hash).toLowerCase()) {
+            // 删掉坏文件（可能是覆盖文件或旧缓存），同一地址再下一次；
+            // 单地址整合包不会因此一次就判死。
+            await fsp.rm(targetTemp, { force: true }).catch(() => {})
+            throw new Error('哈希校验失败')
           }
-        })
-        const digest = crypto.createHash(algorithm)
-        for await (const chunk of fs.createReadStream(targetTemp)) digest.update(chunk)
-        if (digest.digest('hex').toLowerCase() !== String(hash).toLowerCase()) {
-          // 删掉坏文件，后续镜像才会真正重新下载而不是复用同一个小文件。
-          await fsp.rm(targetTemp, { force: true }).catch(() => {})
-          throw new Error('哈希校验失败')
+          lastError = null
+          break
+        } catch (e) {
+          if (job.signal.aborted) throw e
+          lastError = e
+          // 只有"文件内容不对"值得在同一地址重试；网络/404 直接换下一个镜像。
+          if (!/哈希校验失败/.test(e.message) || attempt >= 2) break
         }
-        lastError = null
-        break
-      } catch (e) {
-        if (job.signal.aborted) throw e
-        lastError = e
       }
+      if (!lastError) break
     }
     if (lastError) throw new Error(`整合包文件 ${rel} 下载失败：${lastError.message}`)
     done++
@@ -1625,6 +1713,8 @@ async function runPackInstall(job, options = {}) {
   if (finalPhase) job.phaseLabel(finalPhase, '整合包安装完成')
   job.log('整合包内容安装完成', 'ok')
   updateInstance(inst.id, { installing: false, installedAt: Date.now() })
+  // 从这里开始只剩清理缓存：之后的取消/失败都不能再删这个已经装好的实例。
+  job.committed = true
   job.log('完成的实例：' + inst.name, 'ok')
 }
 
@@ -1646,8 +1736,10 @@ export function startPackInstall({ source, name = '', memory = {}, minMemory, ja
       group,
       tempRoot,
       source: getSettings().source,
-      ranges: { install: [0, 62], extract: [62, 72], download: [72, 96], finish: 98 },
-      order: 'extract-first'
+      // 先按清单下载、再解压 overrides：覆盖文件必须最后落地，否则清单里与
+      // overrides 同路径的文件会被判定「哈希校验失败」，安装直接失败。
+      ranges: { install: [0, 62], download: [62, 90], extract: [90, 96], finish: 98 },
+      order: 'download-first'
     })
   })
   return { job: job.public() }

@@ -90,12 +90,13 @@ function joinPath(root, ...parts) {
   return [base, ...parts.filter(Boolean)].join(sep)
 }
 
-/** 与后端 resolveGameRoot 保持一致：选中的文件夹里使用 / 创建 .minecraft。 */
+/**
+ * 选中的目录原样交给服务端 resolveGameRoot 解析：本身叫 .minecraft、已经是
+ * 游戏根（含 versions/libraries/assets）、或需要新建 .minecraft，都由服务端
+ * 统一判断，避免前端再追加一层 .minecraft 指向空目录。
+ */
 export function suggestGameRoot(picked) {
-  const clean = String(picked || '').replace(/[\\/]+$/, '')
-  if (!clean) return ''
-  if (/(^|[\\/])\.minecraft$/i.test(clean)) return clean
-  return joinPath(clean, '.minecraft')
+  return String(picked || '').trim().replace(/[\\/]+$/, '')
 }
 
 /**

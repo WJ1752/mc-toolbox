@@ -35,6 +35,14 @@ export async function listRegions(worldPath) {
   return { dir: dim, items }
 }
 
+// 区域文件内的区块索引：传入的是全局区块坐标，必须先取模到 0..31，
+// 否则 r.1.0 这类区域的读写会落到错误的槽位（甚至越界读不到区块）。
+function regionIndex(cx, cz) {
+  const lx = ((Math.trunc(cx) % 32) + 32) % 32
+  const lz = ((Math.trunc(cz) % 32) + 32) % 32
+  return lz * 32 + lx
+}
+
 function locAt(buf, idx) {
   const v = buf.readUInt32BE(idx * 4)
   return { offset: v >>> 8, count: v & 0xff }
@@ -62,7 +70,7 @@ export function regionBitmap(worldPath, fileName) {
 }
 
 function rawChunkPayload(headerBuf, file, cx, cz) {
-  const { offset, count } = locAt(headerBuf, cz * 32 + cx)
+  const { offset, count } = locAt(headerBuf, regionIndex(cx, cz))
   if (offset === 0 || count === 0) throw new Error(`区块 (${cx},${cz}) 在此区域文件中不存在`)
   const fd = fs.openSync(file, 'r')
   try {
@@ -378,7 +386,15 @@ export function planBox(worldPath, box) {
 
 function normBox(box) {
   const i = (v) => Math.trunc(Number(v))
-  const x1 = i(box.x1), x2 = i(box.x2), y1 = i(box.y1), y2 = i(box.y2), z1 = i(box.z1), z2 = i(box.z2)
+  const raw = box && typeof box === 'object' ? box : {}
+  // planBox 返回的是 {minX..maxZ}，前端会把它原样传回来；这里两种形状都接受。
+  const ranged = ['minX', 'maxX', 'minY', 'maxY', 'minZ', 'maxZ'].some((key) => raw[key] !== undefined)
+  const x1 = i(ranged ? raw.minX : raw.x1)
+  const x2 = i(ranged ? raw.maxX : raw.x2)
+  const y1 = i(ranged ? raw.minY : raw.y1)
+  const y2 = i(ranged ? raw.maxY : raw.y2)
+  const z1 = i(ranged ? raw.minZ : raw.z1)
+  const z2 = i(ranged ? raw.maxZ : raw.z2)
   if ([x1, x2, y1, y2, z1, z2].some((v) => !Number.isFinite(v))) throw new Error('坐标必须是数字')
   if (y1 < -2032 || y2 > 2031) throw new Error('Y 超出范围（-2032 ~ 2031）')
   return {
@@ -470,7 +486,7 @@ function writeChunkBack(file, cx, cz, root) {
   const needSectors = Math.ceil(body.length / SECTOR)
   const buf = fs.readFileSync(file)
 
-  const { offset, count } = locAt(buf, cz * 32 + cx)
+  const { offset, count } = locAt(buf, regionIndex(cx, cz))
   if (offset === 0 || count === 0) throw new Error('区块不存在，无法写回')
 
   if (needSectors > count) {

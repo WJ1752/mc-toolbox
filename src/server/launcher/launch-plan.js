@@ -533,20 +533,36 @@ export function buildLaunchPlan({
 
 /** Human-readable command preview (never includes the real access token). */
 export function previewCommand(plan, javaPath = 'java') {
-  const mask = (list) => list.map((arg) => {
-    if (/^(--accessToken|--clientId|--xuid)$/.test(arg)) return arg
-    return arg
-  }).map((arg, index, list) => {
-    if (index > 0 && /^(--accessToken)$/.test(list[index - 1])) return '<access token>'
+  // 按值脱敏：旧版本 JSON 用 ${auth_session}（--session）传令牌，只认
+  // --accessToken 的下一个参数会把令牌原样漏进预览和 /status。
+  const secrets = []
+  const addSecret = (value, label) => {
+    const text = String(value || '')
+    if (text.length >= 6) secrets.push({ value: text, label })
+  }
+  addSecret(plan?.vars?.auth_access_token, '<access token>')
+  addSecret(plan?.vars?.auth_session, '<access token>')
+  const redact = (arg) => {
+    let out = String(arg)
+    for (const { value, label } of secrets) {
+      if (out.includes(value)) out = out.split(value).join(label)
+    }
+    return out
+  }
+  const mask = (list) => list.map((arg, index) => {
+    if (index > 0 && /^(--accessToken|--session|--access-token)$/.test(list[index - 1])) return '<access token>'
     if (index > 0 && /^(--clientId)$/.test(list[index - 1])) return '<client id>'
     if (index > 0 && /^(--xuid)$/.test(list[index - 1])) return '<xuid>'
-    return arg
+    const inline = /^(--accessToken|--session|--access-token)=.*$/.exec(arg)
+    if (inline) return `${inline[1]}=<access token>`
+    return redact(arg)
   })
   const jvm = plan.jvmArgs.map((arg) => {
-    if (arg.length > 220) return arg.slice(0, 220) + '…'
-    return arg
+    const text = redact(arg)
+    if (text.length > 220) return text.slice(0, 220) + '…'
+    return text
   })
-  return [javaPath, ...jvm, plan.mainClass, ...mask(plan.gameArgs)].map(quoteArg).join(' ')
+  return [javaPath, ...jvm, redact(plan.mainClass), ...mask(plan.gameArgs)].map(quoteArg).join(' ')
 }
 
 function quoteArg(value) {

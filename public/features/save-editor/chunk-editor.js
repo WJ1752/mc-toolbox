@@ -554,17 +554,31 @@ export function openChunkEditor(ctx, world) {
       if (!ok) return
       btnBoxGo.disabled = true
       let total = 0, done = 0, skipped = 0
+      const failures = []
+      // 每个区域文件只备份一次：跨区域的批量替换不能只备份第一个文件。
+      const backedUp = new Set()
       for (const it of plan.items) {
         progressEl2.textContent = `替换进度 ${done}/${plan.items.length}…`
         const r = await api.post('/api/saveeditor/box/apply', {
-          world: st.world.path, file: it.file, cx: it.cx, cz: it.cz, box: plan.box, from, to, noBackup: done > 0
+          world: st.world.path, file: it.file, cx: it.cx, cz: it.cz, box: plan.box, from, to,
+          noBackup: backedUp.has(it.file)
         }).catch((e) => ({ error: e.message }))
-        if (r.error) { skipped++; continue }
+        if (r.error) { skipped++; failures.push(`[${it.cx},${it.cz}] ${r.error}`); continue }
+        backedUp.add(it.file)
         total += r.replaced || 0
         done++
       }
       progressEl2.textContent = ''
-      toast(`坐标替换完成：${total} 个方块${skipped ? `（跳过 ${skipped} 个区块）` : ''}（.mca 已备份）`, 'ok')
+      if (!done) {
+        // 全部失败时不能提示“完成 / 已备份”：用户会以为改成功了。
+        toast('坐标替换失败：' + (failures[0] || '所有区块都未能写入'), 'err')
+        return
+      }
+      if (skipped) {
+        toast(`坐标替换完成：${total} 个方块，${skipped} 个区块失败（${failures[0]}）`, 'warn')
+      } else {
+        toast(`坐标替换完成：${total} 个方块（.mca 已备份）`, 'ok')
+      }
       if (st.detail && st.selChunk && plan.items.some((i) => i.cx === st.selChunk.cx && i.cz === st.selChunk.cz && i.file === st.file)) {
         loadChunk(st.selChunk.cx, st.selChunk.cz)
       }

@@ -110,6 +110,9 @@ export const clientHeartbeat = { last: 0, shutdown: false }
 
 on('POST', '/api/heartbeat', async () => {
   clientHeartbeat.last = Date.now()
+  // 刷新页面同样会触发 beforeunload → /api/shutdown；只要还有活着的页面在
+  // 心跳，就撤销关机请求，否则 F5 一下后端就退出了。
+  clientHeartbeat.shutdown = false
   return { ok: true }
 })
 
@@ -276,22 +279,58 @@ on('POST', '/api/mods/apply', async (req) => {
   const s = deepMerge(DEFAULT_SETTINGS, store.get('settings', DEFAULT_SETTINGS))
   const files = Array.isArray(body.files) ? body.files : []
   if (!files.length) return { error: '没有选中任何文件' }
+  // 客户端传的是绝对路径，必须以扫描目录为根做校验：否则任何本地页面都能
+  // 用简单请求删改任意文件（服务只监听本机，挡不住浏览器里的跨站请求）。
+  const scanRoot = path.resolve(String(body.dir || s.client2server.modsDir || ''))
+  let safeFiles
+  try {
+    safeFiles = assertInsideRoot(scanRoot, files)
+  } catch (e) {
+    return { error: e.message }
+  }
   if (body.mode === 'delete') {
-    const r = await deleteMods(files)
+    const r = await deleteMods(safeFiles)
     return { mode: 'delete', ...r }
   }
   if (body.mode === 'disable') {
-    const r = await disableMods(files)
+    const r = await disableMods(safeFiles)
     return { mode: 'disable', ...r }
   }
   if (body.mode === 'enable') {
-    const r = await enableMods(files)
+    const r = await enableMods(safeFiles)
     return { mode: 'enable', ...r }
   }
-  const backupDir = body.backupDir || s.client2server.backupDir || defaultBackupDir(body.dir || s.client2server.modsDir)
-  const r = await moveModsToBackup(files, backupDir)
+  // 备份目录只接受扫描目录内部的路径，避免把文件搬到任意位置。
+  let backupDir = s.client2server.backupDir || defaultBackupDir(scanRoot)
+  if (body.backupDir) {
+    const candidate = path.resolve(String(body.backupDir))
+    if (isInsideDir(scanRoot, candidate)) backupDir = candidate
+  }
+  const r = await moveModsToBackup(safeFiles, backupDir)
   return { mode: 'backup', backupDir, ...r }
 })
+
+/** child 是否位于 parent 目录内部。 */
+function isInsideDir(parent, child) {
+  const rel = path.relative(path.resolve(parent), path.resolve(child))
+  return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel)
+}
+
+/** 校验每个路径都落在 root 之内（Windows 大小写不敏感）。 */
+function assertInsideRoot(root, files) {
+  const base = path.resolve(root)
+  const out = []
+  for (const file of files) {
+    const target = path.resolve(String(file || ''))
+    const rel = path.relative(base, target)
+    const inside = rel && !rel.startsWith('..') && !path.isAbsolute(rel)
+    if (!inside || target.toLowerCase() === base.toLowerCase()) {
+      throw new Error('文件不在扫描目录内，已拒绝操作：' + path.basename(String(file || '')))
+    }
+    out.push(target)
+  }
+  return out
+}
 
 function clientModIds() {
   const db = upgradeClientModLibrary(store.get('clientmods', { items: DEFAULT_CLIENT_MODS }))
@@ -837,9 +876,20 @@ on('GET', '/api/data/export', async () => {
 })
 on('POST', '/api/data/import', async (req) => {
   const body = await readBody(req)
-  if (body.settings) await store.set('settings', deepMerge(DEFAULT_SETTINGS, body.settings))
-  if (body.clientmods) await store.set('clientmods', body.clientmods)
-  if (body.monitors) await store.set('monitors', body.monitors)
+  if (body.settings && typeof body.settings === 'object') {
+    await store.set('settings', deepMerge(DEFAULT_SETTINGS, body.settings))
+  }
+  if (body.clientmods && typeof body.clientmods === 'object' && Array.isArray(body.clientmods.items)) {
+    await store.set('clientmods', body.clientmods)
+  }
+  if (body.monitors) {
+    // 备份文件可能被手改坏：只接收结构正确的监测项，否则 tick() 会抛未捕获异常。
+    const items = Array.isArray(body.monitors?.items) ? body.monitors.items : []
+    const safe = items.filter((m) => m && typeof m === 'object'
+      && typeof m.id === 'string' && m.id.trim()
+      && typeof m.url === 'string' && m.url.trim())
+    await store.set('monitors', { items: safe })
+  }
   return { ok: true }
 })
 
@@ -908,13 +958,9 @@ async function openInFileManager(target, { selectFile = '' } = {}) {
     if (selectFile) ok = run('explorer', ['/select,', selectFile])
     else ok = run('explorer', [openTarget])
     if (ok) method = selectFile ? 'explorer /select' : 'explorer'
-    // 方案 2：cmd start（ShellExecute，会激活已有资源管理器窗口）
-    if (!ok) {
-      const comspec = process.env.ComSpec || 'cmd.exe'
-      ok = run(comspec, ['/c', 'start', '""', openTarget], { windowsHide: true })
-      if (ok) method = 'cmd start'
-    }
-    // 方案 3：PowerShell Start-Process
+    // 方案 2：PowerShell Start-Process。
+    // 不在这里用 `cmd /c start`：它会重新解析命令行，路径里的 & | > 会被当成
+    // 命令分隔符执行（例如文件夹名含 & 时可注入任意命令）。
     if (!ok) {
       const t = openTarget.replace(/'/g, "''")
       ok = run('powershell', ['-NoProfile', '-NonInteractive', '-Command', `Start-Process -FilePath '${t}'`], { windowsHide: true })
@@ -1010,11 +1056,26 @@ export async function requestHandler(req, res) {
     try {
       // 每次 API 请求前同步代理配置（供下载引擎/服务端核心的 httpFetch 使用）
       setProxy((store.get('settings', DEFAULT_SETTINGS).network || {}).proxy || '')
+      // 静态路由优先：否则 /api/monitors/history 会被先注册的
+      // /api/monitors/:id 当成 id="history" 抢走，接口静默失效。
+      let hit = null
+      let hitParams = null
       for (const r of routes) {
         if (r.method !== req.method) continue
-        const params = match(r.pattern, pathname)
-        if (!params) continue
-        const data = await r.handler(req, params, query, res)
+        if (r.pattern === pathname) { hit = r; hitParams = {}; break }
+      }
+      if (!hit) {
+        for (const r of routes) {
+          if (r.method !== req.method) continue
+          const params = match(r.pattern, pathname)
+          if (!params) continue
+          hit = r
+          hitParams = params
+          break
+        }
+      }
+      if (hit) {
+        const data = await hit.handler(req, hitParams, query, res)
         // File/stream handlers write the response themselves.
         if (res.writableEnded) return
         sendJson(res, 200, data)

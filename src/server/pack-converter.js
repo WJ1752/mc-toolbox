@@ -365,6 +365,8 @@ async function installCoreForPack(root, runtime, onProgress, options, signal) {
   signal?.throwIfAborted()
   const job = await community.startDownload({
     url: info.url,
+    // Forge/NeoForge 官方 maven 在国内经常不可达，服务端核心下载支持镜像回退。
+    mirrors: Array.isArray(info.mirrors) ? info.mirrors : [],
     filename: info.filename,
     dir: root,
     title: `${runtime.loader} ${runtime.mc}`,

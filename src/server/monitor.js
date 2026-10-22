@@ -98,50 +98,56 @@ async function runCheck(mon) {
   if (r.checking) return
   r.checking = true
   r.lastAttempt = Date.now()
-  const s = settingsNow()
-  let result
   try {
-    result = await pingServer({
-      host: mon.host,
-      port: mon.port,
-      type: mon.type || 'auto',
-      timeout: s.network.timeout,
-      retries: s.network.retries,
-      settings: s.network
-    })
+    const s = settingsNow()
+    let result
+    try {
+      result = await pingServer({
+        host: mon.host,
+        port: mon.port,
+        type: mon.type || 'auto',
+        timeout: s.network.timeout,
+        retries: s.network.retries,
+        settings: s.network
+      })
+    } catch (e) {
+      result = { ok: false, error: e.message, latency: null, data: null }
+    }
+    r.totalChecks++
+    const point = {
+      t: Date.now(),
+      ok: result.ok ? 1 : 0,
+      ms: result.ok && result.latency != null ? Number(result.latency) : null,
+      players: result.data?.players?.online ?? null
+    }
+    if (result.ok) {
+      r.totalOk++
+      r.streakFails = 0
+    } else {
+      r.streakFails++
+    }
+    r.current = {
+      ok: !!result.ok,
+      offline: r.streakFails >= (s.monitor.offlineAfter || 2),
+      latency: point.ms,
+      edition: result.edition || null,
+      error: result.ok ? null : result.error || '请求失败',
+      players: result.data?.players || null,
+      version: result.data?.version || null,
+      motd: result.data?.motd || null,
+      checkedAt: point.t,
+      resolved: { host: result.resolvedHost, port: result.resolvedPort, ip: result.ip, viaSrv: result.viaSrv }
+    }
+    r.history.push(point)
+    const cap = Math.max(60, s.monitor.historyPoints)
+    if (r.history.length > cap) r.history.splice(0, r.history.length - cap)
   } catch (e) {
-    result = { ok: false, error: e.message, latency: null, data: null }
+    // 单个监测项的异常不能让该项永久停在「检查中」，也不能让 tick 中断。
+    r.current = { ...(r.current || {}), ok: false, error: e.message || '检查失败', checkedAt: Date.now() }
+  } finally {
+    r.checking = false
+    try { store.schedule('history', 15000) } catch {}
   }
-  r.totalChecks++
-  const point = {
-    t: Date.now(),
-    ok: result.ok ? 1 : 0,
-    ms: result.ok && result.latency != null ? Number(result.latency) : null,
-    players: result.data?.players?.online ?? null
-  }
-  if (result.ok) {
-    r.totalOk++
-    r.streakFails = 0
-  } else {
-    r.streakFails++
-  }
-  r.current = {
-    ok: !!result.ok,
-    offline: r.streakFails >= (s.monitor.offlineAfter || 2),
-    latency: point.ms,
-    edition: result.edition || null,
-    error: result.ok ? null : result.error || '请求失败',
-    players: result.data?.players || null,
-    version: result.data?.version || null,
-    motd: result.data?.motd || null,
-    checkedAt: point.t,
-    resolved: { host: result.resolvedHost, port: result.resolvedPort, ip: result.ip, viaSrv: result.viaSrv }
-  }
-  r.history.push(point)
-  const cap = Math.max(60, s.monitor.historyPoints)
-  if (r.history.length > cap) r.history.splice(0, r.history.length - cap)
-  r.checking = false
-  store.schedule('history', 15000)
 }
 
 async function tick() {
@@ -278,7 +284,10 @@ export function reorderMonitors(ids) {
 
 export function removeMonitor(id) {
   const db = monitors()
+  const before = db.items.length
   db.items = db.items.filter((m) => m.id !== id)
+  // 没删到东西要如实返回，否则「清空历史」被 :id 路由抢走时前端毫不知情。
+  if (db.items.length === before) return false
   store.set('monitors', db)
   runtime.delete(id)
   const h = store.get('history', { byId: {} })
