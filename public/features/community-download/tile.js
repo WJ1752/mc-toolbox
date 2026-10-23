@@ -21,7 +21,7 @@ const LOADERS = [['', '不限'], ['fabric', 'Fabric'], ['forge', 'Forge'], ['neo
 // 排序方式（Modrinth index 原生支持；CurseForge 由后端映射到 sortField/sortOrder）
 const SORTS = [
   ['relevance', '相关性'],
-  ['downloads', '下载量'],
+  ['downloads', '下载量（热度）'],
   ['follows', '点赞'],
   ['updated', '最近更新'],
   ['newest', '最新发布']
@@ -762,15 +762,20 @@ function buildTile(ctx) {
   prevBtn.disabled = true
 
   function updatePager() {
-    prevBtn.disabled = st.offset === 0
+    const pages = Math.max(1, Math.ceil(st.total / Math.max(1, st.limit)))
+    const page = Math.min(pages, Math.floor(st.offset / Math.max(1, st.limit)) + 1)
+    prevBtn.disabled = st.offset <= 0
+    nextBtn.disabled = st.items.length === 0 || st.offset + st.items.length >= st.total
     pageInfo.textContent = st.items.length
-      ? `${st.offset + 1}-${st.offset + st.items.length} / 共 ${st.total}`
-      : `共 ${st.total}`
+      ? `第 ${page} / ${pages} 页 · ${st.offset + 1}–${st.offset + st.items.length} / 共 ${st.total}`
+      : `共 ${st.total} 个结果`
   }
 
   async function search() {
     if (st.busy) return
     st.busy = true
+    prevBtn.disabled = true
+    nextBtn.disabled = true
     st.query = searchInput.value.trim()
     st.gameVersion = version.input.value.trim()
     st.loader = loaderSel.value
@@ -956,10 +961,13 @@ function buildExpanded(container, ctx) {
   const pager = h('div', { class: 'cd-pager' }, prevBtn, pageInfo, nextBtn)
 
   function updatePager() {
-    prevBtn.disabled = st.offset === 0
+    const pages = Math.max(1, Math.ceil(st.total / Math.max(1, st.limit)))
+    const page = Math.min(pages, Math.floor(st.offset / Math.max(1, st.limit)) + 1)
+    prevBtn.disabled = st.offset <= 0
+    nextBtn.disabled = st.items.length === 0 || st.offset + st.items.length >= st.total
     pageInfo.textContent = st.items.length
-      ? `${st.offset + 1}-${st.offset + st.items.length} / 共 ${st.total}`
-      : `共 ${st.total}`
+      ? `第 ${page} / ${pages} 页 · ${st.offset + 1}–${st.offset + st.items.length} / 共 ${st.total}`
+      : `共 ${st.total} 个结果`
   }
 
   const detailEl = h('div', { class: 'col', style: { gap: '8px', minWidth: '0' } })
@@ -1020,6 +1028,8 @@ function buildExpanded(container, ctx) {
   async function search() {
     if (st.busy) return
     st.busy = true
+    prevBtn.disabled = true
+    nextBtn.disabled = true
     const q = qInput.value.trim()
     st.gameVersion = version.input.value.trim()
     st.loader = loaderSel.value

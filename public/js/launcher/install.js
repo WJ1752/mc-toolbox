@@ -4,8 +4,9 @@ import { h, clear, fmtBytes, fmtAgo } from '../core/dom.js'
 import { jobProgress, jobStatusLabel, jobMetaText } from '../core/jobs.js'
 import { api as coreApi } from '../core/api.js'
 import { icon } from '../ui/icons.js'
-import { btn, input, seg, progress, spinner, badge, toggle } from '../ui/kit.js'
+import { btn, input, seg, select, progress, spinner, badge, toggle } from '../ui/kit.js'
 import { loaderInfo, sectionCard, emptyBlock } from './ui.js'
+import { createPager, pageOffset, SEARCH_PAGE_SIZE, SEARCH_SORTS } from './search-pager.js'
 import { optimizedJvmArgs } from './jvm.js'
 import {
   versionCombo, partitionVersions, compatibleVersion, isMinecraftVersion, filterSummary, versionRowShell
@@ -25,7 +26,6 @@ const MAX_PACK_BYTES = 4 * 1024 ** 3
 const PACK_MODES = [['search', '搜索下载'], ['local', '本地文件']]
 const MODPACK_SOURCES = [['modrinth', 'Modrinth'], ['curseforge', 'CurseForge']]
 const MODPACK_SOURCE_LABEL = { modrinth: 'Modrinth', curseforge: 'CurseForge' }
-const PACK_SEARCH_LIMIT = 20
 // 版本列表接口不可用时的内置常用版本（与内容安装弹窗保持一致）。
 const PACK_VERSION_FALLBACK = [
   '26.2', '26.1', '1.21.11', '1.21.8', '1.21.4', '1.21.1', '1.20.1',
@@ -589,7 +589,8 @@ function buildView(ctx, container) {
     source: 'modrinth', query: '', view: 'search', project: null,
     results: [], total: 0, notice: '', error: '', loaded: false, loading: false,
     versions: [], versionNotice: '', versionError: '', versionLoading: false,
-    showOthers: false, cfKey: false, cfOk: false, busy: false, jobId: '', seq: 0
+    showOthers: false, cfKey: false, cfOk: false, busy: false, jobId: '', seq: 0,
+    sort: 'relevance', page: 1
   }
   const initialPackMc = currentInstanceMc()
   const packSourceSeg = seg(MODPACK_SOURCES, search.source, (value) => setPackSource(value), { title: '整合包来源' })
@@ -600,6 +601,16 @@ function buildView(ctx, container) {
   })
   packQueryInput.setAttribute('aria-label', '搜索整合包')
   const packSearchBtn = btn('搜索', { size: 'sm', variant: 'primary', iconName: 'search', onClick: () => void searchPacks() })
+  const packSortSel = select(SEARCH_SORTS, search.sort, {
+    ariaLabel: '排序方式',
+    title: '排序方式：按下载量可优先查看热门整合包',
+    onchange: (value) => {
+      search.sort = value
+      void searchPacks()
+    }
+  })
+  packSortSel.style.width = '132px'
+  packSortSel.style.flex = '0 0 auto'
   const packVersionCombo = versionCombo({
     value: initialPackMc,
     instanceMc: initialPackMc,
@@ -626,13 +637,18 @@ function buildView(ctx, container) {
       btn('前往设置', { size: 'sm', variant: 'primary', iconName: 'settings', onClick: () => openPackSettings() }),
       btn('改用 Modrinth', { size: 'sm', onClick: () => setPackSource('modrinth') })))
   const packResults = h('div', { class: 'lp-list', style: { maxHeight: '440px', overflowY: 'auto', paddingRight: '2px' } })
+  const packPager = createPager({
+    pageSize: SEARCH_PAGE_SIZE,
+    onChange: (next) => { void searchPacks({ page: next }) }
+  })
+  packPager.el.hidden = true
 
   /* --- 页面组装 --- */
   const packSearchPane = h('div', { style: paneStyle },
     card('搜索下载', '从 Modrinth / CurseForge 在线安装整合包',
-      row('row wrap', packSourceSeg, h('div', { class: 'grow' }, packQueryInput), packSearchBtn),
+      row('row wrap', packSourceSeg, h('div', { class: 'grow' }, packQueryInput), packSortSel, packSearchBtn),
       row('row wrap', h('span', { class: 'lp-hint', style: { flex: 'none' } }, 'MC 版本'), packVersionCombo.el, packFilterLine),
-      packCfHint, packCfGuide, packSearchNotice, packSearchStatus, packSearchError, packResults))
+      packCfHint, packCfGuide, packSearchNotice, packSearchStatus, packSearchError, packResults, packPager.el))
   const packLocalPane = h('div', { style: { ...paneStyle, display: 'none' } },
     card('选择本地整合包', 'Modrinth / CurseForge / 本工具导出的整合包',
       row('row wrap', h('div', { class: 'grow' }, packPathInput), packChooseBtn),
@@ -847,6 +863,7 @@ function buildView(ctx, container) {
       search.error = ''
       search.results = []
       search.total = 0
+      search.page = 1
       search.notice = ''
       search.versions = []
       search.showOthers = false
@@ -876,11 +893,12 @@ function buildView(ctx, container) {
     }
     return info
   }
-  async function searchPacks() {
+  async function searchPacks({ page: targetPage = 1 } = {}) {
     ensurePackVersionValue()
     updatePackFilterLine()
     setSearchError('')
     const token = ++search.seq
+    search.page = Math.max(1, Math.round(Number(targetPage) || 1))
     search.query = packQueryInput.value.trim()
     search.loading = true
     search.error = ''
@@ -897,7 +915,9 @@ function buildView(ctx, container) {
         query: search.query,
         gameVersion: packVersionCombo.getValue() || 'all',
         loader: 'none',
-        limit: String(PACK_SEARCH_LIMIT)
+        limit: String(SEARCH_PAGE_SIZE),
+        offset: String(pageOffset(search.page, SEARCH_PAGE_SIZE)),
+        sort: search.sort
       })
       const data = await coreApi.get('/api/community/search?' + params)
       if (disposed || token !== search.seq) return
@@ -971,6 +991,8 @@ function buildView(ctx, container) {
     show(packSearchNotice, !!search.notice)
     if (search.notice) packSearchNotice.textContent = search.notice
     clear(packResults)
+    // 加载 / 失败 / 未搜索时不显示分页条，避免出现没有意义的「共 0 个结果」。
+    packPager.el.hidden = true
     if (search.loading) {
       packSearchStatus.textContent = '正在搜索整合包…'
       packResults.appendChild(emptyBlock('正在搜索', `正在从 ${MODPACK_SOURCE_LABEL[search.source]} 获取整合包列表…`, spinner(14), 'search'))
@@ -995,8 +1017,12 @@ function buildView(ctx, container) {
         '换个关键词，或把 MC 版本切到「全部版本」再试；CurseForge 未配置 API Key 时会搜索失败。', null, 'search'))
       return
     }
-    packSearchStatus.textContent = `共 ${search.total || search.results.length} 个结果 · 点击查看可用版本`
+    const total = search.total || search.results.length
+    packSearchStatus.textContent = `共 ${total} 个结果 · 点击查看可用版本`
     for (const hit of search.results) packResults.appendChild(packHitRow(hit))
+    packPager.set({ page: search.page, total, count: search.results.length, loading: false })
+    packPager.el.hidden = false
+    packResults.scrollTop = 0
   }
   async function openPackProject(hit) {
     if (!hit?.id) return
@@ -1006,6 +1032,7 @@ function buildView(ctx, container) {
     search.versionError = ''
     search.versionNotice = ''
     search.showOthers = false
+    packPager.el.hidden = true
     setSearchError('')
     const token = ++search.seq
     search.versionLoading = true
@@ -1066,6 +1093,7 @@ function buildView(ctx, container) {
   function paintPackVersions() {
     updatePackFilterLine()
     clear(packResults)
+    packPager.el.hidden = true
     const project = search.project
     if (!project) { search.view = 'search'; paintPackResults(); return }
     const back = h('div', { class: 'lp-toolbar', style: { border: '0', padding: '0', marginBottom: '4px' } },

@@ -352,6 +352,18 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - 回归：`tests/launcher-game-detached.test.mjs` 2 项（选项含 `detached`；伪启动器退出后伪游戏仍存活）；把 `detached` 改回 `false` 时该测试失败，能抓住回退。
 - 已知边界：启动器重启后内存里的 session 已丢失，实例卡片不会自动显示「运行中」（游戏进程仍在跑）。这是后续「接管已运行进程」的独立需求，不影响本次「更新不再关游戏」。
 
+### 6.12 在线搜索结果分页与排序（v1.9.7）
+
+验证环境：Windows 10 x64、Node 22.18、开发模式服务 + headless Edge CDP（1440×1000）、真实 Modrinth 接口；日期 2026-10-23。
+
+- 模组安装弹窗（Fabric 1.20.1）：默认搜索显示「1–20 / 共 17769 个结果」「第 1 / 889 页」；「下一页」请求携带 `limit=20&offset=20&sort=relevance`，页码输入 `3` 后请求 `offset=40`；排序切到「下载量（热度）」后自动回到第 1 页，请求携带 `sort=downloads`。
+- 在线整合包搜索（Modrinth）：默认「1–20 / 共 7373 个结果」「第 1 / 369 页」；「下一页」请求携带 `offset=20`，排序切到 `downloads` 后回到第 1 页并携带 `sort=downloads`。
+- 社区资源磁贴：搜索 `sodium` 后分页条显示「第 1 / 18 页 · 1–20 / 共 360」；末页「下一页」置灰逻辑由 `offset + items.length >= total` 判断。
+- 排序项与后端一致：`relevance` / `downloads` / `follows` / `updated` / `newest`；CurseForge 由后端映射到 `sortField`（下载量 = TotalDownloads 降序）。
+- CurseForge 实测（有效 Eternal Key，1.20.1 / Forge / `query=jei`）：`sortOrder=2` 返回 HTTP 400「The value '2' is invalid」，改为 `asc` / `desc` 后 `sortField=6&sortOrder=desc` 正常按下载量降序返回（JEI 638,827,048 下载居首）；`relevance` / `follows` / `updated` / `newest` 的 `sortOrder` 同步改为 `desc`。
+- 单元测试：`tests/launcher-search-pager.test.mjs` 4 项（页码换算 offset、非法页码、页大小、排序项）；`tests/community-sort.test.mjs` 4 项（CF 下载量映射、asc/desc 约束、未知排序回落）；完整测试 195 项通过。
+- 探针 24/24 通过，无前端控制台异常；CurseForge 独立探针 5/5（切来源、下载量排序、下一页请求带 `offset=20&sort=downloads`）。截图保存在临时 `F:\DS数据\MCtoolbox\.probe\shots`（未随仓库提交）。
+
 ## 7. 截图
 
 v1.8 暗色：总览、新建实例、下载中心、Java、账户、启动器设置；亮色：总览。v1.9 新增的版本下拉、兼容版本列表、启动进度/错误面板、在线整合包与导出弹窗见本轮验收截图（`dist/_ui-smoke-v19b` 与临时验收目录，未随仓库提交）。v1.9.1 更新了首次选择游戏目录与统一设置页的截图。v1.9.2 新增启动器更新弹窗与「设置 → 启动器 → 更新」截图（开发模式下「下载并更新」不可用，界面会说明原因）。

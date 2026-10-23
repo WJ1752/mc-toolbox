@@ -4,11 +4,12 @@ import { h, clear, fmtBytes, fmtAgo, fmtDateTime, copyText } from '../core/dom.j
 import { icon } from '../ui/icons.js'
 import { openModal as openModalDefault, confirmDialog } from '../core/modal.js'
 import { toast as toastDefault } from '../core/toast.js'
-import { badge, btn, iconBtn, input, seg, spinner, openPath as openPathDefault } from '../ui/kit.js'
+import { badge, btn, iconBtn, input, seg, select, spinner, openPath as openPathDefault } from '../ui/kit.js'
 import { api as coreApi } from '../core/api.js'
 import { launcherApi } from './api.js'
 import { emptyBlock, sectionCard, loaderLabel } from './ui.js'
 import { versionCombo, partitionVersions, compatibleVersion, filterSummary, isMinecraftVersion, versionTagBadges } from './version-picker.js'
+import { createPager, pageOffset, SEARCH_PAGE_SIZE, SEARCH_SORTS } from './search-pager.js'
 const ENV = { client: ['客户端', 'info'], server: ['服务端', 'accent'], both: ['通用', ''], '*': ['通用', ''] }
 const MODES = ['生存模式', '创造模式', '冒险模式', '旁观模式']
 const KINDS = { release: '正式版', beta: '测试版', alpha: '预览版' }
@@ -581,10 +582,28 @@ function openContentInstall(t, kind, onDone, { initialQuery = '' } = {}) {
   let versions = []
   let othersOpen = false
   let onlyCompatible = false
+  let page = 1
+  let total = 0
+  let sort = 'relevance'
   const searchBox = input({ value: initialQuery, placeholder: `搜索${conf.label}名称…`, onKeyDown: (event) => { if (event.key === 'Enter') { event.preventDefault(); search() } } })
   searchBox.style.flex = '1 1 200px'
   const status = tip('')
   const results = h('div', { class: 'lp-list', style: { maxHeight: '52vh', overflowY: 'auto' } })
+  const sortSel = select(SEARCH_SORTS, sort, {
+    ariaLabel: '排序方式',
+    title: '排序方式：按下载量可优先查看热门资源',
+    onchange: (value) => {
+      sort = value
+      search()
+    }
+  })
+  sortSel.style.width = '132px'
+  sortSel.style.flex = '0 0 auto'
+  const pager = createPager({
+    pageSize: SEARCH_PAGE_SIZE,
+    onChange: (next) => { search({ page: next }) }
+  })
+  pager.el.hidden = true
   const sourceSeg = seg([['modrinth', 'Modrinth'], ['curseforge', 'CurseForge']], source, (value) => {
     source = value
     // 项目 ID 与来源绑定：切换来源后旧项目不再有效，直接回到搜索结果。
@@ -642,7 +661,7 @@ function openContentInstall(t, kind, onDone, { initialQuery = '' } = {}) {
       search()
     }
   })
-  const searchBar = barEl(sourceSeg, combo.el, searchBox, searchBtn)
+  const searchBar = barEl(sourceSeg, combo.el, sortSel, searchBox, searchBtn)
   searchBar.style.border = '0'
   searchBar.style.padding = '0'
   const filterLine = h('div', { class: 'lp-filter-line' })
@@ -655,7 +674,7 @@ function openContentInstall(t, kind, onDone, { initialQuery = '' } = {}) {
   const modal = t.modal({
     title: conf.title,
     size: 'xl',
-    body: h('div', { class: 'col', style: { gap: '8px' } }, searchBar, filterLine, comboHint, noticeEl, vanillaWarning, status, results),
+    body: h('div', { class: 'col', style: { gap: '8px' } }, searchBar, filterLine, comboHint, noticeEl, vanillaWarning, status, results, pager.el),
     buttons: [{ label: '关闭', class: 'btn-ghost' }],
     onClose: () => combo.destroy()
   })
@@ -684,13 +703,15 @@ function openContentInstall(t, kind, onDone, { initialQuery = '' } = {}) {
   }
   function showHint() {
     paintFilterLine()
+    pager.el.hidden = true
     status.textContent = hasMc
       ? `按 ${filterMc() || '全部 MC 版本'} 过滤；点击结果选择版本。`
       : '当前实例没有识别到 MC 版本，默认按全部版本搜索；可在上方输入版本号，例如 1.21.8。'
     results.replaceChildren(emptyBlock(`搜索并选择${conf.label}`, `结果来自 Modrinth / CurseForge；安装会把文件下载到当前实例的对应目录。`, null, conf.icon))
   }
-  async function search() {
+  async function search({ page: targetPage = 1 } = {}) {
     const token = ++seq
+    page = Math.max(1, Math.round(Number(targetPage) || 1))
     searchBtn.disabled = true
     view = 'search'
     project = null
@@ -699,9 +720,18 @@ function openContentInstall(t, kind, onDone, { initialQuery = '' } = {}) {
     setNotice('')
     status.textContent = '正在搜索…'
     results.replaceChildren(loadingBlock('正在搜索…'))
+    // 请求期间先隐藏分页条，避免闪现上一页的页码；返回后统一刷新。
+    pager.el.hidden = true
     const mc = filterMc()
     try {
-      const params = new URLSearchParams({ source, query: (searchBox.value || '').trim(), type: conf.type, limit: '20' })
+      const params = new URLSearchParams({
+        source,
+        query: (searchBox.value || '').trim(),
+        type: conf.type,
+        limit: String(SEARCH_PAGE_SIZE),
+        offset: String(pageOffset(page, SEARCH_PAGE_SIZE)),
+        sort
+      })
       params.set('gameVersion', mc || 'all')
       // 模组只用实例加载器筛选；其它类型显式传 none，避免服务端回落到默认加载器。
       if (loader) params.set('loader', loader)
@@ -711,16 +741,20 @@ function openContentInstall(t, kind, onDone, { initialQuery = '' } = {}) {
       const items = Array.isArray(data) ? data : (data?.items || [])
       // 服务端识别失败时会回退全部版本并给出中文说明，这里原样提示。
       setNotice(!Array.isArray(data) ? data?.gameVersionNotice : '')
-      const total = Array.isArray(data) ? items.length : (data?.total ?? items.length)
+      total = Array.isArray(data) ? items.length : (data?.total ?? items.length)
+      // 页大小固定为 limit，服务端 total 是总命中数；两者一起换算总页数。
       status.textContent = `共 ${total} 个结果 · 点击查看匹配版本`
       fillList(results, items, emptyBlock('没有搜索结果',
         source === 'curseforge'
           ? 'CurseForge 需要 API Key，可在“设置 → 社区资源”里配置。'
           : mc ? `该内容没有适配 ${mc} 的结果；可把版本筛选切到“全部版本”再试。` : '换个关键词，或把版本筛选切到“全部版本”。',
         null, 'search'), hitRow)
+      pager.set({ page, total, count: items.length, loading: false })
+      pager.el.hidden = false
     } catch (error) {
       if (token !== seq) return
       status.textContent = ''
+      pager.el.hidden = true
       results.replaceChildren(failBlock('搜索失败', error, search))
     } finally {
       if (token === seq) searchBtn.disabled = false
@@ -750,7 +784,7 @@ function openContentInstall(t, kind, onDone, { initialQuery = '' } = {}) {
     return { items: items.filter(Boolean), notice }
   }
   function backBar(hit) {
-    const back = barEl(btn('返回搜索结果', { size: 'sm', iconName: 'arrow-left', onClick: () => search() }), h('b', { style: { fontSize: '12px' } }, hit?.title || '版本列表'))
+    const back = barEl(btn('返回搜索结果', { size: 'sm', iconName: 'arrow-left', onClick: () => search({ page }) }), h('b', { style: { fontSize: '12px' } }, hit?.title || '版本列表'))
     back.style.border = '0'
     back.style.padding = '0'
     return back
@@ -760,6 +794,7 @@ function openContentInstall(t, kind, onDone, { initialQuery = '' } = {}) {
     view = 'versions'
     project = hit
     versions = []
+    pager.el.hidden = true
     othersOpen = false
     onlyCompatible = false
     paintFilterLine()

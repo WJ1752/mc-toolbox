@@ -166,14 +166,20 @@ async function cfClassIds(key) {
   return map
 }
 
-// CurseForge 排序映射（sortField：1=Featured 2=Popularity 3=LastUpdated 4=Name 6=TotalDownloads；sortOrder：2=降序）
+// CurseForge 排序映射（sortField：1=Featured 2=Popularity 3=LastUpdated 4=Name 6=TotalDownloads；
+// sortOrder 只接受 asc / desc，旧文档里的 1/2 数字已被 API 拒绝为 HTTP 400）
 // 统一排序项：relevance 相关性 / downloads 下载量 / follows 点赞 / updated 最近更新 / newest 最新发布
 const CF_SORT = {
   relevance: { sortField: '1' },              // Featured ≈ 默认相关
-  downloads: { sortField: '6', sortOrder: '2' }, // TotalDownloads 降序
-  follows:   { sortField: '2', sortOrder: '2' }, // Popularity 降序（近似点赞）
-  updated:   { sortField: '3', sortOrder: '2' }, // LastUpdated 降序
-  newest:    { sortField: '3', sortOrder: '2' }  // CF 无发布时间排序，用最近更新近似
+  downloads: { sortField: '6', sortOrder: 'desc' }, // TotalDownloads 降序
+  follows:   { sortField: '2', sortOrder: 'desc' }, // Popularity 降序（近似点赞）
+  updated:   { sortField: '3', sortOrder: 'desc' }, // LastUpdated 降序
+  newest:    { sortField: '3', sortOrder: 'desc' }  // CF 无发布时间排序，用最近更新近似
+}
+
+/** 统一排序项 → CurseForge 查询参数；未知值回落到相关性。 */
+export function curseforgeSort(sort) {
+  return CF_SORT[sort] || CF_SORT.relevance
 }
 
 export async function curseforgeSearch({ query = '', type, gameVersion, loader, limit = 20, offset = 0, key, sort = 'relevance' }) {
@@ -181,7 +187,7 @@ export async function curseforgeSearch({ query = '', type, gameVersion, loader, 
   const classIds = await cfClassIds(key)
   const classId = type ? classIds[type] : undefined
   if (type && !classId) throw new Error('当前 Key 无法解析该类型在 CurseForge 的分类，可切换到 Modrinth 或选择「全部」')
-  const cfSort = CF_SORT[sort] || CF_SORT.relevance
+  const cfSort = curseforgeSort(sort)
   const params = new URLSearchParams({
     gameId: '432',
     searchFilter: query || '',

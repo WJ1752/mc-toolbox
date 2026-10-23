@@ -657,6 +657,15 @@
 .lp-subhead::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 .lp-toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 9px; }
 .lp-toolbar .spacer { flex: 1; }
+
+/* 在线搜索结果分页条（模组 / 资源包 / 光影 / 整合包共用） */
+.lp-pager { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-top: 2px; }
+.lp-pager[hidden] { display: none; }
+.lp-pager .spacer { flex: 1; min-width: 4px; }
+.lp-pager-page { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; color: var(--mute); white-space: nowrap; }
+.lp-pager-jump { width: 52px; height: 24px; padding: 0 4px; text-align: center; font-size: 10.5px; appearance: textfield; -moz-appearance: textfield; }
+.lp-pager-jump::-webkit-outer-spin-button, .lp-pager-jump::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.lp-pager-info { font-size: 10.5px; color: var(--mute); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .lp-toolbar .input { height: 28px; font-size: 11px; }
 .lp-toolbar .grow { flex: 1 1 180px; min-width: 100px; }
 .lp-row { display: flex; align-items: center; gap: 8px; }
