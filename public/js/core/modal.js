@@ -6,6 +6,8 @@ import { icon } from '../ui/icons.js'
 // closing only unwinds one level.
 const root = () => document.getElementById('modalRoot')
 const stack = []
+// api 句柄 → layer：让 raiseModal 能把已打开的弹窗重新提到最上层，而不是再开一层。
+const handles = new WeakMap()
 let lastFocus = null
 
 function topLayer() {
@@ -101,6 +103,7 @@ export function openModal(opts = {}) {
     panel,
     setTitle(t) { title.textContent = t }
   }
+  handles.set(api, layer)
 
   for (const b of opts.buttons || []) {
     if (b && b.nodeType === 1) {
@@ -137,6 +140,26 @@ export function closeTopModal() {
     return true
   }
   return false
+}
+
+/**
+ * 把一个仍然打开的弹窗重新提到最上层（不新建层）。
+ * 用于「同一个弹窗被第二次触发」的场景：调用方应复用原弹窗，而不是叠出第二份。
+ * @returns {boolean} 句柄已失效（已关闭 / 不是本模块创建的）时返回 false
+ */
+export function raiseModal(handle) {
+  const layer = handle ? handles.get(handle) : null
+  if (!layer || layer.closed) return false
+  const idx = stack.indexOf(layer)
+  if (idx < 0) return false
+  if (idx !== stack.length - 1) {
+    stack.splice(idx, 1)
+    stack.push(layer)
+    for (const item of stack) item.panel.hidden = item !== layer
+  }
+  assignLegacyIds(layer)
+  requestAnimationFrame(() => layer.panel.focus?.({ preventScroll: true }))
+  return true
 }
 
 export function closeAllModals() {

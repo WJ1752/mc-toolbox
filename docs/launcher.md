@@ -229,6 +229,7 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - 一键更新只允许 Windows 打包版（SEA）：服务端先把替换脚本写到临时目录并以独立进程启动；脚本等待旧进程退出（最长 180 秒）→ 目标 exe 改名 `.old` 备份 → 复制新 exe → 校验 → 删除备份 → 启动新版；任一步失败会回滚备份并拉回旧版。开发模式（`node server.js`）拒绝替换，只提示手动下载。
 - 更新只结束启动器自身：游戏进程以 `detached: true` 启动、不在启动器的作业对象里（§4.3），所以替换脚本等待旧进程退出、重启新版时，正在运行的游戏不会被连带关闭。
 - 前端在启动器加载后按设置自动检查一次；发现新版本时右下角显示常驻卡片（立即更新 / 稍后），弹窗展示版本号、发布时间、发布说明与下载进度；替换成功后通过 WebView2 `close` 消息（或 shutdown beacon）关闭窗口，由脚本重启。命令面板「检查启动器更新」、设置 → 关于、设置 → 启动器 → 更新都可手动触发。
+- 更新弹窗是单例：`openUpdateDialog` 用模块级 `activeDialog` 记住当前弹窗，重复调用（卡片「立即更新」、设置页「检查更新」、命令面板）只通过 `raiseModal` 把已有弹窗提到最上层，不再叠第二份。弹窗打开期间右下角卡片会收起（`renderCard` 在 `activeDialog` 存在时直接返回），关闭时再恢复，避免 `toastRoot`（z-index 400）里的卡片压住弹窗（z-index 200）底部按钮、被误当成弹窗自己的按钮。
 
 ### 4.9 模组真实 modid 与内嵌依赖（v1.9.8）
 
@@ -403,9 +404,20 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - 自动化测试：`node --test tests/*.test.mjs` **208 项通过**；新增 `tests/launcher-running-processes.test.mjs` 7 项、`tests/mods-toml-dependencies.test.mjs` 8 项（含合成 jar 的 jar-in-jar、双加载器元数据、owner 过滤、fat jar 回填、TOML 引号名称、ID 归一化与加载器不匹配）。
 - 构建：`node build.mjs` 成功生成 `dist/mc-toolbox.exe`（82.8 MB），隔离冒烟通过；`PRODUCT_VERSION` 与 `package.json` 已更新为 1.9.8。
 
+### 6.14 更新弹窗重复叠层（v1.9.9）
+
+验证环境：Windows 10 x64、Node 22.18、headless Edge CDP（1280×820 / 1440×1000 / 900×820）；日期 2026-10-23。
+
+- 现象（用户截图）：启动器右下角弹出「启动器有新版本 v1.9.8」卡片，点卡片「立即更新」打开更新弹窗后，再点一次卡片上的「立即更新」，又弹出一个同样的更新弹窗；关掉上面那个，下面那个仍留在屏幕上，看起来像弹窗关不掉。截图里卡片（`toastRoot`，z-index 400）正好压在弹窗（z-index 200）右下角。
+- 根因：`openUpdateDialog` 每次调用都无条件 `openModal`，而卡片按钮、设置页「检查更新」、命令面板三个入口都直接调它；`modal.js` 的弹窗是「栈」而不是「单例」，第二份会作为新层压在上面。卡片层级高于弹窗，所以它在弹窗打开时仍可点击，且遮住了弹窗右下角。
+- 修复：`public/js/launcher/update.js` 增加模块级 `activeDialog`，重复调用只 `raiseModal` 复用已有弹窗；`public/js/core/modal.js` 新增 `raiseModal(handle)`（用 `WeakMap` 把 `openModal` 返回的句柄映射到层，重排栈并把该层显示出来）。弹窗打开时收起卡片、关闭后恢复（`applying` / `skipped` 时不恢复）。
+- UI 探针 3/3（新增）：连续两次 `openUpdateDialog` 后 `.modal` 数量仍为 1；弹窗打开时 `.lp-update-card` 数量为 0；关闭弹窗后 `.modal` 为 0 且卡片恢复为 1。`tools/launcher-ui-smoke.mjs` 全量 30/30，无前端控制台异常。
+- 自动化测试：`node --test tests/*.test.mjs` 208 项通过（本次为前端 DOM 行为，按仓库惯例由 UI 探针覆盖）。
+- 构建：`node build.mjs` 生成 `dist/mc-toolbox.exe`，隔离冒烟通过；`PRODUCT_VERSION` 与 `package.json` 已更新为 1.9.9。
+
 ## 7. 截图
 
-v1.8 暗色：总览、新建实例、下载中心、Java、账户、启动器设置；亮色：总览。v1.9 新增的版本下拉、兼容版本列表、启动进度/错误面板、在线整合包与导出弹窗见本轮验收截图（`dist/_ui-smoke-v19b` 与临时验收目录，未随仓库提交）。v1.9.1 更新了首次选择游戏目录与统一设置页的截图。v1.9.2 新增启动器更新弹窗与「设置 → 启动器 → 更新」截图（开发模式下「下载并更新」不可用，界面会说明原因）。
+v1.8 暗色：总览、新建实例、下载中心、Java、账户、启动器设置；亮色：总览。v1.9 新增的版本下拉、兼容版本列表、启动进度/错误面板、在线整合包与导出弹窗见本轮验收截图（`dist/_ui-smoke-v19b` 与临时验收目录，未随仓库提交）。v1.9.1 更新了首次选择游戏目录与统一设置页的截图。v1.9.2 新增启动器更新弹窗与「设置 → 启动器 → 更新」截图（开发模式下「下载并更新」不可用，界面会说明原因）。v1.9.9 重拍「启动器更新」：旧图里右下角卡片压在弹窗上、点它会再叠一层弹窗，正是本次修复的问题。
 
 ![首次选择游戏目录](screenshots/launcher/00-first-run.png)
 ![启动器总览](screenshots/launcher/01-overview.png)

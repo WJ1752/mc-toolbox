@@ -9,7 +9,7 @@
 import { h, fmtBytes } from '../core/dom.js'
 import { launcherApi } from './api.js'
 import { toast } from '../core/toast.js'
-import { openModal } from '../core/modal.js'
+import { openModal, raiseModal } from '../core/modal.js'
 import { icon } from '../ui/icons.js'
 import { btn, iconBtn } from '../ui/kit.js'
 import { progressBar, formatDate } from './ui.js'
@@ -18,6 +18,10 @@ let cardEl = null
 let lastInfo = null
 let checking = null
 let autoTimer = null
+// 同一时间只允许一个更新弹窗：右下角卡片、设置页「检查更新」、命令面板都会调
+// openUpdateDialog，重复调用只把已有弹窗提到前台，避免叠出第二份（关掉上面那份后
+// 下面那份又露出来，看起来像「弹窗关不掉」）。
+let activeDialog = null
 
 function toastRoot() {
   return document.getElementById('toastRoot') || document.body
@@ -40,6 +44,9 @@ export function closeAppWindow() {
 
 function renderCard(info) {
   cardEl?.remove()
+  cardEl = null
+  // 弹窗已经打开时不再挂卡片：卡片层级比弹窗高，会盖住弹窗底部的按钮。
+  if (activeDialog) return
   cardEl = h('div', { class: 'lp-update-card', role: 'status', 'aria-live': 'polite' })
   cardEl.append(
     h('div', { class: 'lp-update-badge' }, icon('refresh', { size: 16 })),
@@ -73,12 +80,23 @@ function notesBlock(text) {
 
 /**
  * 打开更新弹窗。下载 / 替换 / 重启都在弹窗内完成。
+ * 同一时间只保留一个弹窗：重复调用只把已有的提到最上层。
  * @param {object} info check 接口返回的对象
  */
 export function openUpdateDialog(info) {
   if (!info?.updateAvailable) {
     toast(info?.latest ? `已是最新版本 v${info.current}` : '还没有可用发布', 'ok')
     return null
+  }
+
+  // 右下角卡片的「立即更新」和弹窗里的「下载并更新」都可能再次触发这里。
+  // 已开着就直接复用，否则会叠出第二份弹窗（关掉上面那份下面又露出来）。
+  if (activeDialog) {
+    if (raiseModal(activeDialog.modal)) {
+      hideCard()
+      return activeDialog.modal
+    }
+    activeDialog = null
   }
 
   const session = { alive: true }
@@ -88,7 +106,7 @@ export function openUpdateDialog(info) {
   const errorEl = h('div', { class: 'lp-update-error', hidden: true })
 
   let modal = null
-  const ui = { progress, progressWrap, status, errorEl, startBtn: null, laterBtn: null, skipBtn: null, session }
+  const ui = { progress, progressWrap, status, errorEl, startBtn: null, laterBtn: null, skipBtn: null, session, applying: false }
 
   ui.startBtn = btn('下载并更新', {
     variant: 'primary',
@@ -140,8 +158,17 @@ export function openUpdateDialog(info) {
       errorEl
     ),
     buttons: [releaseBtn, ui.skipBtn, ui.laterBtn, ui.startBtn],
-    onClose: () => { session.alive = false }
+    onClose: () => {
+      session.alive = false
+      if (activeDialog?.modal === modal) activeDialog = null
+      // 弹窗关掉后把右下角卡片放回来（正在替换/已忽略时不再打扰）。
+      if (!ui.applying && !info.skipped) renderCard(info)
+    }
   })
+  activeDialog = { modal, ui, info }
+  // 卡片在 toastRoot（z-index 400）里，会盖在弹窗（z-index 200）的底部按钮上，
+  // 看起来像「弹窗里的按钮」，点它其实又开了一次弹窗。弹窗打开时先收起卡片。
+  hideCard()
 
   if (!info.canApply) {
     // 只禁用「下载并更新」；稍后 / 忽略 / 发布页仍要让用户能正常退出。
@@ -229,6 +256,7 @@ async function applyNow(ui) {
   try {
     const res = await launcherApi.updateApply()
     if (!res?.restarting) throw new Error('启动替换脚本失败')
+    ui.applying = true
     ui.progressWrap.hidden = true
     ui.status.textContent = '更新完成，启动器正在重启…'
     setTimeout(closeAppWindow, 1500)

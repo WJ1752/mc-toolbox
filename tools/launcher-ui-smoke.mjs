@@ -5,8 +5,8 @@
 //   msedge --headless=new --remote-debugging-port=9333 --user-data-dir=<tmp> about:blank
 //   node tools/launcher-ui-smoke.mjs --base=http://127.0.0.1:8757 --cdp=http://127.0.0.1:9333
 //
-// 检查：启动器渲染、页面切换、启动器设置读取、命令面板、900px 窄窗无横向溢出、
-// 亮色主题、控制台错误。截图写到 --out（默认 dist/_ui-smoke）。
+// 检查：启动器渲染、页面切换、启动器设置读取、命令面板、更新弹窗不重复叠层、
+// 900px 窄窗无横向溢出、亮色主题、控制台错误。截图写到 --out（默认 dist/_ui-smoke）。
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
@@ -183,6 +183,40 @@ async function main() {
     await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 })
     await sleep(250)
   }
+
+  // 更新弹窗：右下角卡片的「立即更新」、设置页「检查更新」、命令面板都会调
+  // openUpdateDialog。重复触发只能复用同一个弹窗（旧版会叠出第二份，关掉上面
+  // 那份后下面那份又露出来）。卡片挂在 toastRoot（z-index 400）里比弹窗高，
+  // 弹窗打开时必须收起卡片，否则它盖在弹窗底部按钮上，点它又开一次弹窗。
+  const dup = await evaluate(`(async () => {
+    const wait = (ms) => new Promise(r => setTimeout(r, ms))
+    const mod = await import('/js/launcher/update.js')
+    const info = {
+      ok: true, repo: 'WJ1752/mc-toolbox', current: '1.9.7', latest: '1.9.8',
+      updateAvailable: true, skipped: false, canApply: true,
+      release: { tag: 'v1.9.8', name: 'v1.9.8', notes: '说明', publishedAt: '2026-10-23T00:00:00Z', htmlUrl: 'https://github.com/WJ1752/mc-toolbox/releases', prerelease: false },
+      asset: { name: 'mc-toolbox.exe', size: 87000000, downloadUrl: 'https://example.com/a.exe', apiUrl: '' }
+    }
+    mod.openUpdateDialog(info)
+    await wait(40)
+    const first = document.querySelectorAll('.modal').length
+    const cardsWhileOpen = document.querySelectorAll('.lp-update-card').length
+    mod.openUpdateDialog(info)
+    await wait(40)
+    const second = document.querySelectorAll('.modal').length
+    document.querySelector('.lp-update-card button')?.click()
+    await wait(40)
+    const afterCardClick = document.querySelectorAll('.modal').length
+    document.querySelector('.modal .modal-head .btn-icon')?.click()
+    await wait(40)
+    const closed = document.querySelectorAll('.modal').length
+    const cardRestored = document.querySelectorAll('.lp-update-card').length
+    document.querySelector('.lp-update-card .lp-update-card-close')?.click()
+    return { first, cardsWhileOpen, second, afterCardClick, closed, cardRestored }
+  })()`)
+  check('更新弹窗只开一层', dup?.first === 1 && dup?.second === 1 && dup?.afterCardClick === 1, JSON.stringify(dup))
+  check('更新弹窗打开时收起右下角卡片', dup?.cardsWhileOpen === 0, JSON.stringify(dup))
+  check('关闭更新弹窗后不残留，卡片恢复', dup?.closed === 0 && dup?.cardRestored === 1, JSON.stringify(dup))
 
   // 900px 窄窗
   await send('Emulation.setDeviceMetricsOverride', { width: 900, height: 820, deviceScaleFactor: 1, mobile: false })
