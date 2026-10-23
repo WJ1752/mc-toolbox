@@ -15,7 +15,8 @@ import {
   ensureInstanceDirs,
   getSettings,
   markPlayed,
-  isInstalled
+  isInstalled,
+  listInstances
 } from './state.js'
 import { loadVersionChain, readAssetIndex } from './meta.js'
 import {
@@ -34,11 +35,29 @@ import {
   publicLaunchState,
   phaseLabel
 } from './launch-phases.js'
+import {
+  runningGameTracker,
+  requestProcessClose,
+  forceKillProcess,
+  isProcessAlive
+} from './running-processes.js'
 
 const sessions = new Map()
 const launchStates = new Map()
+const startingInstances = new Set()
+// 由系统进程表接管的外部游戏：instanceId -> { pid, timer, startedAt }
+const externalStopping = new Map()
+// 外部进程没有 stdout 管道，实时日志从游戏自己的 latest.log 增量读取。
+const externalLogs = new Map()
 const MAX_LINES = 6000
+const MAX_EXTERNAL_LINES = 2000
+const EXTERNAL_LOG_TAIL_BYTES = 512 * 1024
+const EXTERNAL_STOP_GRACE_MS = 8000
 const PHASE_ORDER = LAUNCH_PHASES.map((item) => item.id)
+
+function isActiveStatus(status) {
+  return status === 'starting' || status === 'running' || status === 'stopping'
+}
 
 function nowStamp(date = new Date()) {
   const p = (n) => String(n).padStart(2, '0')
@@ -69,8 +88,85 @@ function sessionSnapshot(session) {
     error: session.error || '',
     crash: session.crash || null,
     seq: session.lines.length ? session.lines[session.lines.length - 1].seq : 0,
-    stopping: session.stopping === true
+    stopping: session.stopping === true,
+    detected: false,
+    external: false,
+    source: 'launcher'
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* 已运行的实例进程接管                                                */
+/* ------------------------------------------------------------------ */
+
+function instanceCandidates() {
+  return listInstances().map((inst) => {
+    const paths = inst.paths || instancePaths(inst)
+    return {
+      id: inst.id,
+      name: inst.name,
+      gameDir: paths.gameDir,
+      lastPlayed: inst.lastPlayed || 0,
+      paths: {
+        ...paths,
+        gameLogFile: paths.gameDir ? path.join(paths.gameDir, 'logs', 'latest.log') : ''
+      }
+    }
+  })
+}
+
+function detectedSession(proc) {
+  const now = Date.now()
+  const stop = externalStopping.get(proc.instanceId)
+  const paths = proc.instance?.paths || {}
+  const gameDir = paths.gameDir || proc.gameDir || ''
+  const logFile = paths.gameLogFile || (gameDir ? path.join(gameDir, 'logs', 'latest.log') : '')
+  const startedAt = proc.startedAt || stop?.startedAt || now
+  return {
+    instanceId: proc.instanceId,
+    instanceName: proc.instanceName,
+    status: stop ? 'stopping' : 'running',
+    startedAt,
+    endedAt: 0,
+    elapsed: Math.max(0, now - startedAt),
+    pid: proc.pid,
+    exitCode: null,
+    javaPath: proc.executablePath || '',
+    javaMajor: 0,
+    command: '',
+    logFile,
+    error: '',
+    crash: null,
+    seq: externalLogs.get(proc.instanceId)?.seq || 0,
+    stopping: !!stop,
+    detected: true,
+    // external / source 是前端区分「启动器启动」与「接管的外部进程」的标记。
+    external: true,
+    source: 'process',
+    gameLog: logFile
+  }
+}
+
+/**
+ * 重新扫描系统进程并匹配实例。所有 /status、/bootstrap 读取都先走这里，
+ * 因此启动器重启后仍能看到正在运行的游戏；不同实例可以同时出现多条记录。
+ */
+export async function refreshRunningGames({ force = false } = {}) {
+  const result = await runningGameTracker.refresh({ instances: instanceCandidates(), force })
+  for (const [id, entry] of [...externalStopping]) {
+    if (!runningGameTracker.get(id)) {
+      clearTimeout(entry.timer)
+      externalStopping.delete(id)
+    }
+  }
+  for (const id of [...externalLogs.keys()]) {
+    if (!runningGameTracker.get(id)) externalLogs.delete(id)
+  }
+  return result
+}
+
+export function getRunningDetectionStatus() {
+  return runningGameTracker.status()
 }
 
 function pushLine(session, line, kind = '') {
@@ -131,23 +227,126 @@ export function getSession(instanceId) {
 }
 
 export function getSessionSnapshot(instanceId) {
-  return sessionSnapshot(sessions.get(instanceId))
-}
-
-export function listSessions() {
-  return [...sessions.values()].map(sessionSnapshot)
-}
-
-export function readLog(instanceId, after = 0) {
   const session = sessions.get(instanceId)
-  if (!session) return { lines: [], seq: 0, running: false }
-  const seq = Number(after) || 0
-  return {
-    lines: session.lines.filter((line) => line.seq > seq),
-    seq: session.seq,
-    running: session.status === 'running' || session.status === 'starting',
-    status: session.status
+  if (session && isActiveStatus(session.status)) return sessionSnapshot(session)
+  const detected = runningGameTracker.get(instanceId)
+  if (detected) return detectedSession(detected)
+  return sessionSnapshot(session)
+}
+
+/** 内存 session + 系统检测到的外部进程；同一实例优先显示仍在运行的本地 session。 */
+export function listSessions() {
+  const merged = new Map()
+  for (const session of sessions.values()) {
+    merged.set(session.instanceId, sessionSnapshot(session))
   }
+  for (const proc of runningGameTracker.list()) {
+    const existing = merged.get(proc.instanceId)
+    if (existing && isActiveStatus(existing.status)) continue
+    // 本地 session 已结束但进程仍在（停止失败等）时，以检测结果为准。
+    merged.set(proc.instanceId, detectedSession(proc))
+  }
+  return [...merged.values()]
+}
+
+function externalLogEntry(seq, text) {
+  const time = /^\[(\d{2}:\d{2}:\d{2})\]/.exec(text)?.[1] || ''
+  return { seq, t: time, text, kind: '' }
+}
+
+function pushExternalLines(state, lines) {
+  for (const text of lines) {
+    if (text === '') continue
+    state.lines.push(externalLogEntry(++state.seq, text))
+  }
+  if (state.lines.length > MAX_EXTERNAL_LINES) {
+    state.lines.splice(0, state.lines.length - MAX_EXTERNAL_LINES)
+  }
+}
+
+async function readFileRange(file, start, end) {
+  const length = Math.max(0, end - start)
+  if (!length) return ''
+  const handle = await fsp.open(file, 'r')
+  try {
+    const buffer = Buffer.alloc(length)
+    const { bytesRead } = await handle.read(buffer, 0, length, start)
+    return buffer.subarray(0, bytesRead).toString('utf8')
+  } finally {
+    await handle.close().catch(() => {})
+  }
+}
+
+/** 读取外部进程的 latest.log；首轮只取尾部，之后按字节偏移增量读取。 */
+async function readExternalLog(proc, after = 0) {
+  const paths = proc.instance?.paths || {}
+  const file = paths.gameLogFile || (paths.gameDir ? path.join(paths.gameDir, 'logs', 'latest.log') : '')
+  if (!file) return { lines: [], seq: 0, running: true, status: 'running', source: 'game', external: true }
+  let state = externalLogs.get(proc.instanceId)
+  if (!state || state.file !== file) {
+    state = { file, offset: 0, seq: 0, lines: [], pending: '', initialized: false }
+    externalLogs.set(proc.instanceId, state)
+  }
+  try {
+    const stat = await fsp.stat(file)
+    if (!state.initialized || stat.size < state.offset) {
+      const start = Math.max(0, stat.size - EXTERNAL_LOG_TAIL_BYTES)
+      const text = await readFileRange(file, start, stat.size)
+      const parts = text.split(/\r?\n/)
+      // 从文件中间开始读时，第一行可能是半行，丢掉以免日志开头是残句。
+      if (start > 0) parts.shift()
+      state.lines = []
+      state.seq = 0
+      state.pending = ''
+      state.offset = stat.size
+      state.initialized = true
+      pushExternalLines(state, parts)
+    } else if (stat.size > state.offset) {
+      const text = await readFileRange(file, state.offset, stat.size)
+      state.offset = stat.size
+      const parts = (state.pending + text).split(/\r?\n/)
+      state.pending = parts.pop() || ''
+      pushExternalLines(state, parts)
+    }
+  } catch {
+    // latest.log 还没生成（刚启动）时保持 running，等下一次轮询。
+  }
+  const seq = Number(after) || 0
+  const lines = seq > 0 ? state.lines.filter((line) => line.seq > seq) : state.lines
+  return {
+    lines,
+    seq: state.seq,
+    running: true,
+    status: detectedSession(proc).status,
+    source: 'game',
+    file,
+    name: path.basename(file),
+    external: true
+  }
+}
+
+/**
+ * 实时日志：本地 session 返回 stdout 缓冲；接管的进程返回游戏 latest.log。
+ * 后者没有 stdout 管道，但游戏自己的 latest.log 才是完整日志。
+ */
+export async function readLog(instanceId, after = 0) {
+  const session = sessions.get(instanceId)
+  const detected = runningGameTracker.get(instanceId)
+  if (detected && (!session || !isActiveStatus(session.status))) {
+    return await readExternalLog(detected, after)
+  }
+  if (session) {
+    const seq = Number(after) || 0
+    return {
+      lines: session.lines.filter((line) => line.seq > seq),
+      seq: session.seq,
+      running: session.status === 'running' || session.status === 'starting',
+      status: session.status,
+      source: 'launcher',
+      external: false
+    }
+  }
+  return { lines: [], seq: 0, running: false }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1101,46 +1300,70 @@ export async function startInstance(instanceId, { accountId = '' } = {}) {
     error.code = 'NOT_FOUND'
     throw error
   }
-
-  const paths = instancePaths(inst)
-  const session = makeSession(inst, paths)
-  sessions.set(instanceId, session)
-
-  const state = {
-    instanceId,
-    instanceName: inst.name,
-    status: 'preparing',
-    phase: 'account',
-    phaseLabel: phaseLabel('account'),
-    step: 1,
-    total: LAUNCH_PHASES.length,
-    detail: '正在校验账户…',
-    progress: null,
-    indeterminate: true,
-    startedAt: session.startedAt,
-    updatedAt: Date.now(),
-    cancellable: true,
-    error: null,
-    logFile: session.logFile,
-    pid: 0,
-    clientJar: '',
-    proc: null,
-    cancelled: false,
-    controller: new AbortController(),
-    session
+  if (startingInstances.has(instanceId)) {
+    throw createLaunchError('ALREADY_RUNNING', {
+      message: '这个实例正在启动，请稍候。',
+      paths: errorPaths(inst, instancePaths(inst))
+    })
   }
-  session.launchState = state
-  launchStates.set(instanceId, state)
 
-  pushLine(session, `准备启动 ${inst.name} · Minecraft ${inst.mc || '未知'}`)
-  pushLine(session, `[准备] ${phaseLabel('account')}`)
-  void runLaunchPreparation(instanceId, state, session, inst, { accountId }).catch((e) => {
-    // runLaunchPreparation 内部已兜底；这里只防止极端情况下出现未处理的 Promise 拒绝。
-    try {
-      if (!state.cancelled && state.status !== 'failed') failLaunch(state, session, e)
-    } catch {}
-  })
-  return sessionSnapshot(session)
+  startingInstances.add(instanceId)
+  try {
+    // 启动前刷新进程表：启动器重启后内存里没有 session，但游戏可能还在跑。
+    // 不强制绕缓存——bootstrap/status 轮询刚扫过时直接用结果，避免启动请求被
+    // PowerShell 扫描阻塞；缓存过期（4 秒）时 refresh 会自行重新扫描。
+    await refreshRunningGames()
+    const detected = runningGameTracker.get(instanceId)
+    if (detected) {
+      throw createLaunchError('ALREADY_RUNNING', {
+        message: `该实例已经在运行（PID ${detected.pid}），请先关闭现有游戏进程。`,
+        detail: `启动器检测到实例的游戏目录已有一个 Minecraft 进程在运行：\nPID ${detected.pid}\n${detected.gameDir || ''}\n\n可以在实例页停止该进程，或直接切换到 / 新建另一个实例同时游玩。`,
+        paths: errorPaths(inst, instancePaths(inst))
+      })
+    }
+
+    const paths = instancePaths(inst)
+    const session = makeSession(inst, paths)
+    sessions.set(instanceId, session)
+
+    const state = {
+      instanceId,
+      instanceName: inst.name,
+      status: 'preparing',
+      phase: 'account',
+      phaseLabel: phaseLabel('account'),
+      step: 1,
+      total: LAUNCH_PHASES.length,
+      detail: '正在校验账户…',
+      progress: null,
+      indeterminate: true,
+      startedAt: session.startedAt,
+      updatedAt: Date.now(),
+      cancellable: true,
+      error: null,
+      logFile: session.logFile,
+      pid: 0,
+      clientJar: '',
+      proc: null,
+      cancelled: false,
+      controller: new AbortController(),
+      session
+    }
+    session.launchState = state
+    launchStates.set(instanceId, state)
+
+    pushLine(session, `准备启动 ${inst.name} · Minecraft ${inst.mc || '未知'}`)
+    pushLine(session, `[准备] ${phaseLabel('account')}`)
+    void runLaunchPreparation(instanceId, state, session, inst, { accountId }).catch((e) => {
+      // runLaunchPreparation 内部已兜底；这里只防止极端情况下出现未处理的 Promise 拒绝。
+      try {
+        if (!state.cancelled && state.status !== 'failed') failLaunch(state, session, e)
+      } catch {}
+    })
+    return sessionSnapshot(session)
+  } finally {
+    startingInstances.delete(instanceId)
+  }
 }
 
 /**
@@ -1177,55 +1400,138 @@ export async function cancelLaunch(instanceId) {
   return { ok: true }
 }
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function waitForProcessGone(pid, timeoutMs) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0)
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) return true
+    await wait(120)
+  }
+  return !isProcessAlive(pid)
+}
+
+function scheduleExternalStop(instanceId, pid) {
+  const previous = externalStopping.get(instanceId)
+  if (previous?.timer) clearTimeout(previous.timer)
+  const entry = { pid, startedAt: Date.now(), attempts: 0, timer: null }
+  entry.timer = setTimeout(() => { void escalateExternalStop(instanceId, pid) }, EXTERNAL_STOP_GRACE_MS)
+  entry.timer.unref?.()
+  externalStopping.set(instanceId, entry)
+}
+
+async function forgetDetectedProcess(instanceId) {
+  const entry = externalStopping.get(instanceId)
+  if (entry?.timer) clearTimeout(entry.timer)
+  externalStopping.delete(instanceId)
+  externalLogs.delete(instanceId)
+  runningGameTracker.forget(instanceId)
+  await refreshRunningGames({ force: true }).catch(() => {})
+}
+
+/** 宽限期到了还没退出就强制结束；再次失败则恢复「运行中」让用户重试。 */
+async function escalateExternalStop(instanceId, pid) {
+  const entry = externalStopping.get(instanceId)
+  if (!entry || entry.pid !== pid) return
+  if (isProcessAlive(pid)) await forceKillProcess(pid)
+  if (await waitForProcessGone(pid, 3000)) {
+    await forgetDetectedProcess(instanceId)
+    return
+  }
+  entry.attempts++
+  if (entry.attempts >= 2) {
+    externalStopping.delete(instanceId)
+    return
+  }
+  entry.timer = setTimeout(() => { void escalateExternalStop(instanceId, pid) }, 5000)
+  entry.timer.unref?.()
+}
+
+/** 关闭一个不是本进程拉起的游戏：先请求窗口关闭，超时后 taskkill /F。 */
+async function stopDetectedInstance(instanceId, detected, { force = false } = {}) {
+  if (!detected?.pid || !isProcessAlive(detected.pid)) {
+    runningGameTracker.forget(instanceId)
+    return { ok: false, error: '游戏进程已经退出' }
+  }
+  const pendingStop = externalStopping.get(instanceId)
+  if (pendingStop?.pid === detected.pid) return { ok: true, stopping: true, pid: detected.pid, external: true }
+  if (force) {
+    const result = await forceKillProcess(detected.pid)
+    if (await waitForProcessGone(detected.pid, 3000)) {
+      await forgetDetectedProcess(instanceId)
+      return { ok: true, forced: true, pid: detected.pid, external: true }
+    }
+    return { ok: false, error: result?.error || `无法结束 PID ${detected.pid}，请以管理员身份运行或手动关闭游戏。` }
+  }
+  const request = await requestProcessClose(detected.pid)
+  if (!isProcessAlive(detected.pid)) {
+    await forgetDetectedProcess(instanceId)
+    return { ok: true, pid: detected.pid, external: true }
+  }
+  scheduleExternalStop(instanceId, detected.pid)
+  return {
+    ok: true,
+    stopping: true,
+    graceful: true,
+    pid: detected.pid,
+    external: true,
+    warning: request?.ok ? '' : (request?.error || '')
+  }
+}
+
 export async function stopInstance(instanceId, { force = false } = {}) {
   const session = sessions.get(instanceId)
   const state = launchStates.get(instanceId)
-  if (!session || !session.proc) {
-    if (state && (state.status === 'preparing' || state.status === 'spawning')) {
-      return await cancelLaunch(instanceId)
+  if (session?.proc) {
+    session.stopping = true
+    session.status = 'stopping'
+    if (state) updateState(state, { cancellable: false, detail: force ? '正在强制结束游戏进程…' : '正在结束游戏进程…' })
+    pushLine(session, force ? '正在强制结束游戏进程…' : '正在结束游戏进程…')
+    const child = session.proc
+    try { child.kill() } catch {}
+    for (let i = 0; i < 20; i++) {
+      if (!session.proc) return { ok: true, pid: child.pid || 0, external: false }
+      await wait(150)
     }
-    return { ok: false, error: '游戏未在运行' }
+    if (session.proc && process.platform === 'win32') {
+      try {
+        spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+      } catch {}
+    } else if (session.proc) {
+      try { session.proc.kill('SIGKILL') } catch {}
+    }
+    return { ok: true, pid: child.pid || 0, external: false }
   }
-  session.stopping = true
-  session.status = 'stopping'
-  if (state) updateState(state, { cancellable: false, detail: force ? '正在强制结束游戏进程…' : '正在结束游戏进程…' })
-  pushLine(session, force ? '正在强制结束游戏进程…' : '正在结束游戏进程…')
-  const child = session.proc
-  try { child.kill() } catch {}
-  const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-  for (let i = 0; i < 20; i++) {
-    if (!session.proc) return { ok: true }
-    await wait(150)
+  if (session && session.status === 'stopping') return { ok: true, stopping: true, pid: session.pid || 0, external: false }
+  if (state && (state.status === 'preparing' || state.status === 'spawning')) {
+    return await cancelLaunch(instanceId)
   }
-  if (session.proc && process.platform === 'win32') {
-    try {
-      spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
-    } catch {}
-  } else if (session.proc) {
-    try { session.proc.kill('SIGKILL') } catch {}
-  }
-  return { ok: true }
+
+  // 内存里没有子进程：可能是启动器重启后接管的游戏，按 PID 关闭。
+  await refreshRunningGames({ force: true })
+  const detected = runningGameTracker.get(instanceId)
+  if (detected) return await stopDetectedInstance(instanceId, detected, { force })
+  return { ok: false, error: '游戏未在运行' }
 }
 
 export async function launchStatus(instanceId) {
+  await refreshRunningGames()
   const snapshot = getSessionSnapshot(instanceId)
   const launch = getLaunchState(instanceId)
   const inst = findInstance(instanceId)
   if (!inst) return { running: false, launch }
-  if (!snapshot) {
-    return {
-      running: false,
-      installed: isInstalled(inst),
-      latestLog: await newestLogFile(instancePaths(inst).logsDir),
-      crash: await inspectCrash(inst),
-      launch
-    }
-  }
+  const paths = instancePaths(inst)
+  const running = !!snapshot && isActiveStatus(snapshot.status)
   return {
-    running: snapshot.status === 'running' || snapshot.status === 'starting' || snapshot.status === 'stopping',
+    running,
+    detected: snapshot?.detected === true,
     session: snapshot,
     installed: isInstalled(inst),
-    crash: snapshot.crash || (['failed', 'stopped', 'exited'].includes(snapshot.status) ? await inspectCrash(inst) : null),
+    latestLog: await newestLogFile(paths.logsDir),
+    gameLog: await newestFileIn(path.join(paths.gameDir, 'logs'), (name) => name === 'latest.log'),
+    crash: snapshot?.crash || (!running && snapshot && ['failed', 'stopped', 'exited'].includes(snapshot.status) ? await inspectCrash(inst) : (!snapshot ? await inspectCrash(inst) : null)),
     launch
   }
 }
@@ -1308,6 +1614,6 @@ export async function readSavedLog(instanceId, file = '') {
 }
 
 export function hasRunningGame() {
-  return [...sessions.values()].some((session) => session.status === 'running' || session.status === 'starting') ||
+  return listSessions().some((session) => isActiveStatus(session.status)) ||
     [...launchStates.values()].some((state) => state.status === 'preparing' || state.status === 'spawning' || state.status === 'running')
 }

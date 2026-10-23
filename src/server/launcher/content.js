@@ -95,6 +95,25 @@ function serializeOptions(original, map) {
 /* Mods                                                                */
 /* ------------------------------------------------------------------ */
 
+function dependencyId(value) {
+  // Forge/Fabric 的 ID 大小写不敏感；yumi-commons-core 与 yumi_commons_core
+  // 是同一个模组，不能因为分隔符不同就报「缺少前置」。
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+}
+
+function modLoaderMatches(instanceLoader, modLoader) {
+  if (!modLoader) return true
+  const instance = String(instanceLoader || 'vanilla').toLowerCase()
+  const mod = String(modLoader || '').toLowerCase()
+  if (instance === 'vanilla') return false
+  if (instance === 'forge') return mod === 'forge' || mod === 'legacy-forge'
+  // NeoForge 1.20.1 与 Forge 生态接近；Quilt 也能加载 Fabric 模组。
+  if (instance === 'neoforge') return mod === 'neoforge' || mod === 'forge' || mod === 'legacy-forge'
+  if (instance === 'cleanroom') return mod === 'cleanroom' || mod === 'forge' || mod === 'legacy-forge'
+  if (instance === 'quilt') return mod === 'quilt' || mod === 'fabric'
+  return mod === instance
+}
+
 export async function listMods(inst, { signal } = {}) {
   const paths = instancePaths(inst)
   await fsp.mkdir(paths.modsDir, { recursive: true })
@@ -106,20 +125,31 @@ export async function listMods(inst, { signal } = {}) {
   })
   const provided = new Set()
   for (const item of items) {
-    for (const id of [item.modid, ...(item.modids || [])]) if (id) provided.add(String(id).toLowerCase())
+    const ids = item.providedModIds || [item.modid, ...(item.modids || []), ...(item.nestedModIds || [])]
+    for (const id of ids) if (id) provided.add(dependencyId(id))
+    for (const id of Object.keys(item.providedVersions || {})) provided.add(dependencyId(id))
   }
   const seen = new Map()
-  const platform = new Set(['minecraft', 'forge', 'neoforge', 'fabricloader', 'fabric', 'quilt_loader', 'quilt', 'java'])
+  const platform = new Set(['minecraft', 'forge', 'neoforge', 'fabricloader', 'fabric', 'quilt_loader', 'quilt', 'java']
+    .map((id) => dependencyId(id)))
   for (const item of items) {
     const key = String(item.modid || item.modids?.[0] || item.relPath).toLowerCase()
     if (seen.has(key)) item.duplicateOf = seen.get(key)
     else seen.set(key, item.relPath)
+    const instanceLoader = String(inst.loader || 'vanilla').toLowerCase()
+    const compatibleHints = new Set(instanceLoader === 'neoforge' ? ['forge', 'neoforge'] : [instanceLoader])
+    const hinted = (item.loaderHints || []).some((hint) => compatibleHints.has(String(hint).toLowerCase()))
+    // 旧 Forge 模组常用 FMLCorePlugin / TweakClass / ModLauncher Service 加载，
+    // 没有 mods.toml；不能因为只看到 fabric.mod.json 就判成 Fabric 模组。
+    item.loaderMismatch = !modLoaderMatches(inst.loader, item.loader) && !hinted
     const missing = []
-    for (const dep of item.dependencies || []) {
-      if (!dep || typeof dep !== 'object') continue
-      const id = String(dep.id || dep.modid || '').toLowerCase()
-      if (!id || platform.has(id) || dep.optional === true || dep.mandatory === false) continue
-      if (!provided.has(id)) missing.push(dep.id || dep.modid)
+    if (!item.loaderMismatch) {
+      for (const dep of item.dependencies || []) {
+        if (!dep || typeof dep !== 'object') continue
+        const id = dependencyId(dep.id || dep.modid)
+        if (!id || platform.has(id) || dep.optional === true || dep.mandatory === false) continue
+        if (!provided.has(id)) missing.push(dep.id || dep.modid)
+      }
     }
     if (missing.length) item.missingDependencies = missing
   }
@@ -137,9 +167,14 @@ export async function listMods(inst, { signal } = {}) {
       disabled: item.disabled,
       modid: item.modid,
       modids: item.modids || [],
+      nestedModIds: item.nestedModIds || [],
+      modIdHints: item.modIdHints || [],
+      providedModIds: item.providedModIds || [],
       name: item.name,
       version: item.version,
       loader: item.loader,
+      loaderHints: item.loaderHints || [],
+      loaderMismatch: item.loaderMismatch === true,
       environment: item.environment,
       hasMeta: item.hasMeta,
       duplicateOf: item.duplicateOf || '',

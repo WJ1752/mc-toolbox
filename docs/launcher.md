@@ -19,7 +19,8 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 状态栏  本地服务 · 监测引擎 · 任务 · 游戏运行状态 · 版本 · 作者
 ```
 
-- 实例列表按最近启动排序，可搜索名称、版本、加载器与分组；双击直接启动。
+- 实例列表按最近启动排序，可搜索名称、版本、加载器与分组；双击直接启动。侧栏标题会显示「N 运行中」，运行中的实例带绿色圆点。
+- 概览顶部新增「正在运行 N 个实例」面板：启动器启动时会接管系统里已在运行的 Minecraft 进程，逐行提供切换、日志、停止；hero 同时保留「再开一个」，可在当前游戏不关闭的情况下启动其它实例。
 - 「下载中心」独立成页，只展示启动器任务（安装/整合包/修复/模组更新/导出）与社区资源下载；已完成任务可打开对应文件夹或跳转实例页。
 - 新建实例、整合包与「导入已有」在独立页面，从侧栏「新建实例」进入；整合包页提供「搜索下载」（默认）与「本地文件」两种模式。
 - 实例设置弹窗覆盖名称、分组、内存、窗口、全屏、自动进服、Java、JVM/游戏参数与备注。
@@ -39,12 +40,14 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 | 下载源 | 自动（BMCLAPI 优先、失败回退官方）、官方、BMCLAPI；并发/重试/校验可配置 |
 | 进度与取消 | 真实字节数、资源文件计数、Phase、日志；任务可取消并清理临时文件；启动准备独立进度状态，可取消 |
 | 实例 | 创建/编辑/复制/删除/导入已有；内存、Java、窗口、全屏、服务器、JVM/游戏参数 |
+| 运行实例接管 | 启动/轮询扫描 `java.exe` / `javaw.exe`，按 `--gameDir` 匹配已添加实例；启动器重启后仍显示运行中、PID、已运行时长；逐实例停止与 `latest.log` 增量日志 |
+| 多开 | 不同实例可同时运行；「再开一个」保持当前进程并选择其它已安装实例启动；同一实例仍只允许一个进程 |
 | 迁移 | 扫描标准 `.minecraft/versions`（官方 / PCL2 / HMCL），引用原目录不复制；真实 MC 版本按继承链/ JAR / 资源索引/版本目录推断，失败时要求手动指定 |
 | 账户 | 离线（OfflinePlayer UUID）、微软设备代码 OAuth（内置公共客户端，也可填自己的 Azure ID）、authlib-injector 第三方 |
 | 启动 | 版本继承、OS/arch 规则、Modern/legacy 参数、natives、日志配置、Forge ModLauncher；外部目录 libraries/assets/gameDir 按原 `.minecraft` 解析 |
 | 启动反馈 | 账户 → 版本链 → Java → 文件 → natives → 进程 → 窗口 7 阶段；真实百分比或 indeterminate；结构化错误码与可操作按钮；异常退出崩溃诊断 |
 | 日志 | stdout/stderr 实时捕获（log4j XML 转可读文本）、已保存日志、崩溃报告与中文诊断 |
-| 模组 | JAR 拖入/选择、启停、删除、重复/缺失前置提示、Modrinth / CurseForge 搜索安装；按文件 SHA-1 检查 Modrinth 更新并解析缺失前置 |
+| 模组 | JAR 拖入/选择、启停、删除、重复/缺失前置提示、Modrinth / CurseForge 搜索安装；按文件 SHA-1 检查 Modrinth 更新并解析缺失前置；按真实 modid + jar-in-jar 识别内嵌前置，不拿文件名猜 ID |
 | 资源包 / 光影 | Modrinth / CurseForge 搜索、PCL 风格 MC 版本下拉、兼容版本优先与标记；ZIP 导入、启停（写 options.txt）、删除、打开目录 |
 | 世界 / 截图 | 世界卡片（版本/模式/大小/时间）、截图缩略图与大图、删除/打开目录 |
 | 服务器 | 读写 `servers.dat`、添加/删除、一键设为启动后自动连接 |
@@ -164,6 +167,18 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - 外部实例的 `versionsDir`/`librariesDir`/`assetsDir` 指向 `baseDir`，`nativesDir`/`logsDir` 仍在启动器实例目录；`ensureInstanceDirs` 不会在外部 gameDir 创建 mods/saves 等目录；客户端 JAR 按 `jarVersion` / `versionId` / `mc` 候选顺序取第一个真实存在的文件。
 - 游戏进程用 `gameSpawnOptions()`（`detached: true`）启动：Windows 上 Node/libuv 会把非 detached 的子进程与启动器放进同一个 kill-on-close 作业对象，启动器退出（关窗、「启动后关闭启动器」、一键更新替换 exe 后重启）时作业句柄关闭，作业内的 MC 会被一起 `TerminateProcess` —— 表现是 `latest.log` 没有 `Stopping!`，直接停在上一条日志。detached 子进程不进入该作业，启动器退出后游戏继续运行；stdout/stderr 管道断开后 log4j2 的 Console appender 只写失败，游戏自己的文件日志与崩溃诊断不受影响（验证见 §6.11）。
 
+#### 已运行进程接管与多开（v1.9.8）
+
+`src/server/launcher/running-processes.js` + `launch.js`：
+
+- 每次读取 `/api/launcher/bootstrap`、`/api/launcher/status`、`/api/launcher/running?force=1` 等状态前，先扫描系统进程：Windows 用 `Get-CimInstance Win32_Process`（失败回退 `Get-WmiObject`）读取 `java.exe` / `javaw.exe` 的 `CommandLine`，非 Windows 用 `ps -axo pid,ppid,etimes,command`。只保留同时带 `--gameDir` 与客户端特征（`--assetsDir` / `--assetIndex` / `-Dminecraft.*` / Mojang、Forge、Fabric、Quilt、NeoForge 主类）的进程。
+- 用 `--gameDir` 做路径匹配（Windows 大小写/分隔符不敏感）到 `instancePaths(inst).gameDir`；只匹配已经添加进列表的实例，不会碰其它 Java 进程。检测结果缓存 4 秒（同一时刻的并发轮询复用一次 PowerShell）；扫描失败时保留上一次结果并标记 `stale`，避免把仍在运行的游戏误判成“已退出”而允许删除/覆盖实例。
+- 启动器内存里的 session 优先；没有本地 session 或本地 session 已结束时，返回 `detected: true` / `external: true` 的接管 session，包含 `pid`、`startedAt`、`elapsed`、`logFile`。原始命令行（可能带 `--accessToken`）只在内存中用于匹配，`session.command` 置空，API 不返回。
+- 停止：`POST /instances/:id/stop` 先强制刷新进程表并确认 PID + `gameDir`，Windows 先 `taskkill /PID <pid> /T`（请求正常关闭），8 秒后仍未退出再 `/F` 强制；Unix 先 `SIGTERM` 再 `SIGKILL`。同一实例仍只允许一个进程；不同实例的检测结果互不影响，`startInstance` 只拒绝当前实例的 `ALREADY_RUNNING`。
+- 日志：外部进程没有 stdout 管道，`GET /instances/:id/log` 从 `<gameDir>/logs/latest.log` 尾部读 512 KiB，之后按文件字节偏移增量追加（保留最近 2000 行）；日志页每 3 秒刷新，检测到运行中时默认选中游戏 `latest.log`。
+- 前端：侧栏运行数量与绿点；概览「正在运行 N 个实例」面板逐行提供切换 / 日志 / 停止；hero 显示「已接管外部进程 · PID」并提供「停止游戏」与「再开一个」；`再开一个` 弹窗只列未运行的已安装实例，保持当前进程不变。
+- 边界：以更高权限运行、系统拒绝读取 `CommandLine` 的 Java 进程无法接管；同一个 `gameDir` 被多个实例引用时只显示最近游玩的一个（需要同版本多开请复制实例，不要共用目录）。检测失败时启动器会提示原因并保留上一次检测结果，不会把运行中的实例误判为已退出。
+
 ### 4.4 账户
 
 `src/server/launcher/accounts.js`：
@@ -215,12 +230,23 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - 更新只结束启动器自身：游戏进程以 `detached: true` 启动、不在启动器的作业对象里（§4.3），所以替换脚本等待旧进程退出、重启新版时，正在运行的游戏不会被连带关闭。
 - 前端在启动器加载后按设置自动检查一次；发现新版本时右下角显示常驻卡片（立即更新 / 稍后），弹窗展示版本号、发布时间、发布说明与下载进度；替换成功后通过 WebView2 `close` 消息（或 shutdown beacon）关闭窗口，由脚本重启。命令面板「检查启动器更新」、设置 → 关于、设置 → 启动器 → 更新都可手动触发。
 
+### 4.9 模组真实 modid 与内嵌依赖（v1.9.8）
+
+`src/server/mods.js` + `src/server/launcher/content.js`：
+
+- 元数据按实例加载器选择：Forge/Cleanroom 优先 `META-INF/mods.toml`，NeoForge 优先 `META-INF/neoforge.mods.toml`，Fabric/Quilt 优先 `fabric.mod.json` / `quilt.mod.json`。同一个 jar 同时带多套元数据时（CreativeCore、ItemPhysic 等）不会再拿 Fabric 的 `depends` 给 Forge 实例报 `fabric-api` 缺失。
+- `[[dependencies.<owner>]]` 只接受 owner 出现在本 jar `[[mods]]` 里的块；`[[dependencies.xaerobetterpvp]]` 这类没有对应 `[[mods]]` 的残留块不会算到宿主头上。`optional` / `incompatible` / `side=CLIENT` 的规则保持原判断。
+- 内嵌依赖：读取 Forge/NeoForge `META-INF/jarjar/metadata.json` 的 `jars[].path`、Fabric/Quilt `jars`、旧 Forge `ContainedDeps`，并兜底扫描 `META-INF/jarjar/*.jar` / `META-INF/jars/*.jar`。每个子 jar 递归读取元数据；`nestedModIds` 记录全部内嵌 ID（含客户端子模块），`modids` 只记录服务端转换可见的 ID，避免把客户端子模块并进宿主导致整包被误删。
+- fat jar 没有主元数据时（如 `kotlinforforge-4.12.0-all.jar`）用第一个带 `modid` 的 jar-in-jar 子模块回填宿主；真实元数据存在时 `modids` 不再混入从文件名推断的 ID（`xaerominimap-forge-1.20.1-26.4.2` 只是 `modIdHints`，仅无元数据时兜底）。
+- `scanModsDir` 返回 `providedModIds`（真实 ID + 内嵌 ID）与 `modIdHints`；`listMods` 用 `providedModIds` 判断依赖是否满足，并把 ID 归一化为小写字母数字（`yumi-commons-core` 与 `yumi_commons_core` 视为同一个）。
+- 加载器不匹配：Forge 实例里的纯 Fabric jar（如 LambDynamicLights、fabric-language-kotlin）标记 `loaderMismatch`，UI 显示「加载器不匹配」并忽略其依赖缺失；旧 Forge 的 `FMLCorePlugin` / `TweakClass` / `FMLModType` / ModLauncher Service 通过 `loaderHints` 视为兼容，不误判。
+
 ## 5. 接口
 
 完整列表见 README「常用 API」。核心前缀 `/api/launcher`：
 
-- `bootstrap` / `settings` / `status` / `sessions`
-- `instances` CRUD、`select`、`repair`、`launch`、`launch/cancel`、`stop`、`preview`、`status`（含 `launch` 阶段）、`log`、`crash`
+- `bootstrap` / `settings` / `status` / `sessions` / `running`（当前运行实例，`?force=1` 强制扫描）
+- `instances` CRUD、`select`、`repair`、`launch`、`launch/cancel`、`stop`、`preview`、`status`（含 `launch` 阶段与 `detected` / `external`）、`log`、`crash`
 - `instances/:id/content?type=mods|resourcepacks|shaderpacks|worlds|screenshots|servers|logs|summary`
 - `instances/:id/upload`（原始字节 + `X-File-Name`）、`mods/toggle`、`mods/delete`、`content/delete`、`resourcepack`、`servers`
 - `instances/:id/mods/updates`、`mods/update`、`mods/missing`（Modrinth 更新检查 / 缺失前置）
@@ -350,7 +376,7 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - 修复：`spawnGame` 改用 `gameSpawnOptions()`（`detached: true`，日志仍走 stdout/stderr 管道）。探针：伪启动器先 spawn 一个普通 helper（作业已成立），再以 detached 拉起 java，`IsProcessInJob(java)=false`；父进程退出 4 秒后 java 仍存活（`gameAlive=True`），而 helper 随作业结束。
 - 管道断开不影响游戏：用 log4j2 2.19 + Console(`SYSTEM_OUT`) + File appender 复现 MC 的日志配置，detached 拉起后结束父进程，JVM 仍存活，文件 appender 的 `log4jtest.log` 在父进程退出后继续从 16,533 字节增长到 23,057 字节。也就是说控制台回显会断，游戏本身和 `latest.log` 不受影响。
 - 回归：`tests/launcher-game-detached.test.mjs` 2 项（选项含 `detached`；伪启动器退出后伪游戏仍存活）；把 `detached` 改回 `false` 时该测试失败，能抓住回退。
-- 已知边界：启动器重启后内存里的 session 已丢失，实例卡片不会自动显示「运行中」（游戏进程仍在跑）。这是后续「接管已运行进程」的独立需求，不影响本次「更新不再关游戏」。
+- 已解决（v1.9.8）：启动器重启后内存 session 丢失的问题由「已运行进程接管」修复——启动/轮询会扫描 `java.exe` / `javaw.exe` 并按 `--gameDir` 显示运行中、PID 与日志入口，见 §4.3 与 §6.13。本次「更新不再关游戏」的 `detached` 行为保持不变。
 
 ### 6.12 在线搜索结果分页与排序（v1.9.7）
 
@@ -363,6 +389,19 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - CurseForge 实测（有效 Eternal Key，1.20.1 / Forge / `query=jei`）：`sortOrder=2` 返回 HTTP 400「The value '2' is invalid」，改为 `asc` / `desc` 后 `sortField=6&sortOrder=desc` 正常按下载量降序返回（JEI 638,827,048 下载居首）；`relevance` / `follows` / `updated` / `newest` 的 `sortOrder` 同步改为 `desc`。
 - 单元测试：`tests/launcher-search-pager.test.mjs` 4 项（页码换算 offset、非法页码、页大小、排序项）；`tests/community-sort.test.mjs` 4 项（CF 下载量映射、asc/desc 约束、未知排序回落）；完整测试 195 项通过。
 - 探针 24/24 通过，无前端控制台异常；CurseForge 独立探针 5/5（切来源、下载量排序、下一页请求带 `offset=20&sort=downloads`）。截图保存在临时 `F:\DS数据\MCtoolbox\.probe\shots`（未随仓库提交）。
+
+### 6.13 运行中实例接管与模组真实 modid（v1.9.8）
+
+验证环境：Windows 10 x64、Node 22.18、Java 17 / Java 21、headless Edge CDP（1440×1000 与 900×820）；日期 2026-10-23。
+
+- 进程接管（真实 Java 进程，非 mock）：隔离复制应用后启动 2 个 `FakeMc` Java 进程，`--gameDir` 分别指向实例 A / B。`/api/launcher/bootstrap` 与 `/api/launcher/running?force=1` 均返回 2 条 `detected=true` 的 session（PID 正确）；`/api/launcher/instances/A/status` 返回 `running=true, detected=true`；向 A 的 `latest.log` 追加一行后，`/log?after=<上一 seq>` 只返回新增行。对 A 执行 `force=true` 停止后 A 的 PID 消失，B 仍为运行中；再停止 B 后恢复为空。
+- 多开边界：A/B 运行中再次启动 A，返回 HTTP 500 + `ALREADY_RUNNING`（中文提示带 PID）；同时启动未运行的 C，返回 HTTP 200 并开始准备（没有账号时随后失败），证明不同实例可同时启动。
+- UI（headless Edge，14/14）：侧栏显示「2 运行中」；概览「正在运行 2 个实例」面板列出 A/B；hero 显示「已接管外部进程 · PID」且同时保留「停止游戏」与「再开一个」；「再开一个」弹窗只列未运行的 C；日志页自动接入 A 的 `latest.log` 并显示外部进程状态；确认框写明「8 秒后强制结束」；停止 A 后只保留 B；900×820 无横向溢出；无前端控制台异常。
+- 模组识别（真实 Forge 1.20.1 整合包 97 个 jar）：`listMods` 缺失依赖为 **0**，97/97 都有真实 modid。Xaero's Minimap / World Map 从 `META-INF/jarjar/xaerolib...jar` 识别出 `xaerolib` 并由 `providedModIds` 覆盖；`yumi-commons-core` 与 `yumi_commons_core` 归一化后匹配；`kotlinforforge-4.12.0-all.jar` 从 jar-in-jar 识别出 `kotlinforforge`；CreativeCore / ItemPhysic 不再误报 `fabric-api`。
+- 真实整合包中剩余 2 个「加载器不匹配」提示：`lambdynamiclights-4.4.0+1.20.1.jar` 与 `fabric-language-kotlin-1.13.13+kotlin.2.4.10.jar` 只有 Fabric 元数据，Forge 实例不会加载它们；UI 标记「加载器不匹配」并忽略其 Fabric 依赖，不再产生无意义的 `fabric-lifecycle-events-v1` 等缺失项。
+- 模组页 UI 探针 5/5：Xaero 行显示真实 `xaerominimap` 与 `Xaero's Minimap` 名称，没有「缺少依赖」；缺失依赖面板不出现 `xaerolib`；Fabric-only 行显示「加载器不匹配」并忽略 Fabric 依赖；无控制台异常。
+- 自动化测试：`node --test tests/*.test.mjs` **208 项通过**；新增 `tests/launcher-running-processes.test.mjs` 7 项、`tests/mods-toml-dependencies.test.mjs` 8 项（含合成 jar 的 jar-in-jar、双加载器元数据、owner 过滤、fat jar 回填、TOML 引号名称、ID 归一化与加载器不匹配）。
+- 构建：`node build.mjs` 成功生成 `dist/mc-toolbox.exe`（82.8 MB），隔离冒烟通过；`PRODUCT_VERSION` 与 `package.json` 已更新为 1.9.8。
 
 ## 7. 截图
 

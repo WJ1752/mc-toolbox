@@ -57,7 +57,9 @@ import {
   readLog,
   readSavedLog,
   listSessions,
-  hasRunningGame
+  hasRunningGame,
+  refreshRunningGames,
+  getRunningDetectionStatus
 } from './launch.js'
 import { discoverJava, clearJavaCache } from './java.js'
 import { requiredJavaMajor } from './launch-plan.js'
@@ -95,8 +97,9 @@ function instanceOf(id) {
 }
 
 /** 游戏还在跑的时候不要动实例目录：删除/复制/修复都会和正在写的文件打架。 */
-function assertInstanceIdle(id, action = '操作') {
-  const busy = listSessions().find((item) => item.instanceId === id && ['starting', 'running'].includes(item.status))
+async function assertInstanceIdle(id, action = '操作') {
+  await refreshRunningGames()
+  const busy = listSessions().find((item) => item.instanceId === id && ['starting', 'running', 'stopping'].includes(item.status))
   if (busy) throw new Error(`实例正在运行，无法${action}；请先退出游戏`)
 }
 
@@ -131,6 +134,9 @@ function filterSettings(settings) {
 async function launcherStatusPayload() {
   const instances = listInstances()
   const accountsInfo = accounts.listAccounts()
+  // 进入启动器 / 每次轮询都检测系统进程，接管启动器重启前已经在运行的游戏。
+  await refreshRunningGames()
+  const sessions = listSessions()
   // 存下来的选中项可能指向已被删除、或仍在安装中而不在列表里的实例。
   const stored = getSelectedInstanceId()
   const selectedInstance = instances.some((item) => item.id === stored) ? stored : (instances[0]?.id || '')
@@ -138,9 +144,10 @@ async function launcherStatusPayload() {
     instances,
     accounts: accountsInfo,
     selectedInstance,
-    sessions: listSessions(),
+    sessions,
     jobs: listJobs(),
     running: hasRunningGame(),
+    detection: getRunningDetectionStatus(),
     root: launcherRoot(),
     loaders: LOADERS
   }
@@ -236,7 +243,19 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
 
   /* ---------------- status / sessions ---------------- */
   on('GET', '/api/launcher/status', async () => await launcherStatusPayload())
-  on('GET', '/api/launcher/sessions', async () => ({ items: listSessions() }))
+  on('GET', '/api/launcher/sessions', async () => {
+    await refreshRunningGames()
+    return { items: listSessions() }
+  })
+  on('GET', '/api/launcher/running', async (_req, _params, query) => {
+    await refreshRunningGames({ force: query.force === '1' })
+    const items = listSessions().filter((item) => ['starting', 'running', 'stopping'].includes(item.status))
+    return {
+      items,
+      runningCount: items.length,
+      detection: getRunningDetectionStatus()
+    }
+  })
 
   /* ---------------- instances ---------------- */
   on('GET', '/api/launcher/instances', async () => ({ items: listInstances() }))
@@ -257,12 +276,12 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
   })
   on('DELETE', '/api/launcher/instances/:id', async (_req, params) => {
     instanceOf(params.id)
-    assertInstanceIdle(params.id, '删除')
+    await assertInstanceIdle(params.id, '删除')
     return deleteInstance(params.id)
   })
   on('POST', '/api/launcher/instances/:id/duplicate', async (req, params) => {
     const body = await readBody(req)
-    assertInstanceIdle(params.id, '复制')
+    await assertInstanceIdle(params.id, '复制')
     return await duplicateInstance(params.id, { name: body.name || '' })
   })
   on('POST', '/api/launcher/instances/:id/select', async (_req, params) => {
@@ -271,7 +290,7 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
   })
   on('POST', '/api/launcher/instances/:id/repair', async (_req, params) => {
     instanceOf(params.id)
-    assertInstanceIdle(params.id, '修复')
+    await assertInstanceIdle(params.id, '修复')
     return startRepair(params.id)
   })
 
@@ -311,7 +330,7 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
     if (query.saved === '1' || query.source) {
       return await readSavedLog(inst.id, query.file || '')
     }
-    const live = readLog(inst.id, safeInt(query.after))
+    const live = await readLog(inst.id, safeInt(query.after))
     if (!live.lines.length && !live.running) {
       const disk = await readSavedLog(inst.id).catch(() => null)
       if (disk) return { ...live, lines: disk.lines, saved: disk.name }

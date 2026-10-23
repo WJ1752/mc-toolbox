@@ -37,6 +37,7 @@ function upload(url, file, { onProgress, fieldHeaders = {} } = {}) {
 export const launcherApi = {
   bootstrap: () => api.get('/api/launcher/bootstrap'),
   status: () => api.get('/api/launcher/status'),
+  running: (force = false) => api.get('/api/launcher/running' + (force ? '?force=1' : '')),
   settings: () => api.get('/api/launcher/settings'),
   saveSettings: (patch) => api.put('/api/launcher/settings', patch),
 

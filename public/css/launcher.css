@@ -72,10 +72,12 @@
 .lp-side-title h1 {
   display: flex;
   align-items: baseline;
+  flex-wrap: wrap;
   gap: 7px;
   font-size: 18px;
   letter-spacing: -.02em;
 }
+.lp-side-name { white-space: nowrap; }
 .lp-count {
   font-family: var(--font-mono);
   font-size: 10.5px;
@@ -1459,3 +1461,80 @@
 .lp-update-progress .lp-bar { height: 5px; }
 .lp-update-status { font-size: 11px; color: var(--mute); min-height: 15px; }
 .lp-update-error { font-size: 11.5px; color: var(--redstone); white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ---------------- 实例进程检测 / 多开 ---------------- */
+.lp-run-count {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  margin-left: 5px;
+  padding: 0 6px;
+  border: 1px solid color-mix(in srgb, var(--emerald) 38%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--emerald) 9%, transparent);
+  color: var(--emerald);
+  font-size: 8.5px;
+  font-weight: 600;
+  vertical-align: 1px;
+  white-space: nowrap;
+}
+.lp-run-count[hidden] { display: none; }
+.lp-run-count.warn {
+  border-color: color-mix(in srgb, var(--gold) 45%, var(--line));
+  background: color-mix(in srgb, var(--gold) 9%, transparent);
+  color: var(--gold);
+}
+.lp-running-slot { min-width: 0; }
+.lp-running-slot[hidden] { display: none; }
+.lp-running-card { border-color: color-mix(in srgb, var(--emerald) 28%, var(--line)); }
+.lp-running-card .lp-card-head { background: color-mix(in srgb, var(--emerald) 6%, var(--surface)); }
+.lp-run-list { display: flex; flex-direction: column; gap: 6px; }
+.lp-run-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+}
+.lp-run-row.active {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface-2));
+}
+.lp-run-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.lp-run-main b { font-size: 11.5px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-run-meta { font-size: 9.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-run-meta i { font-style: normal; color: var(--emerald); }
+.lp-run-actions { display: flex; align-items: center; gap: 5px; flex: none; }
+.lp-run-actions .badge { height: 17px; font-size: 9px; }
+.lp-launch-more { width: 100%; margin-top: 2px; }
+.lp-launch-another { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+.lp-launch-another-note { font-size: 10.5px; color: var(--dim); line-height: 1.6; }
+.lp-launch-another-list { display: flex; flex-direction: column; gap: 5px; max-height: 360px; overflow: auto; }
+.lp-launch-another-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+}
+.lp-launch-another-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.lp-launch-another-main b { font-size: 11.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-launch-another-main span { font-size: 9.5px; color: var(--mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-launch-another .lp-empty { padding: 14px 10px; }
+
+@media (max-width: 900px) {
+  .lp-run-row { flex-wrap: wrap; }
+  .lp-run-actions { width: 100%; justify-content: flex-end; }
+  .lp-running-card .lp-card-head { flex-wrap: wrap; }
+}
+
+@media (max-width: 1000px) {
+  .lp-new span { display: none; }
+  .lp-new { width: 26px; padding: 0; justify-content: center; }
+}

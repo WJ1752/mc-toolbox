@@ -11,6 +11,7 @@ import { emptyBlock, sectionCard, loaderLabel } from './ui.js'
 import { versionCombo, partitionVersions, compatibleVersion, filterSummary, isMinecraftVersion, versionTagBadges } from './version-picker.js'
 import { createPager, pageOffset, SEARCH_PAGE_SIZE, SEARCH_SORTS } from './search-pager.js'
 const ENV = { client: ['客户端', 'info'], server: ['服务端', 'accent'], both: ['通用', ''], '*': ['通用', ''] }
+const MOD_LOADER_LABELS = { fabric: 'Fabric', forge: 'Forge', neoforge: 'NeoForge', quilt: 'Quilt', 'legacy-forge': '旧版 Forge', cleanroom: 'Cleanroom' }
 const MODES = ['生存模式', '创造模式', '冒险模式', '旁观模式']
 const KINDS = { release: '正式版', beta: '测试版', alpha: '预览版' }
 const EXT = { mods: /\.(jar|zip)$/i, resourcepacks: /\.(zip|jar)$/i, shaderpacks: /\.(zip|jar)$/i }
@@ -319,9 +320,12 @@ async function mountMods(container, t) {
           item.version ? chip('v' + item.version, 'lp-chip mono') : null,
           upd ? badge('可更新 ' + (upd.latest?.number || ''), 'accent') : null,
           item.duplicateOf ? badge('重复', 'warn') : null,
-          missing.length ? badge('缺少依赖', 'bad') : null),
-        metaEl([item.modid, item.file, fmtBytes(item.size), fmtAgo(item.mtime)]),
-        missing.length ? tip('缺少前置：' + missing.join('、')) : null
+          item.loaderMismatch ? badge('加载器不匹配', 'warn') : null,
+          missing.length && !item.loaderMismatch ? badge('缺少依赖', 'bad') : null),
+        metaEl([item.modid, item.loader ? (MOD_LOADER_LABELS[item.loader] || item.loader) : null, item.file, fmtBytes(item.size), fmtAgo(item.mtime)]),
+        item.loaderMismatch
+          ? tip(`这是 ${MOD_LOADER_LABELS[item.loader] || item.loader || '其它加载器'} 模组，当前实例是 ${MOD_LOADER_LABELS[t.inst?.loader] || t.inst?.loader || '原版'}；游戏不会加载它，已忽略它的依赖缺失。`)
+          : missing.length ? tip('缺少前置：' + missing.join('、')) : null
       ),
       actEl(
         upd ? btn('更新', { size: 'xs', variant: 'primary', iconName: 'download', onClick: () => updateOne(item) }) : null,
@@ -1370,6 +1374,7 @@ async function mountLogs(container, t) {
   let follow = true
   let polling = false
   let seq = 0
+  let liveStatus = null
   const statusDot = h('span', { class: 'dot' })
   const statusText = tip('正在检查运行状态…')
   const fileSelect = h('select', { class: 'input lp-log-select', 'aria-label': '选择日志文件' })
@@ -1387,24 +1392,54 @@ async function mountLogs(container, t) {
   const hints = h('div', { class: 'lp-log-hints' })
   const crashList = h('div', { class: 'lp-list lp-log-crash-list' })
   const crashCard = sectionCard({ title: '崩溃报告', subtitle: '点击查看报告全文与可识别的问题', body: crashList, className: 'lp-log-crashes' })
+  const liveBtn = btn('接入 latest.log', {
+    size: 'sm',
+    iconName: 'terminal',
+    title: '跳到正在运行的实例写入的游戏日志并跟随刷新',
+    disabled: true,
+    onClick: () => {
+      const item = (data.items || []).find((entry) => entry.source === 'game' && entry.name === 'latest.log')
+      if (item) loadLog(item)
+      else t.toast('还没有生成游戏 latest.log', 'warn')
+    }
+  })
   container.appendChild(tabEl(
     barEl(fileSelect, backBtn,
       btn('刷新', { size: 'sm', iconName: 'refresh', onClick: () => load(true) }),
       btn('复制', { size: 'sm', iconName: 'copy', onClick: copyLog }),
       btn('下载', { size: 'sm', iconName: 'download', onClick: downloadLog }),
+      liveBtn,
       spacer(), statusDot, statusText, autoSwitch.el,
-      btn('打开日志目录', { size: 'sm', iconName: 'folder-open', onClick: () => t.openPath(data.logsDir || t.inst.paths?.logsDir || '') })),
+      btn('游戏日志目录', { size: 'sm', iconName: 'folder-open', onClick: () => t.openPath(data.gameLogDir || (t.inst.paths?.gameDir || '') + '/logs') }),
+      btn('启动器日志目录', { size: 'sm', iconName: 'terminal', onClick: () => t.openPath(data.logsDir || t.inst.paths?.logsDir || '') })),
     hints,
     h('div', { class: 'lp-log-view' }, title, pane),
     crashCard
   ))
+  function paintStatus(status) {
+    liveStatus = status
+    const running = !!status?.running
+    const session = status?.session
+    statusDot.className = 'dot' + (running ? ' ok' : '')
+    statusText.textContent = running
+      ? (session?.detected
+        ? `已接管外部进程 · PID ${session.pid || '?'} · 日志自动跟随`
+        : `游戏运行中${session?.pid ? ' · PID ' + session.pid : ''}`)
+      : '游戏未运行'
+    statusText.title = running ? (session?.logFile || '') : ''
+  }
   async function load(initial = false) {
     try {
-      const result = await t.api.content(t.id, 'logs')
+      const [result, status] = await Promise.all([
+        t.api.content(t.id, 'logs'),
+        t.api.instanceStatus(t.id).catch(() => null)
+      ])
       if (t.life.dead) return
+      paintStatus(status)
       data = result || { items: [], crashes: [] }
       fillSelect()
       fillCrashes()
+      liveBtn.disabled = !(data.items || []).some((item) => item.source === 'game' && item.name === 'latest.log')
       if (!data.items?.length) {
         current = null
         mode = 'log'
@@ -1413,7 +1448,11 @@ async function mountLogs(container, t) {
         return
       }
       const keep = current && data.items.find((item) => item.name === current.name && item.source === current.source)
-      const pick = keep || data.items[0]
+      const runningGameLog = status?.running
+        ? data.items.find((item) => item.source === 'game' && item.name === 'latest.log')
+        : null
+      // 检测到正在运行的外部进程时，默认接入游戏 latest.log；用户已经选过文件则保持。
+      const pick = keep || runningGameLog || data.items[0]
       if (initial || !keep) await loadLog(pick, { silent: !initial })
     } catch (error) {
       if (t.life.dead) return
@@ -1504,9 +1543,8 @@ async function mountLogs(container, t) {
     try {
       const status = await t.api.instanceStatus(t.id)
       if (t.life.dead) return
+      paintStatus(status)
       const running = !!status?.running
-      statusDot.className = 'dot' + (running ? ' ok' : '')
-      statusText.textContent = running ? '游戏运行中' : '游戏未运行'
       if (auto && running) {
         if (!data.items?.length) await load(false)
         else if (mode === 'log' && current) await loadLog(current, { silent: true })

@@ -91,6 +91,9 @@ const state = {
   selectedId: '',
   accounts: { selected: '', items: [] },
   sessions: [],
+  detection: null,
+  detectionErrorShown: false,
+  stoppingIds: new Set(),
   jobs: [],
   communityJobs: [],
   detail: null,
@@ -117,6 +120,7 @@ const state = {
   launchInflight: new Map(),
   launchErrorToasts: new Map(),
   overviewLaunchSlot: null,
+  runningPanelSlot: null,
   pollTimer: null,
   backgroundTimer: null,
   setupOpen: false
@@ -129,6 +133,7 @@ let helpers = {}
 let instanceListEl = null
 let accountWrapEl = null
 let countEl = null
+let runCountEl = null
 let navWrapEl = null
 let searchInputEl = null
 let lastPollAt = 0
@@ -172,6 +177,22 @@ function sessionLabel(session) {
     stopped: '已停止',
     failed: '异常退出'
   }[session.status] || session.status
+}
+
+function runningSessions() {
+  return (state.sessions || []).filter(isRunningSession)
+}
+
+/** 「外部进程」= 启动器重启后从系统进程表接管的游戏，不是本次内存 session。 */
+function sessionSourceLabel(session) {
+  return session?.detected ? '外部进程' : '启动器启动'
+}
+
+function sessionRuntimeText(session) {
+  if (!session) return ''
+  const parts = [sessionLabel(session), sessionSourceLabel(session)]
+  if (session.pid) parts.push('PID ' + session.pid)
+  return parts.join(' · ')
 }
 
 /* ------------------------------------------------------------------ */
@@ -587,13 +608,16 @@ function buildSkeleton() {
   const head = h('div', { class: 'lp-side-head' },
     h('div', { class: 'lp-side-title' },
       h('span', { class: 'overline' }, 'Launch Bay'),
-      h('h1', {}, '游戏实例 ', h('span', { class: 'lp-count', id: 'lpCount' }))
+      h('h1', {}, h('span', { class: 'lp-side-name' }, '游戏实例 '),
+        h('span', { class: 'lp-count', id: 'lpCount' }),
+        h('span', { class: 'lp-run-count', id: 'lpRunCount', hidden: true }))
     ),
     h('button', { class: 'lp-new', type: 'button', title: '安装新的 Minecraft 实例' },
       icon('add', { size: 15 }), h('span', {}, '新建实例'))
   )
   head.querySelector('.lp-new').onclick = () => showView('install')
   countEl = head.querySelector('#lpCount')
+  runCountEl = head.querySelector('#lpRunCount')
 
   accountWrapEl = h('div', { class: 'lp-account-slot' })
 
@@ -657,11 +681,21 @@ async function loadBootstrap({ silent = false } = {}) {
   state.accounts = data.accounts || { selected: '', items: [] }
   state.community = data.community || null
   state.sessions = data.sessions || []
+  state.detection = data.detection || null
+  if (state.detection?.error && !state.detectionErrorShown) {
+    state.detectionErrorShown = true
+    toast(state.detection.error, 'warn')
+  } else if (!state.detection?.error) {
+    state.detectionErrorShown = false
+  }
   state.jobs = data.jobs || []
   // 实例被删除后，旧的启动状态不再有意义。
   const alive = new Set(state.instances.map((item) => item.id))
   for (const key of [...state.launchStates.keys()]) {
     if (!alive.has(key)) state.launchStates.delete(key)
+  }
+  for (const id of [...state.stoppingIds]) {
+    if (!state.sessions.some((item) => item.instanceId === id && item.status === 'stopping')) state.stoppingIds.delete(id)
   }
   const exists = state.instances.some((item) => item.id === state.selectedId)
   if (!exists) state.selectedId = data.selectedInstance || state.instances[0]?.id || ''
@@ -781,7 +815,7 @@ function renderInstanceList() {
       role: 'option',
       'aria-selected': String(active),
       dataset: { instId: inst.id },
-      title: `${inst.name}\n${ui.instanceSubtitle(inst)}`
+      title: `${inst.name}\n${ui.instanceSubtitle(inst)}` + (running ? `\n${sessionRuntimeText(session)}` : '')
     },
       ui.instanceIcon(inst, { size: 34, running }),
       h('span', { class: 'lp-inst-main' },
@@ -789,7 +823,7 @@ function renderInstanceList() {
         h('span', { class: 'lp-inst-sub' }, ui.instanceSubtitle(inst), inst.group ? h('i', { class: 'lp-inst-group' }, inst.group) : null)
       ),
       h('span', { class: 'lp-inst-side' },
-        running ? h('span', { class: 'lp-run-dot', title: sessionLabel(session) }) : null,
+        running ? h('span', { class: 'lp-run-dot', title: sessionRuntimeText(session) }) : null,
         !inst.installed ? h('span', { class: 'lp-warn-dot', title: '需要修复' }) : null
       )
     )
@@ -806,18 +840,32 @@ function renderInstanceList() {
 }
 
 function updateRunningIndicators() {
+  const running = runningSessions()
+  if (runCountEl) {
+    runCountEl.hidden = !running.length
+    runCountEl.textContent = running.length ? `${running.length} 运行中` : ''
+    runCountEl.title = [
+      ...running.map((session) => {
+        const inst = state.instances.find((item) => item.id === session.instanceId)
+        return `${inst?.name || session.instanceName || session.instanceId} · ${sessionRuntimeText(session)}`
+      }),
+      state.detection?.error || ''
+    ].filter(Boolean).join('\n')
+    runCountEl.classList.toggle('warn', !!state.detection?.error && !running.length)
+  }
   if (!instanceListEl) return
   for (const row of instanceListEl.querySelectorAll('[data-inst-id]')) {
     const session = sessionOf(row.dataset.instId)
-    const running = isRunningSession(session)
-    row.classList.toggle('running', running)
+    const isRunning = isRunningSession(session)
+    row.classList.toggle('running', isRunning)
+    row.querySelector('.lp-inst-icon')?.classList.toggle('running', isRunning)
     let dot = row.querySelector('.lp-run-dot')
-    if (running && !dot) {
+    if (isRunning && !dot) {
       dot = h('span', { class: 'lp-run-dot' })
       row.querySelector('.lp-inst-side')?.appendChild(dot)
     }
-    if (!running && dot) dot.remove()
-    if (dot) dot.title = sessionLabel(session)
+    if (!isRunning && dot) dot.remove()
+    if (dot) dot.title = sessionRuntimeText(session)
   }
 }
 
@@ -1056,6 +1104,9 @@ function renderHeroAndTabs() {
 }
 
 function heroMode(inst, session, launch) {
+  // 接管的外部进程优先：即使内存里还留着上一次失败的 launch 状态，
+  // 只要系统进程表里这个实例确实在运行，就应该显示运行中/停止按钮。
+  if (session?.detected && isRunningSession(session)) return 'running'
   if (isPreparingLaunch(launch)) return 'preparing'
   if (launch?.status === 'failed') return 'failed'
   if (launch?.status === 'running') return 'running'
@@ -1064,12 +1115,23 @@ function heroMode(inst, session, launch) {
   return 'idle'
 }
 
+function heroLastText(inst, session) {
+  if (session && isRunningSession(session)) return session.detected ? '正在运行（外部进程）' : '正在运行'
+  return ui.lastPlayed(inst.lastPlayed)
+}
+
 function heroStatusText(inst, session, launch, mode) {
   if (mode === 'preparing') {
     const phase = launch?.phaseLabel || LAUNCH_PHASE_LABELS[launch?.phase] || ''
     return phase ? `准备启动 · ${phase}` : '正在启动…'
   }
-  if (mode === 'running') return sessionLabel(session) || (launch?.status === 'running' ? '运行中' : '准备就绪')
+  if (mode === 'running') {
+    if (!session) return launch?.status === 'running' ? '运行中' : '准备就绪'
+    if (session.status === 'stopping') return '正在停止游戏…'
+    const source = session.detected ? '已接管外部进程' : '运行中'
+    const pid = session.pid ? ` · PID ${session.pid}` : ''
+    return source + pid
+  }
   if (mode === 'failed') return '启动失败'
   if (launch?.status === 'cancelled') return '已取消启动'
   if (launch?.status === 'exited') return '游戏已退出'
@@ -1082,6 +1144,15 @@ function launchPaintKey(mode, launch, stopping) {
 
 /** 服务端没有 launch 时，用 session.failed 合成一个可展示的失败状态。 */
 function heroLaunchState(inst, session) {
+  if (session?.detected && (session.status === 'running' || session.status === 'stopping')) {
+    return {
+      instanceId: inst.id,
+      status: 'running',
+      detail: '已接管外部游戏进程',
+      progress: 100,
+      indeterminate: false
+    }
+  }
   const launch = launchOf(inst.id)
   if (launch) return launch
   if (session?.status === 'failed') {
@@ -1159,7 +1230,7 @@ function buildLaunchProgress(inst) {
       bar.state('ok')
       bar.set(100)
       phase.textContent = session
-        ? `${sessionLabel(session)} · ${fmtDuration(Math.max(0, (session.elapsed || 0) / 1000))}`
+        ? `${sessionSourceLabel(session)} · 已运行 ${fmtDuration(Math.max(0, (session.elapsed || 0) / 1000))} · 日志可从「日志」页接入`
         : '游戏进程正在运行'
       errorLine.hidden = true
       return
@@ -1204,6 +1275,14 @@ function renderHero(inst, detail, session) {
 
   const launchProgress = buildLaunchProgress(inst)
   const launchBtn = h('button', { class: 'lp-launch' + (mode === 'running' ? ' stop' : ''), type: 'button' })
+  const launchMoreBtn = btn('再开一个', {
+    size: 'sm',
+    iconName: 'add',
+    class: 'lp-launch-more',
+    title: '保持当前实例运行，再启动另一个实例',
+    onClick: () => openLaunchAnother(inst)
+  })
+  launchMoreBtn.hidden = mode !== 'running'
   function paintLaunch(currentMode = mode, isStopping = stopping) {
     const currentLaunch = launchOf(inst.id)
     clear(launchBtn)
@@ -1211,10 +1290,12 @@ function renderHero(inst, detail, session) {
     launchBtn.removeAttribute('aria-busy')
     launchBtn.className = 'lp-launch' + (currentMode === 'running' ? ' stop' : '')
     launchBtn.onclick = null
+    launchMoreBtn.hidden = currentMode !== 'running'
+    launchMoreBtn.disabled = isStopping
     if (currentMode === 'running') {
       launchBtn.append(icon('stop', { size: 17 }), h('span', {}, isStopping ? '正在停止…' : '停止游戏'))
       launchBtn.disabled = isStopping
-      launchBtn.onclick = () => stopSelected()
+      launchBtn.onclick = () => stopInstanceById(inst)
       return
     }
     if (currentMode === 'preparing') {
@@ -1232,14 +1313,17 @@ function renderHero(inst, detail, session) {
   paintLaunch()
   launchProgress.paint(heroLaunchState(inst, session), session)
   const account = selectedAccount()
-  const accountLine = h('span', { class: 'lp-launch-sub' }, account ? `以 ${account.name} 登录` : '需要先添加账户')
+  const accountLine = h('span', { class: 'lp-launch-sub' },
+    mode === 'running' && session?.detected
+      ? '外部进程运行中，账户信息不可用'
+      : account ? `以 ${account.name} 登录` : '需要先添加账户')
 
   const settingsBtn = iconBtn('settings', { label: '实例设置', title: '实例设置', onClick: () => openInstanceSettings(inst) })
   const folderBtn = iconBtn('folder-open', { label: '打开游戏目录', title: '打开游戏目录', onClick: () => openPath(detail.paths?.gameDir || inst.paths?.gameDir || '') })
   const moreBtn = iconBtn('more', { label: '更多操作', title: '更多操作', onClick: (e) => openInstanceMenu(e, inst) })
 
   actionWrap.append(
-    h('div', { class: 'lp-launch-wrap' }, launchBtn, launchProgress.root, accountLine),
+    h('div', { class: 'lp-launch-wrap' }, launchBtn, launchMoreBtn, launchProgress.root, accountLine),
     h('div', { class: 'lp-hero-tools' }, settingsBtn, folderBtn, moreBtn)
   )
 
@@ -1254,7 +1338,8 @@ function renderHero(inst, detail, session) {
     h('div', { class: 'lp-hero-main' },
       h('span', { class: 'overline' }, inst.group || 'Instance'),
       h('h1', { title: inst.name }, inst.name),
-      h('div', { class: 'lp-hero-sub' }, ui.instanceSubtitle(inst), h('span', { class: 'lp-dot-sep' }, '·'), ui.lastPlayed(inst.lastPlayed)),
+      h('div', { class: 'lp-hero-sub' }, ui.instanceSubtitle(inst), h('span', { class: 'lp-dot-sep' }, '·'),
+        h('span', { class: 'lp-hero-last' }, heroLastText(inst, session))),
       badges,
       status
     ),
@@ -1266,6 +1351,7 @@ function renderHero(inst, detail, session) {
     status,
     statusText,
     elapsed,
+    accountLine,
     paintLaunch,
     paintProgress: launchProgress.paint,
     progress: launchProgress.root,
@@ -1291,6 +1377,14 @@ function updateHeroRuntime() {
       (mode === 'running' ? ' running' : mode === 'preparing' ? ' preparing' : mode === 'failed' ? ' failed' : '')
   }
   if (refs.statusText) refs.statusText.textContent = heroStatusText(inst, session, launch, mode)
+  const last = refs.root?.querySelector('.lp-hero-last')
+  if (last) last.textContent = heroLastText(inst, session)
+  if (refs.accountLine) {
+    const account = selectedAccount()
+    refs.accountLine.textContent = mode === 'running' && session?.detected
+      ? '外部进程运行中，账户信息不可用'
+      : account ? `以 ${account.name} 登录` : '需要先添加账户'
+  }
   if (refs.elapsed) {
     refs.elapsed.textContent = mode === 'running' ? fmtDuration(Math.max(0, (session?.elapsed || 0) / 1000)) : ''
   }
@@ -1522,6 +1616,12 @@ async function renderOverview(container, inst) {
   const detail = state.detail
   const summary = detail?.summary || {}
   const session = sessionOf(inst.id)
+  // 全宽显示所有正在运行的实例（含启动器重启后接管的外部进程）。
+  const runningSlot = h('div', { class: 'lp-running-slot' })
+  state.runningPanelSlot = runningSlot
+  container.appendChild(runningSlot)
+  paintRunningPanel()
+
   const grid = h('div', { class: 'lp-overview-grid' })
   const left = h('div', { class: 'lp-overview-col' })
   const right = h('div', { class: 'lp-overview-col' })
@@ -1539,7 +1639,7 @@ async function renderOverview(container, inst) {
     const live = h('div', { class: 'lp-live-console' })
     left.appendChild(ui.sectionCard({
       title: '游戏运行中',
-      subtitle: `${sessionLabel(session)} · ${fmtDuration(Math.max(0, (session.elapsed || 0) / 1000))}`,
+      subtitle: `${sessionSourceLabel(session)}${session.pid ? ' · PID ' + session.pid : ''} · ${fmtDuration(Math.max(0, (session.elapsed || 0) / 1000))}`,
       actions: btn('查看完整日志', { size: 'sm', iconName: 'terminal', onClick: () => setTab('logs') }),
       body: live
     }))
@@ -1635,7 +1735,7 @@ async function renderOverview(container, inst) {
   const logSlot = h('div', { class: 'lp-log-preview' }, h('div', { class: 'lp-tab-loading' }, spinner(12), '读取日志…'))
   right.appendChild(ui.sectionCard({
     title: '最近日志',
-    subtitle: '启动器捕获的 stdout / stderr',
+    subtitle: session?.detected ? '外部进程 · 跟随游戏 latest.log' : '启动器捕获的 stdout / stderr',
     actions: h('div', { class: 'lp-row-actions' },
       iconBtn('refresh', { size: 13, label: '刷新日志', onClick: () => loadRecentLog(logSlot, inst) }),
       btn('完整日志', { size: 'sm', iconName: 'terminal', onClick: () => setTab('logs') })
@@ -1661,6 +1761,89 @@ async function renderOverview(container, inst) {
     quick.appendChild(b)
   }
   left.appendChild(ui.sectionCard({ title: '快捷操作', body: quick }))
+}
+
+function runningPanelSignature(list) {
+  return list.map((session) => `${session.instanceId}:${session.pid}:${session.status}:${session.detected ? 1 : 0}`).join('|') +
+    `|${state.detection?.error || ''}|${state.selectedId}|${state.stoppingIds.size}`
+}
+
+/** 全宽的「正在运行」面板；同时接管的多个实例都在这里逐行管理。 */
+function paintRunningPanel() {
+  const slot = state.runningPanelSlot
+  if (!slot || !slot.isConnected) return
+  const list = runningSessions().sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0))
+  const signature = runningPanelSignature(list)
+  if (slot.dataset.sig === signature) {
+    for (const el of slot.querySelectorAll('[data-run-elapsed]')) {
+      const session = list.find((item) => item.instanceId === el.dataset.runElapsed)
+      if (session) el.textContent = `已运行 ${fmtDuration(Math.max(0, (session.elapsed || 0) / 1000))}`
+    }
+    return
+  }
+  slot.dataset.sig = signature
+  clear(slot)
+  if (!list.length) {
+    slot.hidden = true
+    return
+  }
+  slot.hidden = false
+  const rows = h('div', { class: 'lp-run-list' })
+  for (const session of list) {
+    const target = state.instances.find((item) => item.id === session.instanceId)
+    const name = target?.name || session.instanceName || session.instanceId
+    const stopping = session.status === 'stopping' || state.stoppingIds.has(session.instanceId)
+    rows.appendChild(h('div', { class: 'lp-run-row' + (session.instanceId === state.selectedId ? ' active' : '') },
+      ui.instanceIcon(target || { mc: '?' }, { size: 30, running: true }),
+      h('div', { class: 'lp-run-main' },
+        h('b', { title: name }, name),
+        h('span', { class: 'lp-run-meta' },
+          `${sessionSourceLabel(session)} · PID ${session.pid || '?'} · `,
+          h('i', { dataset: { runElapsed: session.instanceId } }, `已运行 ${fmtDuration(Math.max(0, (session.elapsed || 0) / 1000))}`)
+        )
+      ),
+      h('div', { class: 'lp-run-actions' },
+        session.instanceId === state.selectedId
+          ? h('span', { class: 'badge accent' }, '当前')
+          : btn('切换', { size: 'xs', onClick: () => selectInstance(session.instanceId) }),
+        btn('日志', { size: 'xs', iconName: 'terminal', onClick: () => selectInstance(session.instanceId, { tab: 'logs' }) }),
+        btn(stopping ? '停止中' : '停止', {
+          size: 'xs',
+          variant: 'danger',
+          iconName: 'stop',
+          disabled: stopping,
+          onClick: () => stopInstanceById(target || { id: session.instanceId, name })
+        })
+      )
+    ))
+  }
+  const body = h('div', {},
+    rows,
+    state.detection?.error ? h('div', { class: 'lp-hint bad' }, state.detection.error) : null
+  )
+  slot.appendChild(ui.sectionCard({
+    title: `正在运行 ${list.length} 个实例`,
+    subtitle: '不同实例可同时运行；停止只影响这一行，日志会自动跟随游戏 latest.log',
+    className: 'lp-running-card',
+    actions: h('div', { class: 'lp-row-actions' },
+      btn('重新检测', { size: 'sm', iconName: 'refresh', onClick: () => refreshDetection() }),
+      btn('再开一个', { size: 'sm', iconName: 'add', onClick: () => openLaunchAnother(selectedInstance()) })
+    ),
+    body
+  }))
+}
+
+/** 强制重新扫描进程表；用于手动刷新和打开面板时纠正缓存。 */
+async function refreshDetection({ silent = false } = {}) {
+  try {
+    const data = await api.running(true)
+    if (data?.detection) state.detection = data.detection
+    await pollStatus(true)
+    if (data?.detection?.error) toast(data.detection.error, 'warn')
+    else if (!silent) toast(`检测完成：${data?.runningCount || 0} 个实例在运行`, 'ok')
+  } catch (e) {
+    toast('实例检测失败：' + e.message, 'err')
+  }
 }
 
 function javaShort(path) {
@@ -1749,6 +1932,11 @@ function paintNews(slot, compact) {
 async function launchSelected() {
   const inst = selectedInstance()
   if (!inst) { showView('install'); return }
+  return await launchInstance(inst)
+}
+
+async function launchInstance(inst) {
+  if (!inst) { showView('install'); return }
   // 未安装完成也允许发起一次启动：后端会返回 VERSION_JSON_MISSING /
   // MISSING_FILES 等结构化错误，前端给出「检查并修复文件」等操作，
   // 比只弹一个“尚未安装”的 toast 更可操作。
@@ -1827,17 +2015,101 @@ function showLaunchError(error, inst, { launch = null } = {}) {
   })
 }
 
+function markSessionStopping(instanceId) {
+  state.sessions = state.sessions.map((session) => session.instanceId === instanceId
+    ? { ...session, status: 'stopping', stopping: true }
+    : session)
+  updateRunningIndicators()
+  updateHeroRuntime()
+  paintRunningPanel()
+}
+
+/**
+ * 停止指定实例。外部接管的进程先请求正常关闭，超时由服务端强制结束；
+ * 本启动器拉起的进程沿用原来的快速停止。其它实例不受影响。
+ */
+async function stopInstanceById(inst, { confirm = true } = {}) {
+  if (!inst?.id) return
+  const session = sessionOf(inst.id)
+  if (!isRunningSession(session)) {
+    toast('游戏未在运行', 'warn')
+    return
+  }
+  if (session.status === 'stopping') return
+  if (session.status === 'starting') {
+    await cancelPreparingLaunch(inst)
+    return
+  }
+  const external = session.detected === true
+  const name = inst.name || session.instanceName || '实例'
+  const message = external
+    ? `关闭「${name}」的外部游戏进程（PID ${session.pid || '?'}）？启动器会先请求游戏正常退出，8 秒后仍未退出会强制结束；其它正在运行的实例不受影响。`
+    : `停止「${name}」的游戏进程？未保存的世界进度可能丢失；其它正在运行的实例不受影响。`
+  if (confirm && !(await confirmDialog(message, { danger: true, okText: external ? '关闭游戏' : '停止游戏' }))) return
+  state.stoppingIds.add(inst.id)
+  markSessionStopping(inst.id)
+  try {
+    const result = await api.stop(inst.id, external ? false : true)
+    if (result && result.ok === false) throw new Error(result.error || '服务端未能停止游戏')
+    toast(external ? '已请求关闭游戏，正在等待进程退出' : '已请求停止游戏', 'ok')
+  } catch (e) {
+    state.stoppingIds.delete(inst.id)
+    toast('停止失败：' + e.message, 'err')
+  } finally {
+    await pollStatus(true)
+  }
+}
+
 async function stopSelected() {
   const inst = selectedInstance()
   if (!inst) return
-  if (!(await confirmDialog(`停止「${inst.name}」的游戏进程？未保存的世界进度可能丢失。`, { danger: true, okText: '停止游戏' }))) return
-  try {
-    await api.stop(inst.id, true)
-    toast('已请求停止游戏', 'ok')
-    await pollStatus(true)
-  } catch (e) {
-    toast('停止失败：' + e.message, 'err')
+  await stopInstanceById(inst)
+}
+
+/** 「再开一个」：保持当前实例运行，从其它已安装实例里选一个启动。 */
+function openLaunchAnother(current = null) {
+  const busy = new Set(runningSessions().map((session) => session.instanceId))
+  const candidates = state.instances.filter((inst) => inst.installed && !busy.has(inst.id) && !isPreparingLaunch(launchOf(inst.id)))
+  let modal = null
+  const body = h('div', { class: 'lp-launch-another' })
+  if (candidates.length) {
+    body.appendChild(h('div', { class: 'lp-launch-another-note' },
+      `当前有 ${busy.size} 个实例在运行。选择另一个实例启动，两个客户端会同时保持运行。`))
+    const list = h('div', { class: 'lp-launch-another-list' })
+    for (const inst of candidates) {
+      list.appendChild(h('div', { class: 'lp-launch-another-row' },
+        ui.instanceIcon(inst, { size: 34 }),
+        h('div', { class: 'lp-launch-another-main' },
+          h('b', { title: inst.name }, inst.name),
+          h('span', {}, ui.instanceSubtitle(inst))
+        ),
+        btn('启动', {
+          size: 'sm',
+          variant: 'primary',
+          iconName: 'play',
+          onClick: async () => {
+            try { modal?.close() } catch {}
+            if (state.selectedId !== inst.id) await selectInstance(inst.id)
+            await launchInstance(inst)
+          }
+        })
+      ))
+    }
+    body.appendChild(list)
+    body.appendChild(h('div', { class: 'lp-hint' },
+      '同一个实例仍只允许一个进程，避免存档与 options.txt 互相覆盖；要同版本多开，请先停止再复制实例。'))
+  } else {
+    body.appendChild(ui.emptyBlock('没有可再开的实例',
+      '所有已安装实例都在运行。要同时开同一个版本，请先停止其中一个，再复制实例（复制后存档与配置独立）。',
+      btn('新建实例', { size: 'sm', iconName: 'add', onClick: () => { try { modal?.close() } catch {}; showView('install') } }),
+      'cube'))
   }
+  modal = openModal({
+    title: '再开一个实例',
+    size: 'md',
+    body,
+    buttons: [{ label: '关闭', class: 'btn-ghost' }]
+  })
 }
 
 async function repairInstance(inst) {
@@ -2189,10 +2461,11 @@ function openInstanceMenu(e, inst) {
   const rect = e?.currentTarget?.getBoundingClientRect?.() || null
   const x = pointer ? e.clientX : (rect ? rect.right - 8 : 0)
   const y = pointer ? e.clientY : (rect ? rect.bottom + 4 : 0)
-  const running = isRunningSession(sessionOf(inst.id))
+  const runningSession = sessionOf(inst.id)
+  const running = isRunningSession(runningSession)
   const busy = isPreparingLaunch(launchOf(inst.id))
   const primary = running
-    ? { label: '停止游戏', iconName: 'stop', danger: true, onClick: () => stopSelected() }
+    ? { label: runningSession?.detected ? '关闭游戏进程' : '停止游戏', iconName: 'stop', danger: true, onClick: () => stopInstanceById(inst) }
     : busy
       ? { label: '正在启动…', iconName: 'play', disabled: true, onClick: () => {} }
       : {
@@ -2206,6 +2479,10 @@ function openInstanceMenu(e, inst) {
     label: inst.name,
     items: [
       primary,
+      ...(running ? [
+        { label: '查看实时日志', iconName: 'terminal', onClick: () => selectInstance(inst.id, { tab: 'logs' }) },
+        { label: '再开一个实例', iconName: 'add', onClick: () => openLaunchAnother(inst) }
+      ] : []),
       { label: '实例设置', iconName: 'settings', onClick: () => openInstanceSettings(inst) },
       { label: '打开游戏目录', iconName: 'folder-open', onClick: () => openPath(inst.paths?.gameDir || '') },
       { label: '打开日志目录', iconName: 'terminal', onClick: () => openPath(inst.paths?.logsDir || '') },
@@ -2402,8 +2679,12 @@ async function pollStatus(force = false) {
     ])
     const previousSessions = state.sessions
     state.sessions = data.sessions || []
+    state.detection = data.detection || state.detection
     state.jobs = data.jobs || []
     state.communityJobs = community.items || []
+    for (const id of [...state.stoppingIds]) {
+      if (!state.sessions.some((item) => item.instanceId === id && isRunningSession(item))) state.stoppingIds.delete(id)
+    }
     // 旧服务端/启动状态缺失时，用 session.failed 兜底显示持久诊断，主动停止不会触发。
     const before = previousSessions.find((item) => item.instanceId === state.selectedId)
     const after = state.sessions.find((item) => item.instanceId === state.selectedId)
@@ -2419,6 +2700,7 @@ async function pollStatus(force = false) {
     }
     updateRunningIndicators()
     updateHeroRuntime()
+    paintRunningPanel()
     detectJobChanges()
     emitStatus()
   } catch {}
@@ -2562,14 +2844,19 @@ function destroy() {
 function commandItems() {
   const inst = selectedInstance()
   const account = selectedAccount()
+  const selectedRunning = isRunningSession(sessionOf(inst?.id))
+  const runningCount = runningSessions().length
   const items = [
     {
       group: '启动器',
-      label: inst ? `启动 ${inst.name}` : '新建 Minecraft 实例',
+      label: inst ? (selectedRunning ? `停止 ${inst.name}` : `启动 ${inst.name}`) : '新建 Minecraft 实例',
       hint: inst && account ? account.name : '需要账户',
-      iconName: 'play',
-      run: () => inst ? (isRunningSession(sessionOf(inst.id)) ? stopSelected() : launchSelected()) : showView('install')
+      iconName: selectedRunning ? 'stop' : 'play',
+      run: () => inst ? (selectedRunning ? stopSelected() : launchSelected()) : showView('install')
     },
+    ...(runningCount
+      ? [{ group: '启动器', label: '再开一个实例', hint: `${runningCount} 个运行中`, iconName: 'add', run: () => openLaunchAnother(inst) }]
+      : []),
     { group: '启动器', label: '下载中心', iconName: 'download', run: () => showView('downloads') },
     { group: '启动器', label: '新建实例 / 安装版本', iconName: 'add', run: () => showView('install') },
     { group: '启动器', label: '账户管理', hint: account ? account.name : '未登录', iconName: 'user', run: () => openAccounts() },

@@ -140,30 +140,44 @@ function parseQuiltMeta(buf) {
   }
 }
 
-function parseModsToml(buf) {
+/** 读取 TOML 的单行字符串值；双引号值里允许出现单引号（Xaero's Minimap）。 */
+function tomlString(block, key) {
+  const re = new RegExp(`^\\s*${key}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'im')
+  const match = re.exec(block)
+  return match ? (match[1] ?? match[2] ?? '') : ''
+}
+
+function parseModsToml(buf, { neo = false } = {}) {
   const text = buf.toString('utf8')
-  const isNeo = /neoforge/i.test(text) || / NeoForge/i.test(text)
+  // 不能从正文里找 “neoforge”：很多 Forge 模组的描述会写 “NeoForge port”。
+  // 加载器只由文件名决定（META-INF/neoforge.mods.toml）。
+  const isNeo = neo === true
   // 只从 [[mods]] 块里取 modid：TOML 允许 [[dependencies.*]] 排在 [[mods]] 之前，
   // 直接全文找第一个 modId 会把依赖 ID 当成宿主 modid，依赖它的模组全部误报缺失。
   const modBlocks = [...text.matchAll(/\[\[mods\]\]([\s\S]*?)(?=\n\s*\[\[|$)/gi)]
   const mods = []
   for (const match of modBlocks) {
     const block = match[1]
-    const id = /^\s*modId\s*=\s*["']([^"']+)["']/im.exec(block)?.[1]
+    const id = tomlString(block, 'modId')
     if (!id) continue
     mods.push({
       modid: id,
-      name: /^\s*displayName\s*=\s*["']([^"']+)["']/im.exec(block)?.[1] || id,
-      version: (/^\s*version\s*=\s*["']([^"']+)["']/im.exec(block)?.[1] || '').replace(/\$\{[^}]+\}/g, '')
+      name: tomlString(block, 'displayName') || id,
+      version: tomlString(block, 'version').replace(/\$\{[^}]+\}/g, '')
     })
   }
   if (!mods.length) return null
   const dependencies = []
   // Forge/NeoForge 用重复的 [[dependencies.<modid>]] 块；type / side 必须一起解析，
   // 否则 optional、incompatible、仅客户端依赖都会被当成「必需依赖」。
-  const blocks = [...text.matchAll(/\[\[dependencies\.[^\]]+\]\]([\s\S]*?)(?=\n\s*\[\[|$)/gi)]
+  // 只接受属于本 jar 已声明 modId 的依赖块：有些 jar 会留下 [[dependencies.子模块]]
+  // 却并没有对应的 [[mods]]，把这类块算到宿主头上会造成「xaerolib 缺失」这类误报。
+  const owners = new Set(mods.map((item) => String(item.modid).toLowerCase()))
+  const blocks = [...text.matchAll(/\[\[dependencies\.([^\]]+)\]\]([\s\S]*?)(?=\n\s*\[\[|$)/gi)]
   for (const match of blocks) {
-    const block = match[1]
+    const owner = String(match[1] || '').trim().replace(/^["']|["']$/g, '').toLowerCase()
+    if (owner && owners.size && !owners.has(owner)) continue
+    const block = match[2]
     const id = /^\s*modId\s*=\s*["']([^"']+)["']/im.exec(block)?.[1]
     if (!id) continue
     const range = /^\s*versionRange\s*=\s*["']([^"']*)["']/im.exec(block)?.[1] || ''
@@ -238,15 +252,61 @@ export async function readForgeAnnotationInfo(filePath) {
   return { mods, modid: mods[0]?.modid || null, modids: mods.map(m => m.modid), version: mods[0]?.version || null, environment: mods.length && mods.every(m => m.clientSideOnly === 1) ? 'client' : '*', dependencies: uniqueDependencies(dependencies) }
 }
 
+function metaRank(file, runtime = {}) {
+  const loader = String(runtime.loader || '').toLowerCase()
+  const forgeLike = loader === 'forge' || loader === 'neoforge' || loader === 'cleanroom'
+  const fabricLike = loader === 'fabric' || loader === 'quilt' || loader === 'legacy-fabric'
+  if (runtime.mc === '1.12.2') {
+    if (file === 'mcmod.info') return 0
+    if (file.endsWith('mods.toml')) return 1
+    if (file === 'fabric.mod.json') return 3
+    if (file === 'quilt.mod.json') return 4
+    return 9
+  }
+  if (loader === 'neoforge') {
+    if (file === 'META-INF/neoforge.mods.toml') return 0
+    if (file === 'META-INF/mods.toml') return 1
+    if (file === 'mcmod.info') return 2
+    if (file === 'fabric.mod.json') return 5
+    if (file === 'quilt.mod.json') return 6
+    return 9
+  }
+  if (forgeLike) {
+    if (file === 'META-INF/mods.toml') return 0
+    if (file === 'META-INF/neoforge.mods.toml') return 1
+    if (file === 'mcmod.info') return 2
+    if (file === 'fabric.mod.json') return 5
+    if (file === 'quilt.mod.json') return 6
+    return 9
+  }
+  if (fabricLike) {
+    if (file === 'fabric.mod.json') return 0
+    if (file === 'quilt.mod.json') return 1
+    if (file.endsWith('mods.toml')) return 5
+    if (file === 'mcmod.info') return 6
+    return 9
+  }
+  // 加载器未知时保持旧行为（Fabric 元数据优先），避免改变客户端模组库扫描结果。
+  if (file === 'fabric.mod.json') return 0
+  if (file === 'quilt.mod.json') return 1
+  if (file === 'META-INF/neoforge.mods.toml') return 2
+  if (file === 'META-INF/mods.toml') return 3
+  if (file === 'mcmod.info') return 4
+  return 9
+}
+
 async function readPrimaryModMeta(filePath, runtime = {}) {
   const entries = await readJarEntries(filePath, META_FILES)
-  const ordered = Object.entries(entries).sort(([a], [b]) => runtime.mc === '1.12.2' ? Number(b === 'mcmod.info') - Number(a === 'mcmod.info') : 0)
+  // 同一个 jar 可能同时带 fabric.mod.json 与 META-INF/mods.toml（多加载器构建）。
+  // 必须按当前实例的加载器选元数据；Forge 实例读 Fabric 的 depends 会凭空
+  // 产生 fabric-api / fabric-lifecycle-events 等假依赖。
+  const ordered = Object.entries(entries).sort(([a], [b]) => metaRank(a, runtime) - metaRank(b, runtime))
   for (const [file, buf] of ordered) {
     if (!buf) continue
     try {
       if (file === 'fabric.mod.json') return parseFabricMeta(buf)
       if (file === 'quilt.mod.json') return parseQuiltMeta(buf)
-      if (file.endsWith('mods.toml')) return parseModsToml(buf)
+      if (file.endsWith('mods.toml')) return parseModsToml(buf, { neo: file === 'META-INF/neoforge.mods.toml' })
       if (file === 'mcmod.info') {
         const meta = parseMcmodInfo(buf)
         if (meta) {
@@ -274,33 +334,103 @@ async function readPrimaryModMeta(filePath, runtime = {}) {
 }
 
 export async function readModMeta(filePath, runtime = {}, depth = 0) {
-  const meta = await readPrimaryModMeta(filePath, runtime)
-  if (!meta || depth >= 3) return meta
-  const entries = await readJarEntries(filePath, ['META-INF/MANIFEST.MF', 'fabric.mod.json', 'quilt.mod.json'])
+  let meta = await readPrimaryModMeta(filePath, runtime)
+  if (depth >= 3) return meta
+  // 有些 fat jar（如 kotlinforforge-*-all.jar）本身没有 mods.toml，真正声明
+  // modId 的是 META-INF/jarjar/ 下的子 jar；不能因为没有主元数据就跳过内嵌扫描。
+  const synthetic = !meta
+  if (!meta) {
+    meta = {
+      modid: null,
+      name: path.basename(filePath).replace(/\.jar(?:\.disabled)?$/i, ''),
+      version: null,
+      loader: null,
+      environment: '*',
+      dependencies: [],
+      modids: [],
+      nestedModIds: [],
+      providedVersions: {}
+    }
+  }
+  const entries = await readJarEntries(filePath, [
+    'META-INF/MANIFEST.MF',
+    'fabric.mod.json',
+    'quilt.mod.json',
+    'META-INF/jarjar/metadata.json',
+    'META-INF/jars/metadata.json',
+    'META-INF/services/cpw.mods.modlauncher.api.ITransformationService'
+  ])
   const manifest = entries['META-INF/MANIFEST.MF']?.toString().replace(/\r?\n /g, '') || ''
-  let nested = /^ContainedDeps:\s*(.+)$/im.exec(manifest)?.[1]?.trim().split(/\s+/) || []
+  const loaderHints = []
+  if (/^FMLCorePlugin:/im.test(manifest) || /^TweakClass:/im.test(manifest) || /^ContainedDeps:/im.test(manifest) || /^FMLModType:/im.test(manifest)) loaderHints.push('forge')
+  if (entries['META-INF/services/cpw.mods.modlauncher.api.ITransformationService']) {
+    loaderHints.push('forge', 'neoforge')
+  }
+  if (loaderHints.length) meta.loaderHints = [...new Set([...(meta.loaderHints || []), ...loaderHints])]
+  const nested = []
+  const addNested = (value) => {
+    const text = String(value || '').trim()
+      .replace(/^["']|["']$/g, '')
+      .replace(/\\/g, '/')
+      .replace(/^\/+/, '')
+    if (text) nested.push(text)
+  }
+  for (const value of (/^ContainedDeps:\s*(.+)$/im.exec(manifest)?.[1] || '').trim().split(/\s+/)) addNested(value)
   for (const f of ['fabric.mod.json', 'quilt.mod.json']) {
     const json = entries[f] && jsonParseLoose(entries[f].toString())
-    nested.push(...(json?.jars || json?.quilt_loader?.jars || []).map(j => typeof j === 'string' ? j : j.file).filter(Boolean))
+    for (const item of json?.jars || json?.quilt_loader?.jars || []) addNested(typeof item === 'string' ? item : item?.file)
   }
-  if (!nested.length) return meta
+  // Forge 1.17+ / NeoForge 的 jar-in-jar 清单：META-INF/jarjar/metadata.json。
+  // 旧实现只读 MANIFEST + Fabric/Quilt 元数据，XaeroLib / PuzzlesAccessAPI /
+  // MixinExtras 这类内嵌前置会被当成「缺少依赖」。
+  for (const f of ['META-INF/jarjar/metadata.json', 'META-INF/jars/metadata.json']) {
+    const json = entries[f] && jsonParseLoose(entries[f].toString())
+    for (const item of json?.jars || []) addNested(item?.path || item?.file)
+  }
+  // 元数据缺失的旧 jar 也把标准内嵌目录扫一遍，避免漏掉实际存在的 jar。
+  addNested('META-INF/jarjar/*.jar')
+  addNested('META-INF/jars/*.jar')
+  const nestedPaths = [...new Set(nested)]
+  if (!nestedPaths.length) return meta
   const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), 'mc-toolbox-nested-'))
   try {
-    const jars = await readJarEntries(filePath, nested, { maxBytes: 64 * 1024 * 1024, maxEntries: 64 })
+    const jars = await readJarEntries(filePath, nestedPaths, { maxBytes: 64 * 1024 * 1024, maxEntries: 64 })
+    const nestedJars = Object.values(jars).filter(Boolean)
+    if (!nestedJars.length) return synthetic ? null : meta
+    meta.nestedModIds = [...new Set([
+      ...(meta.nestedModIds || []),
+      ...(meta.modids || []),
+      ...(meta.modid ? [meta.modid] : [])
+    ].filter(Boolean))]
     let i = 0
-    for (const bytes of Object.values(jars)) if (bytes) {
+    for (const bytes of nestedJars) {
       const file = path.join(tmp, `${i++}.jar`); await fsp.writeFile(file, bytes)
       const child = await readModMeta(file, runtime, depth + 1)
       if (!child) continue
-      // 纯客户端的嵌套模块（jar-in-jar）不能把宿主拖下水：既不把它的 modid
-      // 并进宿主（否则宿主可能因「客户端 mod 库」整包被删），也不把它的
-      // 客户端依赖强加给服务端转换。
+      if (!meta.modid && child.modid) {
+        // fat jar 外壳没有自己的 modId：用真正声明依赖的子模组作为宿主信息。
+        meta.modid = child.modid
+        meta.name = child.name || meta.name
+        meta.version = child.version || meta.version
+        meta.loader = child.loader || meta.loader
+        meta.environment = child.environment || meta.environment
+      }
+      const childVisibleIds = [
+        ...(child.modids || []),
+        ...(child.modid ? [child.modid] : [])
+      ].filter(Boolean)
+      // 嵌套模块的 ID 全部算作「已被这个 jar 提供」，包括客户端模块；否则
+      // 客户端整合包里 lambdynlights_api / spruceui / xaerolib 会被误报缺失。
+      meta.nestedModIds = [...new Set([...meta.nestedModIds, ...childVisibleIds, ...(child.nestedModIds || [])])]
+      // 纯客户端的嵌套模块不能把宿主拖下水：不把它的 modid 并进服务端转换
+      // 使用的 modids，也不把它的客户端依赖强加给服务端转换。
       if (child.environment === 'client') continue
-      meta.modids = [...new Set([...(meta.modids || [meta.modid]), ...(child.modids || [child.modid])].filter(Boolean))]
+      meta.modids = [...new Set([...(meta.modids || []), ...(meta.modid ? [meta.modid] : []), ...childVisibleIds].filter(Boolean))]
       meta.dependencies = uniqueDependencies([...meta.dependencies, ...child.dependencies])
       meta.providedVersions = { ...meta.providedVersions, [child.modid?.toLowerCase()]: child.version, ...child.providedVersions }
     }
   } finally { await fsp.rm(tmp, { recursive: true, force: true }) }
+  if (!meta.modid && !(meta.modids || []).length && !(meta.nestedModIds || []).length) return null
   return meta
 }
 
@@ -339,6 +469,14 @@ export async function scanModsDir(dir, opts = {}) {
         stem,
         stem.split(/[-_ ](?=\d|mc\d|v?\d)/i)[0]
       ].filter((value) => /^[A-Za-z][A-Za-z0-9_.-]{1,63}$/.test(value)).map((value) => value.toLowerCase()))]
+      const actualIds = [...new Set([
+        ...(meta?.modids || []),
+        ...(meta?.modid ? [meta.modid] : [])
+      ].filter(Boolean))]
+      const nestedIds = [...new Set(meta?.nestedModIds || [])]
+      // 依赖是否满足只看真实元数据（含内嵌 jar）。文件名推断只在完全没有元数据时兜底：
+      // xaerominimap-forge-... 这种文件名不是可靠的 modid，拿来当「已提供」会掩盖缺失。
+      const providedIds = [...new Set([...actualIds, ...nestedIds])]
       results.push({
         file: it.name,
         path: full,
@@ -347,11 +485,15 @@ export async function scanModsDir(dir, opts = {}) {
         mtime: st ? st.mtimeMs : 0,
         disabled: isDisabled,
         modid: meta?.modid || null,
-        modids: [...new Set([...(meta?.modids || (meta?.modid ? [meta.modid] : [])), ...filenameModIds])],
+        modids: actualIds.length ? actualIds : filenameModIds,
+        nestedModIds: nestedIds,
+        modIdHints: filenameModIds,
+        providedModIds: providedIds.length ? providedIds : filenameModIds,
         name: meta?.name || it.name.replace(/\.jar(\.disabled)?$/i, ''),
         version: meta?.version || null,
         providedVersions: meta?.providedVersions || {},
         loader: meta?.loader || null,
+        loaderHints: meta?.loaderHints || [],
         environment: meta?.environment || '*',
         dependencies: meta?.dependencies || [],
         hasMeta: !!meta

@@ -1,5 +1,14 @@
 # Minecraft 工具箱
 
+### v1.9.8 已运行实例接管、多开与模组真实 modid
+
+- 启动器启动/轮询时扫描本机 `java.exe` / `javaw.exe`，按命令行里的 `--gameDir` 精确匹配已添加实例；启动器重启后内存 session 丢失，仍能显示运行中、PID 与已运行时长，不再把正在玩的实例当成未启动。命令行（可能含 `--accessToken`）只在内存中用于匹配，不返回前端。
+- 运行中的实例可单独停止：Windows 先发关闭请求，8 秒未退出再 `taskkill /F /T`；Unix 先 `SIGTERM` 再 `SIGKILL`。日志页自动接入游戏 `latest.log`，按字节偏移增量跟随，外部进程不需要 stdout 管道。
+- 多开：不同实例可同时运行；hero 和「正在运行」面板保留「再开一个」，保持当前进程并从其它已安装实例中选择启动。同一实例仍只允许一个进程，避免存档与 `options.txt` 互相覆盖。
+- 模组识别修复：Forge/NeoForge 实例优先读 `META-INF/mods.toml` / `neoforge.mods.toml`，不再被同 jar 的 `fabric.mod.json` 假依赖污染；解析 Forge `META-INF/jarjar/metadata.json` 与 jar-in-jar 子模组，Xaero 的 `xaerolib`、PuzzlesAccessAPI、MixinExtras 等内嵌前置会被识别为已提供。
+- 依赖块只归到实际 `[[mods]]` 声明的 modId；mod ID 比较忽略大小写与 `-` / `_` 分隔符（`yumi-commons-core` = `yumi_commons_core`）；有真实元数据时不再用文件名猜 modid；Forge 实例中的 Fabric-only 模组标记「加载器不匹配」并忽略其依赖，避免无意义的 Fabric API 报缺。
+- 回归与验证：`node --test tests/*.test.mjs` 208 项通过；headless Edge 探针 14/14（2 个外部进程同时运行、运行面板/hero、再开一个、日志接入、停止后只保留另一个、900px 无横向溢出、无控制台异常）与模组页探针 5/5（Xaero 真实 modid、内嵌 xaerolib 不报缺、Fabric-only 标记加载器不匹配）；真实 Forge 1.20.1 整合包 97 个 jar 扫描后缺失依赖为 0，97/97 识别到真实 modid（`kotlinforforge-all.jar` 从 jar-in-jar 识别）；`node build.mjs` 生成 82.8 MB EXE 并通过隔离冒烟。
+
 ### v1.9.7 在线搜索支持分页与按下载量排序
 
 - 启动器的「安装模组 / 资源包 / 光影」弹窗与「新建实例 → 整合包」在线搜索新增分页条：上一页、下一页、输入页码跳转，并显示「1–20 / 共 N 个结果」与「第 X / Y 页」；最后一页自动禁用「下一页」，搜索或切换来源、版本、筛选、排序时回到第 1 页。
@@ -375,7 +384,8 @@ POST   /api/dirs/reset              恢复默认目录（文件迁回）
 GET    /api/data/export               导出配置
 
 # 启动器（详见 docs/launcher.md）
-GET    /api/launcher/bootstrap        启动器设置、实例、账户、任务、会话
+GET    /api/launcher/bootstrap        启动器设置、实例、账户、任务、会话（含进程检测结果）
+GET    /api/launcher/running          当前运行的实例（?force=1 强制重新扫描进程表）
 GET/PUT /api/launcher/settings        启动器设置
 GET    /api/launcher/update/check     检查 GitHub Releases 是否有新版本（?force=1 绕过缓存）
 POST   /api/launcher/update/download  下载新版本 exe（立即返回，进度看 state）
@@ -387,7 +397,7 @@ GET    /api/launcher/instances        实例列表
 GET/PUT/DELETE /api/launcher/instances/:id   实例详情 / 修改 / 删除
 POST   /api/launcher/instances/:id/launch    启动游戏（立即返回，准备阶段轮询 status.launch）
 POST   /api/launcher/instances/:id/launch/cancel 取消启动准备
-POST   /api/launcher/instances/:id/stop      停止游戏
+POST   /api/launcher/instances/:id/stop      停止游戏（外部接管的进程先请求正常关闭，8 秒后强制）
 GET    /api/launcher/instances/:id/status    运行状态 + 启动阶段/错误（launch）
 GET    /api/launcher/instances/:id/preview   启动命令预览（令牌脱敏）
 GET    /api/launcher/instances/:id/log       实时/已保存日志
