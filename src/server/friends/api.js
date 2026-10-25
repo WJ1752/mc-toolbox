@@ -6,12 +6,6 @@ export function registerFriendsApi(on, { readBody } = {}) {
 
   on('GET', '/api/friends', async () => await manager.snapshot())
   on('GET', '/api/friends/diagnostics', async () => await manager.diagnostics())
-
-  on('POST', '/api/friends/server/probe', async (req) => {
-    const payload = await body(req)
-    return await manager.probeServer(payload.url)
-  })
-  on('PUT', '/api/friends/server', async (req) => await manager.saveServer(await body(req)))
   on('POST', '/api/friends/login', async (req) => await manager.login(await body(req)))
   on('POST', '/api/friends/logout', async () => await manager.logout())
   on('POST', '/api/friends/session/refresh', async () => await manager.login({}))

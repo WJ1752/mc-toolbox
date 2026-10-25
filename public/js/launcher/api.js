@@ -128,8 +128,6 @@ export const launcherApi = {
   // 好友（中心服务器：正版 MC 账号登录）
   friends: () => api.get('/api/friends'),
   friendsDiagnostics: () => api.get('/api/friends/diagnostics'),
-  friendsProbeServer: (url) => api.post('/api/friends/server/probe', { url }),
-  friendsSaveServer: (payload) => api.put('/api/friends/server', payload),
   friendsLogin: (invite = '') => api.post('/api/friends/login', { invite }),
   friendsLogout: () => api.post('/api/friends/logout', {}),
   friendsRefreshSession: () => api.post('/api/friends/session/refresh', {}),

@@ -21,7 +21,7 @@
 - 客户端把启动器已登录的 **正版 Minecraft 访问令牌** 发给服务器；服务器调用 Mojang `minecraft/profile` 校验后拿到 UUID 与正版 ID。访问令牌只用于这一次校验，不写盘。
 - 服务器发 30 天随机会话令牌，只存 SHA-256 哈希。
 - 注册默认需要邀请码（`--invite` 或环境变量 `MCTB_FRIENDS_INVITE`）；已注册账户再次登录不需要。
-- 服务器默认 HTTPS，使用自签证书；客户端首次连接显示证书 SHA-256 指纹，用户与服务器输出核对后固定，之后每次响应都比对，换证书必须重新确认。
+- 服务器默认 HTTPS，使用自签证书；客户端内置证书 SHA-256 指纹并在每次响应时比对，换证书必须改配置重新发版。
 - 公网 `http://` 在客户端直接拒绝（仅允许 localhost 测试）。
 - 服务器磁盘上的聊天/文件对管理员可见；介意隐私就不要用中心服务器模式，或给数据目录做加密与定期清理。
 
@@ -49,7 +49,7 @@ chmod 600 /etc/mctb-friends/key.pem /etc/mctb-friends/cert.pem
 openssl x509 -in /etc/mctb-friends/cert.pem -noout -fingerprint -sha256
 ```
 
-最后一行就是客户端首次连接时要核对的指纹。
+最后一行用于核对/更新客户端内置指纹（`src/server/friends/config.js`）。
 
 ### 3.2 用户、邀请码与数据目录
 
@@ -113,11 +113,13 @@ journalctl -u mc-toolbox-friends -f
 
 ## 4. 客户端
 
-1. 启动器 → 好友 → 连接服务器：填 `https://<公网 IP>`，点「检测服务器」，核对显示的证书指纹与服务器输出。
-2. 「信任并保存」。
-3. 在启动器里登录正版微软账户（离线/第三方账户会被拒绝）。
-4. 填邀请码，点「绑定正版账号并登录」。
-5. 把邀请码与服务器地址发给朋友；双方按正版游戏 ID 互加好友。
+发布版把服务器地址与证书指纹内置在 `src/server/friends/config.js`，好友页只显示「官方服务器（内置）」，玩家不能修改，也不显示地址/指纹。
+
+1. 在启动器里登录正版微软账户（离线/第三方账户会被拒绝）。
+2. 好友 → 填邀请码 → 「绑定正版账号并登录」。
+3. 把邀请码发给朋友；双方按正版游戏 ID 互加好友。
+
+自建/本地调试时，可在启动前设置 `MC_TOOLBOX_FRIENDS_SERVER`、`MC_TOOLBOX_FRIENDS_FINGERPRINT` 环境变量临时覆盖；正式发布应改 `config.js` 并重新构建，换证书/换地址都必须重新发版。
 
 ## 5. 接口
 
@@ -148,7 +150,7 @@ openssl x509 -in /etc/mctb-friends/cert.pem -noout -fingerprint -sha256
 | 现象 | 检查 |
 | --- | --- |
 | 客户端检测失败 | 控制台防火墙 443；`systemctl status`；证书路径与权限 |
-| 指纹不匹配 | 服务器是否换了证书；确认后重新保存服务器 |
+| 指纹不匹配 | 服务器是否换了证书；更新内置证书指纹并重新发版 |
 | 登录提示邀请码 | 注册需要 `MCTB_FRIENDS_INVITE`；已注册账户不需要 |
 | 登录提示非正版 | 启动器账户必须是微软正版；离线/第三方无法校验 |
 | 上传提示配额满 | 等待好友下载或 24 小时过期；调整 `--quota-mb` / `--global-mb` |
@@ -161,4 +163,4 @@ openssl x509 -in /etc/mctb-friends/cert.pem -noout -fingerprint -sha256
 - `tests/friends-server.test.mjs`：MC 校验、邀请码、好友、离线聊天、文件生命周期与配额、模组清单权限、会话失效。
 - `tests/friends-client.test.mjs`：自签证书指纹探测/固定、指纹不匹配拒绝、公网 HTTP 拒绝、HTTPS 登录与文件上传下载。
 
-真实环境：Ubuntu 24.04 + Node 18.19，systemd 运行在 443，公网探测证书指纹与健康检查一致，临时文件上下行校验通过。
+真实环境：Ubuntu 24.04 + Node 18.19，systemd 运行在 443，公网探测证书指纹与健康检查一致；临时文件上下行由本地 HTTPS 集成用例覆盖。

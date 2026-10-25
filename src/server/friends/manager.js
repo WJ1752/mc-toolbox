@@ -10,7 +10,8 @@ import { CONFIG_DIR, DATA_DIR } from '../paths.js'
 import { PRODUCT_VERSION } from '../build-meta.js'
 import { httpFetch } from '../http.js'
 import { ClientStore } from './client-store.js'
-import { FriendsServerClient, probeFriendsServer } from './server-client.js'
+import { FriendsServerClient } from './server-client.js'
+import { resolveFriendsServer, sameFriendsServer } from './config.js'
 import * as content from '../launcher/content.js'
 import { findInstance, instancePaths } from '../launcher/state.js'
 import { listSessions } from '../launcher/launch.js'
@@ -47,7 +48,22 @@ function getStore() {
   return store
 }
 
+/** 把服务器地址/指纹锁定为启动器内置值；旧配置里的自定义地址会被覆盖。 */
+function ensureLockedServer() {
+  const desired = resolveFriendsServer()
+  const state = getStore()
+  const current = state.get().server
+  if (!sameFriendsServer(current, desired)) {
+    state.setServer(desired)
+    client = null
+    cache = null
+    cacheAt = 0
+  }
+  return desired
+}
+
 function getClient() {
+  ensureLockedServer()
   const state = getStore().get()
   if (!state.server.url) return null
   if (!client || client.url !== state.server.url || client.fingerprint !== state.server.fingerprint || client.token !== state.session.token) {
@@ -244,27 +260,10 @@ function pruneJobs() {
 
 // ---------------- 服务器配置与登录 ----------------
 
-export async function probeServer(url) {
-  const result = await probeFriendsServer(url)
-  logEvent(`检测到好友服务器 ${result.url}`)
-  return result
-}
-
-export function saveServer({ url, fingerprint, requiresInvite = false }) {
-  if (!url) throw new Error('缺少服务器地址')
-  const localHttp = /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?\/?$/i.test(String(url).trim())
-  if (!fingerprint && !localHttp) throw new Error('缺少服务器证书指纹')
-  const state = getStore()
-  state.setServer({ url, fingerprint, requiresInvite })
-  client = null
-  cache = null
-  logEvent('已保存好友服务器：' + url)
-  return { server: state.get().server }
-}
-
 export async function login({ invite = '' } = {}) {
+  ensureLockedServer()
   const state = getStore().get()
-  if (!state.server.url) throw Object.assign(new Error('请先配置好友服务器'), { code: 'NO_SERVER' })
+  if (!state.server.url) throw Object.assign(new Error('内置好友服务器不可用，请更新启动器'), { code: 'NO_SERVER' })
   const account = await mcAccessToken()
   const instance = requireClient()
   const result = await instance.request('POST', '/api/auth/minecraft', {
@@ -815,11 +814,12 @@ export async function sendModsToFriend({ friendId, instanceId } = {}) {
 // ---------------- 快照 ----------------
 
 export async function snapshot() {
+  ensureLockedServer()
   const state = getStore().get()
   const base = {
     configured: !!state.server.url,
     loggedIn: !!state.session.token && state.session.expiresAt > Date.now(),
-    server: state.server,
+    server: { locked: true, label: '官方服务器', requiresInvite: state.server.requiresInvite },
     prefs: state.prefs,
     account: state.session.profile,
     mcAccount: (() => {
@@ -897,7 +897,7 @@ export async function diagnostics() {
   const state = getStore().get()
   return {
     configured: !!state.server.url,
-    server: state.server,
+    server: { locked: true, label: '官方服务器', requiresInvite: state.server.requiresInvite },
     loggedIn: !!state.session.token,
     expiresAt: state.session.expiresAt,
     profile: state.session.profile,

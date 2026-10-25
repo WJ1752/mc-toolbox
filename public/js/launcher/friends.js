@@ -37,11 +37,6 @@ function ratioOf(item) {
   return Math.max(0, Math.min(100, Number(item.progress) || 0))
 }
 
-function shortFingerprint(value) {
-  const text = String(value || '')
-  return text.length > 24 ? text.slice(0, 23) + '…' : text
-}
-
 export function createFriendsView(ctx) {
   let disposed = false
   let timer = null
@@ -49,8 +44,6 @@ export function createFriendsView(ctx) {
   let data = null
   let errorText = ''
   let mode = ''
-  let forceSetup = false
-  let probeResult = null
   let settingsBuilt = false
   const refs = {}
   const chat = {
@@ -96,87 +89,25 @@ export function createFriendsView(ctx) {
     if (!refs.root || !data) return
     clear(refs.root)
     settingsBuilt = false
-    const next = forceSetup ? 'setup' : !data.configured ? 'setup' : !data.loggedIn ? 'login' : 'friends'
-    mode = next
+    mode = data.loggedIn ? 'friends' : 'login'
     refs.error = h('div', { class: 'lp-friends-error', hidden: true })
     refs.root.appendChild(refs.error)
-    if (mode === 'setup') buildSetup()
-    else if (mode === 'login') buildLogin()
+    if (mode === 'login') buildLogin()
     else buildFriends()
     setError(errorText)
     if (mode === 'friends') paintAll()
   }
 
-  function buildSetup() {
-    const url = input({
-      value: probeResult?.url || data?.server?.url || 'https://139.224.132.80',
-      placeholder: 'https://你的好友服务器',
-      mono: true
-    })
-    const status = h('div', { class: 'lp-friends-hint' }, '服务器使用自签证书。检测后会显示证书指纹，请与服务器端输出核对后再信任。')
-    const trust = btn('信任并保存', {
-      variant: 'primary',
-      iconName: 'shield',
-      disabled: true,
-      onClick: async () => {
-        if (!probeResult) return
-        try {
-          await ctx.api.friendsSaveServer({ url: probeResult.url, fingerprint: probeResult.fingerprint, requiresInvite: probeResult.health?.requiresInvite === true })
-          forceSetup = false
-          probeResult = null
-          toast('已保存好友服务器', 'ok')
-          await refreshData(true)
-        } catch (error) {
-          toast(error.message, 'err')
-        }
-      }
-    })
-    const detect = btn('检测服务器', {
-      variant: 'secondary',
-      iconName: 'signal',
-      onClick: async () => {
-        detect.disabled = true
-        status.textContent = '正在连接并读取证书…'
-        trust.disabled = true
-        try {
-          const result = await ctx.api.friendsProbeServer(url.value.trim())
-          probeResult = result
-          status.replaceChildren(
-            h('div', { class: 'lp-friends-kv' }, h('span', { class: 'muted' }, '服务器'), h('span', { class: 'mono' }, result.url)),
-            h('div', { class: 'lp-friends-kv' }, h('span', { class: 'muted' }, '证书指纹'), h('span', { class: 'mono' }, result.fingerprint || '（HTTP 本地测试）')),
-            h('div', { class: 'lp-friends-kv' }, h('span', { class: 'muted' }, '版本'), h('span', {}, `v${result.health?.version || '?'}`)),
-            h('div', { class: 'lp-friends-hint' }, '请确认指纹与服务器上 `openssl x509 -noout -fingerprint -sha256 -in cert.pem` 的输出一致。')
-          )
-          trust.disabled = false
-        } catch (error) {
-          probeResult = null
-          status.textContent = '检测失败：' + error.message
-        } finally {
-          detect.disabled = false
-        }
-      }
-    })
-    refs.root.appendChild(sectionCard({
-      title: '连接好友服务器',
-      subtitle: '首次使用需要确认服务器证书',
-      body: h('div', { class: 'lp-friends-setup' },
-        field('服务器地址', url, { hint: '例如 https://<服务器 IP>；公网必须使用 https' }),
-        h('div', { class: 'lp-friends-actions' }, detect, trust),
-        status
-      )
-    }))
-    refs.root.appendChild(h('div', { class: 'lp-friends-hint' }, '好友功能需要一台运行 tools/friends-server.mjs 的服务器；整合包与模组文件只做临时中转。'))
-  }
-
   function buildLogin() {
     const account = data?.mcAccount
     const premium = account?.type === 'microsoft'
+    const configured = data?.configured !== false
     const invite = input({ value: '', placeholder: '服务器邀请码' })
     const error = h('div', { class: 'lp-friends-hint warn-text' }, data?.error || '')
     const login = btn('绑定正版账号并登录', {
       variant: 'primary',
       iconName: 'shield',
-      disabled: !premium,
+      disabled: !premium || !configured,
       onClick: async () => {
         login.disabled = true
         error.textContent = ''
@@ -193,20 +124,21 @@ export function createFriendsView(ctx) {
       }
     })
     refs.root.appendChild(sectionCard({
-      title: '登录好友服务器',
+      title: '登录官方好友服务器',
       subtitle: '使用启动器当前的正版微软账户',
       body: h('div', { class: 'lp-friends-setup' },
         h('div', { class: 'lp-friends-kv-list' },
-          h('div', { class: 'lp-friends-kv' }, h('span', { class: 'muted' }, '服务器'), h('span', { class: 'mono' }, data.server.url)),
-          h('div', { class: 'lp-friends-kv' }, h('span', { class: 'muted' }, '证书指纹'), h('span', { class: 'mono' }, shortFingerprint(data.server.fingerprint) || '—')),
+          h('div', { class: 'lp-friends-kv' }, h('span', { class: 'muted' }, '好友服务器'), h('span', {}, '官方服务器（内置）')),
+          h('div', { class: 'lp-friends-kv' }, h('span', { class: 'muted' }, '连接'), h('span', {}, configured ? '已内置证书校验' : '配置不可用')),
           h('div', { class: 'lp-friends-kv' }, h('span', { class: 'muted' }, '启动器账户'), h('span', {}, account ? `${account.name}（${premium ? '正版微软' : account.type === 'offline' ? '离线' : '第三方'}）` : '未登录'))
         ),
+        configured ? null : h('div', { class: 'lp-friends-hint warn-text' }, '内置好友服务器配置不可用，请更新启动器后再试。'),
         premium ? null : h('div', { class: 'lp-friends-hint warn-text' }, '好友功能只支持正版微软账户。请先在启动器里登录微软账户（离线/第三方账户无法通过 Minecraft 正版校验）。'),
-        field('邀请码', invite, { hint: data.server.requiresInvite ? '该服务器启用了邀请码，请向管理员索取' : '服务器没有启用邀请码，可留空' }),
+        field('邀请码', invite, { hint: data.server?.requiresInvite ? '该服务器启用了邀请码，请向管理员索取' : '服务器没有启用邀请码，可留空' }),
+        h('div', { class: 'lp-friends-hint' }, '好友服务器地址与证书由启动器内置，不能修改。'),
         error,
         h('div', { class: 'lp-friends-actions' }, login,
-          premium ? null : btn('去登录微软账户', { variant: 'secondary', iconName: 'user', onClick: () => ctx.openAccounts?.() }),
-          btn('更换服务器', { variant: 'ghost', onClick: () => { forceSetup = true; buildLayout() } }))
+          premium ? null : btn('去登录微软账户', { variant: 'secondary', iconName: 'user', onClick: () => ctx.openAccounts?.() }))
       )
     }))
   }
@@ -672,8 +604,7 @@ export function createFriendsView(ctx) {
   function paintEvents() {
     if (!refs.events || !data) return
     const rows = [
-      ['服务器', data.server?.url || '—'],
-      ['证书指纹', shortFingerprint(data.server?.fingerprint) || '—'],
+      ['好友服务器', '官方服务器（内置）'],
       ['登录', data.loggedIn ? '已登录' : '未登录'],
       ['正版 ID', data.profile?.mcName || data.account?.mcName || '—'],
       ['服务器时间', data.serverTime ? fmtDateTime(data.serverTime) : '—']
@@ -900,7 +831,7 @@ export function createFriendsView(ctx) {
     try {
       data = await ctx.api.friends()
       setError(data.error || '')
-      const nextMode = forceSetup ? 'setup' : !data.configured ? 'setup' : !data.loggedIn ? 'login' : 'friends'
+      const nextMode = data.loggedIn ? 'friends' : 'login'
       const accountKey = data.mcAccount ? `${data.mcAccount.uuid}:${data.mcAccount.type}` : 'none'
       if (nextMode !== mode || (nextMode === 'login' && accountKey !== lastAccountKey)) {
         lastAccountKey = accountKey
