@@ -123,7 +123,32 @@ export const launcherApi = {
   updateSkip: (version) => api.post('/api/launcher/update/skip', { version }),
   updateReset: () => api.post('/api/launcher/update/reset'),
   updateConfig: () => api.get('/api/launcher/update/config'),
-  saveUpdateConfig: (patch) => api.put('/api/launcher/update/config', patch)
+  saveUpdateConfig: (patch) => api.put('/api/launcher/update/config', patch),
+
+  // 好友（中心服务器：正版 MC 账号登录）
+  friends: () => api.get('/api/friends'),
+  friendsDiagnostics: () => api.get('/api/friends/diagnostics'),
+  friendsProbeServer: (url) => api.post('/api/friends/server/probe', { url }),
+  friendsSaveServer: (payload) => api.put('/api/friends/server', payload),
+  friendsLogin: (invite = '') => api.post('/api/friends/login', { invite }),
+  friendsLogout: () => api.post('/api/friends/logout', {}),
+  friendsRefreshSession: () => api.post('/api/friends/session/refresh', {}),
+  friendsSaveSelf: (patch) => api.put('/api/friends/self', patch),
+  friendsAdd: (mcName) => api.post('/api/friends/add', { mcName }),
+  friendsRespond: (uuid, accept) => api.post('/api/friends/respond', { uuid, accept: !!accept }),
+  friendsRemove: (uuid) => api.del(`/api/friends/${encodeURIComponent(uuid)}`),
+  friendsMessages: (uuid, after = 0, markRead = false) => api.get(`/api/friends/${encodeURIComponent(uuid)}/messages?after=${Number(after) || 0}${markRead ? '&markRead=1' : ''}`),
+  friendsSendChat: (uuid, text) => api.post(`/api/friends/${encodeURIComponent(uuid)}/messages`, { text }),
+  friendsMarkRead: (uuid, upTo = 0) => api.post(`/api/friends/${encodeURIComponent(uuid)}/read`, { upTo }),
+  friendsSharePack: (payload) => api.post('/api/friends/packs/share', payload),
+  friendsCompareMods: (payload) => api.post('/api/friends/mods/compare', payload),
+  friendsFillMods: (payload) => api.post('/api/friends/mods/fill', payload),
+  friendsModsJob: (id) => api.get(`/api/friends/mods/jobs/${encodeURIComponent(id)}`),
+  friendsCancelModsJob: (id) => api.post(`/api/friends/mods/jobs/${encodeURIComponent(id)}/cancel`, {}),
+  friendsSendMods: (payload) => api.post('/api/friends/mods/send', payload),
+  friendsDownload: (id) => api.post(`/api/friends/transfers/${encodeURIComponent(id)}/download`, {}),
+  friendsCancelTransfer: (id) => api.del(`/api/friends/transfers/${encodeURIComponent(id)}`),
+  friendsRemoveReceived: (id) => api.del(`/api/friends/received/${encodeURIComponent(id)}`)
 }
 
 export { qs }

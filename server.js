@@ -10,6 +10,7 @@ import { DEFAULT_SETTINGS } from './src/server/defaults.js'
 import { stopSync as stopI18n } from './src/server/i18n.js'
 import { shutdownServers } from './src/server/server-manager.js'
 import { pruneUnfinishedInstances } from './src/server/launcher/install.js'
+import { stopFriends } from './src/server/friends/manager.js'
 
 const argPort = (process.argv.find((a) => a.startsWith('--port=')) || '').split('=')[1]
 const START_PORT = Number(process.env.MC_TOOLBOX_PORT || argPort || 8756)
@@ -328,6 +329,7 @@ async function main() {
     try { stopEngine() } catch {}
     try { await shutdownServers() } catch {}
     try { await stopI18n() } catch {}
+    try { await stopFriends() } catch {}
     try { await store.flushAll() } catch {}
     forceQuit('shutdown-ok')
   }

@@ -23,6 +23,7 @@ import { setProxy } from './http.js'
 import * as i18n from './i18n.js'
 import * as javaRuntime from './java-runtime.js'
 import { registerLauncherApi } from './launcher/api.js'
+import { registerFriendsApi } from './friends/api.js'
 import { AUTHOR, PRODUCT_VERSION } from './build-meta.js'
 
 const MIME = {
@@ -101,6 +102,7 @@ const on = (method, pattern, handler) => routes.push({ method, pattern, handler 
 
 // 启动器（MC launcher）路由：独立模块注册，避免把它和工具箱原有接口混在一起。
 registerLauncherApi(on, { readBody, readRawBody })
+registerFriendsApi(on, { readBody })
 
 // 客户端心跳状态 —— server.js 用它判断「应用窗口是否还开着」。
 // 为什么不用 Edge 子进程的 exit 事件：Edge/Chrome 多进程架构下，spawn 出来的

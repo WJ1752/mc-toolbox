@@ -109,6 +109,7 @@ const state = {
   installController: null,
   javaController: null,
   downloadsController: null,
+  friendsController: null,
   // 下载中心 → 新建实例 的一次性请求：{ path, auto, token }，由安装页消费后清空。
   pendingPackInstall: null,
   contentHandle: null,
@@ -644,6 +645,7 @@ function navButton(id, label, iconName, onClick) {
 function buildNav() {
   clear(navWrapEl)
   navWrapEl.append(
+    navButton('friends', '好友', 'user', () => showView('friends')),
     navButton('downloads', '下载中心', 'download', () => showView('downloads')),
     navButton('java', 'Java', 'java', () => showView('java')),
     navButton('import', '导入已有游戏', 'archive', async () => {
@@ -897,6 +899,10 @@ async function selectInstance(id, { tab = 'overview' } = {}) {
 
 function renderMain() {
   if (!mainEl) return
+  if (state.view !== 'friends') {
+    state.friendsController?.dispose?.()
+    state.friendsController = null
+  }
   destroyContent()
   clear(mainEl)
   if (state.loading) {
@@ -913,6 +919,7 @@ function renderMain() {
     return
   }
   if (state.view === 'install') { renderInstallView(); return }
+  if (state.view === 'friends') { renderFriendsView(); return }
   if (state.view === 'downloads') { renderDownloadsView(); return }
   if (state.view === 'java') { renderJavaView(); return }
   if (!state.instances.length) { renderWelcome(); return }
@@ -985,6 +992,23 @@ async function renderDownloadsView() {
   }
 }
 
+async function renderFriendsView() {
+  const body = h('div', { class: 'lp-view-body' })
+  mainEl.appendChild(h('div', { class: 'lp-view lp-view-friends' },
+    viewBackBar(() => showView('instance')),
+    body
+  ))
+  try {
+    const mod = await loadModule('friends')
+    if (state.view !== 'friends') return
+    state.friendsController?.dispose?.()
+    state.friendsController = mod.createFriendsView(pageCtx())
+    state.friendsController.render(body)
+  } catch (e) {
+    body.appendChild(h('div', { class: 'lp-main-error' }, icon('warning', { size: 22 }), h('b', {}, '加载好友页失败'), h('p', {}, e.message)))
+  }
+}
+
 async function showView(view) {
   // 切页时一定收掉拖放遮罩，避免 ESC 取消拖拽后遮罩跟着新页面一起出现。
   hideDropOverlay()
@@ -992,6 +1016,10 @@ async function showView(view) {
   if (previous === 'downloads' && view !== 'downloads') {
     state.downloadsController?.destroy?.()
     state.downloadsController = null
+  }
+  if (previous === 'friends' && view !== 'friends') {
+    state.friendsController?.dispose?.()
+    state.friendsController = null
   }
   if (view !== 'instance') destroyContent()
   const changed = state.view !== view
@@ -2835,9 +2863,11 @@ function destroy() {
   state.installController?.destroy?.()
   state.javaController?.destroy?.()
   state.downloadsController?.destroy?.()
+  state.friendsController?.dispose?.()
   state.installController = null
   state.javaController = null
   state.downloadsController = null
+  state.friendsController = null
   closeContextMenu()
 }
 
@@ -2858,6 +2888,7 @@ function commandItems() {
       ? [{ group: '启动器', label: '再开一个实例', hint: `${runningCount} 个运行中`, iconName: 'add', run: () => openLaunchAnother(inst) }]
       : []),
     { group: '启动器', label: '下载中心', iconName: 'download', run: () => showView('downloads') },
+    { group: '启动器', label: '好友', iconName: 'user', run: () => showView('friends') },
     { group: '启动器', label: '新建实例 / 安装版本', iconName: 'add', run: () => showView('install') },
     { group: '启动器', label: '账户管理', hint: account ? account.name : '未登录', iconName: 'user', run: () => openAccounts() },
     { group: '启动器', label: 'Java 运行时', iconName: 'java', run: () => showView('java') },

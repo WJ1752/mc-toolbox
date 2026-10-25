@@ -61,6 +61,12 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 | 启动器设置（整页设置） | 游戏目录与存储、下载源/并发/重试/校验、默认内存/窗口/参数、Java、微软 Client ID、启动行为 |
 | 社区接口校验 | `gameVersion` 格式 + Mojang 清单校验；非法/未知版本回退全部版本并返回中文 `gameVersionNotice` |
 | 启动器更新 | 启动时检查 GitHub Releases；发现新版本右下角提示，一键下载 exe、校验 SHA-256 后替换并自动重启；可忽略版本、可配 Token |
+| 好友（中心服务器） | 用启动器已登录的正版微软账户登录自建好友服务器；按正版游戏 ID 添加，好友能看到真实 ID，自己可设昵称；离线/第三方账户拒绝 |
+| 在线状态 | 服务器按心跳统计在线/离线与「正在玩的实例」，换设备登录后状态一致 |
+| 好友聊天 | 消息存在服务器，支持离线消息、未读与已读；不再依赖双方同时在线 |
+| 临时文件中转 | 整合包与模组文件上传到服务器，接收方下载后 10 分钟删除，未下载 24 小时过期；配额 5 GB/账号、15 GB 总量 |
+| 模组对称补齐 | 双方清单上传到服务器对比；优先本地暂存/Modrinth，私有模组由对方经服务器临时中转 |
+| 服务器安全 | 自签 HTTPS + 客户端证书指纹固定；公网 HTTP 拒绝；Minecraft 访问令牌只用于校验、不落盘 |
 
 ### 未实现 / 边界
 
@@ -72,6 +78,11 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - **资源包启停**：直接修改 `options.txt`；游戏运行中修改可能被游戏覆盖。
 - **旧版 Forge 安装器**：通过官方 installer 运行；需要对应 Java（1.12.2 → Java 8）。安装器失败时会保留完整日志。
 - **导出格式**：`.zip` 使用本工具的 `mc-toolbox` 清单（含 `files` 下载地址与哈希 + `overrides/`），可被本工具重新导入；`.mrpack` 按 Modrinth 规范生成，尽量兼容 PCL2 / Modrinth App。未匹配 Modrinth 的模组会放进 `overrides/mods/`，因此导出包仍可离线还原，但体积会相应增加。
+- **好友账号**：只接受正版微软账户。服务器调用 Mojang 档案接口验证令牌，不保存访问令牌；离线账户、authlib 第三方账户无法通过校验。会话令牌 30 天，换设备需重新登录。
+- **好友服务器**：需要自己有一台公网服务器（本文以 Ubuntu 24.04 为例）。服务器长期保存好友关系、聊天与模组清单；整合包/模组文件只做临时中转，下载后 10 分钟删除、未下载 24 小时过期，可用 `--quota-mb` / `--global-mb` 调整。
+- **自签证书**：首次连接需要人工核对 SHA-256 指纹（客户端会显示，服务器上 `openssl x509` 也能输出）。指纹确认后固定，服务器换证书必须重新确认；没有域名也能用。
+- **聊天与隐私**：消息在服务器上以明文 JSONL 保存（磁盘权限受限），服务器管理员理论上可读；文件在删除前同样落在服务器磁盘。介意就不要用中心服务器模式。
+- **好友文件**：单文件 ≤ 2 GB；不支持断点续传；同名文件会放到独立传输目录，不会覆盖本地已有文件。
 
 ## 3. 数据目录
 
@@ -242,6 +253,37 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - `scanModsDir` 返回 `providedModIds`（真实 ID + 内嵌 ID）与 `modIdHints`；`listMods` 用 `providedModIds` 判断依赖是否满足，并把 ID 归一化为小写字母数字（`yumi-commons-core` 与 `yumi_commons_core` 视为同一个）。
 - 加载器不匹配：Forge 实例里的纯 Fabric jar（如 LambDynamicLights、fabric-language-kotlin）标记 `loaderMismatch`，UI 显示「加载器不匹配」并忽略其依赖缺失；旧 Forge 的 `FMLCorePlugin` / `TweakClass` / `FMLModType` / ModLauncher Service 通过 `loaderHints` 视为兼容，不误判。
 
+### 4.10 好友：正版账号登录、中心服务器与临时文件中转（v1.11.0）
+
+好友系统不再做 P2P：客户端用启动器里已登录的正版微软账户换取服务器会话，好友关系、在线状态、聊天与文件都经过服务器。
+
+**1）身份与登录**（`src/server/friends/server-client.js`、`tools/friends-server.mjs`）
+
+- 客户端从启动器账户模块取出可用的 Minecraft 访问令牌（`getAccountForLaunch`，过期会自动刷新），POST 到 `/api/auth/minecraft`。
+- 服务器调用 `https://api.minecraftservices.com/minecraft/profile` 校验令牌，拿到 UUID 与正版 ID；令牌只用于这一次校验，不写盘。服务器发 30 天随机会话令牌，本地按 `sha256` 存哈希。
+- 注册可加邀请码（`--invite` / `MCTB_FRIENDS_INVITE`）；已有账户再次登录不再要求邀请码。离线与 authlib 账户在客户端就被拒绝。
+- 本地 `friends.json`（0600）保存服务器地址、证书指纹、会话令牌与偏好；不保存 MC 访问令牌。
+
+**2）传输安全与服务器地址**
+
+- 服务器默认 HTTPS；证书可以是自签。客户端首次「检测服务器」时接受握手并读取证书 SHA-256 指纹，展示给用户；用户与服务器 `openssl x509 -noout -fingerprint -sha256 -in cert.pem` 核对后保存。
+- 之后每个响应都比对指纹，不一致立即断开（`TLS_FINGERPRINT_MISMATCH`）。公网 `http://` 直接拒绝，仅允许 localhost 用于测试。
+- 指纹固定属于 TOFU：第一次连接若已被中间人劫持，核对指纹是唯一防线。
+
+**3）服务器数据与接口**
+
+- 数据目录：`accounts.json`（账户、好友、请求、readAt、活动）、`sessions.json`（令牌哈希）、`messages/<a>_<b>.jsonl`（按好友对存聊天）、`mods/<uuid>.json`（各实例模组清单）、`files/index.json` + `files/<id>.bin`（临时文件）。
+- 在线状态由请求时间 + 心跳计算（70 秒窗口）；活动信息由启动器每 25 秒心跳上报，可在设置里关闭。
+- 文件：`POST /api/files` 创建 → `PUT /api/files/:id` 原始字节（校验 Content-Length/SHA-1）→ 接收方 `GET /api/files/:id/download`；下载完成 10 分钟后删除，未下载 24 小时过期。配额默认 5 GB/账号、15 GB 全局。
+- 聊天：`GET/POST /api/messages`，按好友对存储；`POST /api/read` 记录已读位置；离线消息随下次拉取返回。
+- 模组：`PUT /api/mods/:key` 上传清单，`GET /api/mods?uuid=` 仅好友可读；对比在客户端完成，补齐复用 `mods-sync.js` 的差异/停用/校验逻辑。
+
+**4）客户端行为**
+
+- `src/server/friends/manager.js` 负责：探测/保存服务器、登录、心跳、好友与聊天拉取、导出并上传整合包、下载并校验文件、模组清单上传/对比/补齐/直传。
+- 文件下载落到 `DATA_DIR/friends/received/<文件 id>/`，按服务器返回的 SHA-1 校验；整合包出现在「收到的整合包」，可直接安装。
+- 聊天页每 2 秒轮询好友/文件，1.2 秒轮询当前会话；没有 WebSocket 依赖。
+
 ## 5. 接口
 
 完整列表见 README「常用 API」。核心前缀 `/api/launcher`：
@@ -257,15 +299,17 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - `import/scan`、`import`（可传 `mc` 手动指定）、`news`
 - `update/check`、`update/state`、`update/download`、`update/apply`、`update/skip`、`update/reset`、`update/config`（检查 / 下载进度 / 替换重启 / 忽略版本 / 更新源配置）
 
-社区接口：
+好友接口 `/api/friends`（中心服务器模式）：
 
-- `GET /api/community/search?source&type&query&gameVersion&loader&limit&offset&sort`
-  - 增加 `gameVersionRequested` / `gameVersionApplied` / `gameVersionNotice`；非法或未知 `gameVersion` 不硬过滤，按全部版本搜索并给出中文提示。
-- `GET /api/community/versions?source&id&gameVersion&loader[&withMeta=1]`
-  - 默认仍返回裸数组（兼容旧调用）；`withMeta=1` 返回 `{ items, gameVersionRequested, gameVersionApplied, gameVersionNotice, notice }`。
-- `GET /api/community/project`、`POST /api/community/download`、`GET /api/community/jobs` 等保持原有行为。
-
-文件型接口（如截图）会直接写响应，`requestHandler` 在 `res.writableEnded` 时跳过 JSON 包装。错误响应统一带 `error` 字符串；启动/安装错误额外带 `code`、`detail`、`missing`、`missingCount`、`paths`、`actions`、`crash`，前端 `core/api.js` 会把这些字段附加到 `Error`。
+- `GET /api/friends`（配置/登录/好友/请求/传输/收到的包/任务/事件）、`GET /api/friends/diagnostics`
+- `POST /api/friends/server/probe`（返回证书指纹与健康信息）、`PUT /api/friends/server`
+- `POST /api/friends/login`（邀请码可选）、`POST /api/friends/logout`、`POST /api/friends/session/refresh`
+- `PUT /api/friends/self`（昵称 / 活动开关）
+- `POST /api/friends/add`（正版 ID）、`POST /api/friends/respond`、`DELETE /api/friends/:uuid`
+- `GET|POST /api/friends/:uuid/messages`、`POST /api/friends/:uuid/read`
+- `POST /api/friends/packs/share`、`POST /api/friends/transfers/:id/download`、`DELETE /api/friends/transfers/:id`
+- `POST /api/friends/mods/compare|fill|send`、`GET /api/friends/mods/jobs/:id`、`POST /api/friends/mods/jobs/:id/cancel`
+- `DELETE /api/friends/received/:id`
 
 ## 6. 验证记录
 
@@ -414,6 +458,18 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - UI 探针 3/3（新增）：连续两次 `openUpdateDialog` 后 `.modal` 数量仍为 1；弹窗打开时 `.lp-update-card` 数量为 0；关闭弹窗后 `.modal` 为 0 且卡片恢复为 1。`tools/launcher-ui-smoke.mjs` 全量 30/30，无前端控制台异常。
 - 自动化测试：`node --test tests/*.test.mjs` 208 项通过（本次为前端 DOM 行为，按仓库惯例由 UI 探针覆盖）。
 - 构建：`node build.mjs` 生成 `dist/mc-toolbox.exe`，隔离冒烟通过；`PRODUCT_VERSION` 与 `package.json` 已更新为 1.9.9。
+
+### 6.15 好友系统改为正版账号 + 中心服务器（v1.11.0）
+
+验证环境：Windows 10 x64、Node 22.18、阿里云 Ubuntu 24.04（Node 18.19.1）；日期 2026-10-25。
+
+- 自动化测试：`node --test tests/*.test.mjs` **241 项通过**。新增：
+  - `tests/friends-server.test.mjs` 9 项：MC 令牌校验与邀请码、好友请求/接受/昵称、离线聊天/未读/已读、临时文件上传下载与删除、哈希与越权校验、配额与文件名消毒、模组清单权限、会话失效与心跳。
+  - `tests/friends-client.test.mjs` 5 项：自签证书指纹探测/固定、指纹不匹配拒绝、公网 HTTP 拒绝、HTTPS 登录好友聊天、HTTPS 文件上传下载与 SHA-1。
+- 部署：`tools/friends-server.mjs` 以 systemd 运行在阿里云 443，独立用户 `mctb-friends`，`CAP_NET_BIND_SERVICE` 绑定特权端口；数据目录 `/var/lib/mc-toolbox-friends`；注册邀请码启用。
+- 真实环境：公网 `<公网 IP>` 探测返回预期证书指纹与 `{"ok":true,"name":"mc-toolbox-friends"}`；证书与服务器输出一致；临时文件上传/下载/清理路径由自动化用例覆盖。
+- 客户端：登录页显示服务器地址、证书指纹与当前启动器账户；非正版账户禁用登录并提示先登录微软账户；未登录时不会请求好友数据。
+- 构建：`node build.mjs` 生成 `dist/mc-toolbox.exe` 并通过隔离冒烟。
 
 ## 7. 截图
 

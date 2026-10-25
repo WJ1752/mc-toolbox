@@ -30,18 +30,24 @@ const ESBUILD_BIN = process.env.ESBUILD_BIN
   || findEsbuild()
 
 function findEsbuild() {
-  // Windows npm 缓存常见路径
+  // Windows npm 缓存常见路径；npm 缓存被重定向时优先读 npm_config_cache。
   const home = process.env.USERPROFILE || process.env.HOME || ''
-  const cache = path.join(home, 'AppData', 'Local', 'npm-cache', '_npx')
-  try {
-    for (const d of fs.readdirSync(cache)) {
-      // 直接指向 bin/esbuild（无扩展名但内容是 JS shebang 脚本）
-      const cand = path.join(cache, d, 'node_modules', 'esbuild', 'bin', 'esbuild')
-      if (fs.existsSync(cand)) return cand
-    }
-  } catch {}
-  // 回退：直接 npx
-  return 'npx --yes esbuild'
+  const caches = [
+    process.env.npm_config_cache ? path.join(process.env.npm_config_cache, '_npx') : '',
+    path.join(home, 'AppData', 'Local', 'npm-cache', '_npx'),
+    path.join(home, '.npm', '_npx')
+  ].filter(Boolean)
+  for (const cache of caches) {
+    try {
+      for (const d of fs.readdirSync(cache)) {
+        // 直接指向 bin/esbuild（无扩展名但内容是 JS shebang 脚本）
+        const cand = path.join(cache, d, 'node_modules', 'esbuild', 'bin', 'esbuild')
+        if (fs.existsSync(cand)) return cand
+      }
+    } catch {}
+  }
+  // 回退：直接 npx（Windows 下必须用 npx.cmd，否则 child_process 找不到）
+  return process.platform === 'win32' ? 'npx.cmd --yes esbuild' : 'npx --yes esbuild'
 }
 
 function logStep(n, msg) {
@@ -63,8 +69,13 @@ async function step0() {
 async function step1() {
   logStep(1, 'esbuild bundle server.js')
   const args = [path.join(here, 'server.js'), '--bundle', '--platform=node', '--target=node22', '--format=cjs', `--outfile=${BUNDLE_CJS}`, '--external:node:*', '--legal-comments=none', '--log-level=warning']
-  // esbuild 的真实入口是 bin/esbuild（无扩展名），通过 node 解释执行
-  await runCmd(process.execPath, [ESBUILD_BIN, ...args])
+  // esbuild 的真实入口是 bin/esbuild（无扩展名），通过 node 解释执行；
+  // 回退成 npx 命令时按空格拆分执行。
+  if (ESBUILD_BIN.includes(' ')) {
+    await runCmd(ESBUILD_BIN.split(' ')[0], ESBUILD_BIN.split(' ').slice(1).concat(args))
+  } else {
+    await runCmd(process.execPath, [ESBUILD_BIN, ...args])
+  }
   const stat = await fsp.stat(BUNDLE_CJS)
   console.log(`     bundle size: ${(stat.size / 1024).toFixed(1)} KB`)
 }
@@ -419,15 +430,22 @@ async function step6() {
 }
 
 function findPostject() {
+  if (process.env.POSTJECT_BIN) return process.env.POSTJECT_BIN
   const home = process.env.USERPROFILE || process.env.HOME || ''
-  const cache = path.join(home, 'AppData', 'Local', 'npm-cache', '_npx')
-  try {
-    for (const d of fs.readdirSync(cache)) {
-      const cand = path.join(cache, d, 'node_modules', 'postject', 'dist', 'cli.js')
-      if (fs.existsSync(cand)) return cand
-    }
-  } catch {}
-  return 'npx --yes postject'
+  const caches = [
+    process.env.npm_config_cache ? path.join(process.env.npm_config_cache, '_npx') : '',
+    path.join(home, 'AppData', 'Local', 'npm-cache', '_npx'),
+    path.join(home, '.npm', '_npx')
+  ].filter(Boolean)
+  for (const cache of caches) {
+    try {
+      for (const d of fs.readdirSync(cache)) {
+        const cand = path.join(cache, d, 'node_modules', 'postject', 'dist', 'cli.js')
+        if (fs.existsSync(cand)) return cand
+      }
+    } catch {}
+  }
+  return process.platform === 'win32' ? 'npx.cmd --yes postject' : 'npx --yes postject'
 }
 
 // ---------- 7. Windows: 把 exe 从 CONSOLE 子系统改为 GUI 子系统 ----------

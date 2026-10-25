@@ -1538,3 +1538,327 @@
   .lp-new span { display: none; }
   .lp-new { width: 26px; padding: 0; justify-content: center; }
 }
+
+/* ------------------------------------------------------------------ */
+/* 好友（P2P）                                                         */
+/* ------------------------------------------------------------------ */
+
+.lp-friends-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+  gap: 12px;
+  align-items: start;
+}
+.lp-friends-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+  align-items: start;
+}
+.lp-friends-error {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--redstone) 45%, var(--line));
+  border-radius: var(--r-1);
+  background: color-mix(in srgb, var(--redstone) 10%, var(--surface-2));
+  color: var(--redstone);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+.lp-friends-error[hidden] { display: none; }
+.lp-friends-hint {
+  font-size: 10.5px;
+  line-height: 1.7;
+  color: var(--dim);
+}
+.lp-friends-hint.warn-text { color: var(--amber, #d8a657); }
+.ok-text { color: var(--emerald); }
+.warn-text { color: var(--amber, #d8a657); }
+
+.lp-friends-code,
+.lp-friends-add,
+.lp-friends-settings,
+.lp-friends-events { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+.lp-friends-code-box,
+.lp-friends-add-box {
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 10.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.lp-friends-code-box:focus,
+.lp-friends-add-box:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+.lp-friends-code-actions,
+.lp-friends-add-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+.lp-friends-code-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 10px;
+  color: var(--mute);
+}
+.lp-friends-add-row { display: flex; }
+.lp-friends-list { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+
+.lp-friend-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  min-width: 0;
+}
+.lp-friend-row.compact { align-items: center; padding: 7px 9px; }
+.lp-friend-avatar {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+}
+.lp-friend-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.lp-friend-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+  font-size: 11.5px;
+}
+.lp-friend-top b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 180px; }
+.lp-friend-sub { font-size: 10.5px; color: var(--mute); line-height: 1.55; overflow-wrap: anywhere; }
+.lp-friend-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+  font-size: 9.5px;
+  color: var(--dim);
+}
+.lp-friend-actions { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
+.lp-friend-actions .btn { height: 24px; padding: 0 7px; font-size: 10px; }
+
+.lp-transfer-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  min-width: 0;
+}
+.lp-transfer-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; min-width: 0; }
+.lp-transfer-head b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.lp-transfer-status { margin-left: auto; font-size: 10px; color: var(--mute); }
+.lp-transfer-foot { display: flex; align-items: center; gap: 8px; justify-content: space-between; font-size: 9.5px; }
+
+.lp-received-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  min-width: 0;
+}
+.lp-received-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.lp-received-main b { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.lp-friends-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 10px;
+}
+.lp-friends-toggles { display: flex; flex-direction: column; gap: 7px; font-size: 11px; }
+.lp-friends-toggles .row { gap: 8px; align-items: center; }
+.lp-friends-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.lp-friends-kv-list { display: flex; flex-direction: column; gap: 4px; }
+.lp-friends-kv { display: flex; gap: 8px; justify-content: space-between; font-size: 10px; min-width: 0; }
+.lp-friends-kv .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+.lp-friends-event-list { display: flex; flex-direction: column; gap: 3px; }
+.lp-friends-event { display: flex; gap: 7px; font-size: 10px; line-height: 1.5; min-width: 0; }
+.lp-friends-event span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.lp-friends-modal { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.lp-friends-modal-note { font-size: 10.5px; color: var(--dim); line-height: 1.7; }
+.lp-friends-modal-status { font-size: 11px; color: var(--text); min-height: 16px; }
+.lp-friends-modal-log {
+  max-height: 130px;
+  overflow: auto;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  font-size: 9.5px;
+  line-height: 1.6;
+  color: var(--mute);
+}
+.lp-friends-mods-summary { display: flex; align-items: center; gap: 6px; font-size: 11.5px; flex-wrap: wrap; }
+.lp-friends-vs { color: var(--dim); }
+.lp-friends-mods-result { display: flex; flex-direction: column; gap: 9px; max-height: 340px; overflow: auto; }
+.lp-friends-mods-counts { display: flex; gap: 6px; flex-wrap: wrap; }
+.lp-friends-mod-group { display: flex; flex-direction: column; gap: 4px; }
+.lp-friends-mod-group > b { font-size: 10.5px; color: var(--mute); }
+.lp-friends-mod-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  padding: 3px 0;
+  min-width: 0;
+  border-bottom: 1px dashed color-mix(in srgb, var(--line) 70%, transparent);
+}
+.lp-friends-mod-line .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%; }
+.lp-friends-mod-line .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-friends-mod-pair { display: flex; align-items: center; gap: 8px; font-size: 10px; }
+.lp-friends-mod-pair .lp-friends-mod-line { flex: 1; min-width: 0; }
+.lp-friends-compare-bar { display: flex; align-items: flex-end; gap: 9px; }
+.lp-friends-compare-bar .field { flex: 1; margin: 0; }
+
+@media (max-width: 1100px) {
+  .lp-friends-hero,
+  .lp-friends-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 700px) {
+  .lp-friend-row { flex-wrap: wrap; }
+  .lp-friend-actions { width: 100%; justify-content: flex-start; }
+  .lp-friends-settings-grid { grid-template-columns: minmax(0, 1fr); }
+  .lp-friends-compare-bar { flex-direction: column; align-items: stretch; }
+}
+
+/* 好友列表 + 聊天框 */
+.lp-friends-chat-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 330px) minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+  align-items: stretch;
+}
+.lp-friends-side .lp-card-body { max-height: 620px; overflow: auto; }
+.lp-friends-chat-main .lp-card-body { padding: 0; min-height: 460px; display: flex; }
+.lp-friends-chat-main .lp-card-head { border-bottom: 1px solid var(--line); }
+.lp-chat { display: flex; flex-direction: column; width: 100%; min-height: 460px; min-width: 0; }
+.lp-chat-panel { display: flex; flex-direction: column; width: 100%; min-height: 460px; min-width: 0; }
+.lp-chat-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 11px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-2) 60%, transparent);
+  flex-wrap: wrap;
+}
+.lp-chat-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.lp-chat-title b { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-chat-status { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; color: var(--mute); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-chat-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.lp-chat-actions .btn { height: 24px; padding: 0 7px; font-size: 10px; }
+.lp-chat-log {
+  flex: 1;
+  min-height: 300px;
+  max-height: 520px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px;
+  background: color-mix(in srgb, var(--bg, #14100e) 35%, transparent);
+}
+.lp-chat-msg { display: flex; flex-direction: column; gap: 2px; max-width: 78%; min-width: 0; }
+.lp-chat-msg.out { align-self: flex-end; align-items: flex-end; }
+.lp-chat-msg.in { align-self: flex-start; align-items: flex-start; }
+.lp-chat-bubble {
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.lp-chat-msg.out .lp-chat-bubble {
+  background: color-mix(in srgb, var(--accent) 16%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+}
+.lp-chat-meta { font-size: 9px; color: var(--dim); }
+.lp-chat-empty { margin: auto; font-size: 11px; color: var(--mute); padding: 24px 0; text-align: center; }
+.lp-chat-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 9px 11px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+}
+.lp-chat-input {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.55;
+  font-family: inherit;
+}
+.lp-chat-input:focus { outline: none; border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.lp-chat-input:disabled { opacity: 0.6; cursor: not-allowed; }
+.lp-friend-row.selectable { cursor: pointer; text-align: left; width: 100%; transition: border-color .12s, background .12s; }
+.lp-friend-row.selectable:hover { border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); }
+.lp-friend-row.selectable.active {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface-2));
+}
+.lp-friend-row .lp-friend-status { display: inline-flex; align-items: center; gap: 4px; font-size: 9.5px; color: var(--mute); }
+.lp-friend-preview {
+  font-size: 10px;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+@media (max-width: 1100px) {
+  .lp-friends-chat-layout { grid-template-columns: minmax(0, 1fr); }
+  .lp-friends-side .lp-card-body { max-height: 280px; }
+  .lp-chat-log { max-height: 360px; }
+}
+
+.lp-friends-subhead {
+  margin-top: 2px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--mute);
+  letter-spacing: .04em;
+}
+.lp-chat-title .badge { margin-left: 2px; }
+
+/* 中心好友服务器：连接与登录 */
+.lp-friends-setup { display: flex; flex-direction: column; gap: 9px; max-width: 680px; min-width: 0; }
+.lp-friends-profile { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.lp-friends-profile .lp-friend-main { flex: 1; }
+.lp-friends-kv-list { display: flex; flex-direction: column; gap: 5px; }
