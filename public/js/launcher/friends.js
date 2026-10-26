@@ -219,6 +219,14 @@ export function createFriendsView(ctx) {
     refs.transfersBody = h('div')
     refs.transfersActions = h('div', { class: 'lp-friend-actions' })
     refs.receivedTitle = h('span', {})
+    refs.receivedClear = btn('清除记录', {
+      size: 'xs',
+      variant: 'ghost',
+      iconName: 'trash',
+      title: '删除全部接收记录（默认接收目录里的暂存文件一并删除）',
+      onClick: () => void clearReceivedRecords()
+    })
+    refs.receivedClear.disabled = true
     refs.receivedBody = h('div')
     refs.chat = h('div', { class: 'lp-chat' })
     refs.settings = h('div', { class: 'lp-friends-settings' })
@@ -277,7 +285,7 @@ export function createFriendsView(ctx) {
         h('section', { class: 'lp-card lp-friends-received' },
           h('div', { class: 'lp-card-head' },
             h('div', { class: 'lp-card-title' }, h('b', {}, '已接收文件'), refs.receivedTitle),
-            h('div', { class: 'lp-card-actions' }, iconBtn('collapse', {
+            h('div', { class: 'lp-card-actions' }, refs.receivedClear, iconBtn('collapse', {
               label: '折叠已接收文件',
               size: 14,
               onClick: () => {
@@ -960,6 +968,7 @@ export function createFriendsView(ctx) {
     if (!refs.receivedBody || !data) return
     const items = data.received || []
     refs.receivedTitle.textContent = items.length ? `${items.length} 个` : ''
+    if (refs.receivedClear) refs.receivedClear.disabled = !items.length
     if (ui.receivedCollapsed) {
       refs.receivedBody.hidden = true
       refs.receivedBody.replaceChildren()
@@ -971,6 +980,24 @@ export function createFriendsView(ctx) {
       return
     }
     refs.receivedBody.replaceChildren(...items.map(receivedRow))
+  }
+
+  /** 一键清除全部接收记录；默认接收目录里的暂存文件一并删除。 */
+  async function clearReceivedRecords() {
+    const items = data?.received || []
+    if (!items.length) return
+    const ok = await ctx.confirm(
+      `清除全部 ${items.length} 条接收记录？\n\n默认接收目录里的暂存文件会一并删除；另存到其他目录的文件不受影响。`,
+      { title: '清除接收记录', danger: true, okText: '清除' }
+    )
+    if (!ok) return
+    try {
+      const result = await ctx.api.friendsClearReceived()
+      toast(result?.removed ? `已清除 ${result.removed} 条接收记录` : '没有可清除的记录', 'ok')
+      await refreshData(true)
+    } catch (error) {
+      toast(error.message, 'err')
+    }
   }
 
   function receivedRow(item) {

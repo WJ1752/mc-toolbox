@@ -47,6 +47,7 @@ export function registerFriendsApi(on, { readBody } = {}) {
   })
   on('POST', '/api/friends/transfers/clear-finished', async () => manager.clearFinishedTransfers())
   on('DELETE', '/api/friends/transfers/:id', async (_req, params) => await manager.cancelFile(params.id))
+  on('POST', '/api/friends/received/clear', async () => await manager.clearReceived())
   on('POST', '/api/friends/received/:id/save-as', async (req, params) => {
     const payload = await body(req)
     return await manager.saveReceivedAs(params.id, { dir: payload.dir, name: payload.name })

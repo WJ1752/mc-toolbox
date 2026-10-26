@@ -156,6 +156,17 @@ export class ClientStore {
     return state.received.length !== before
   }
 
+  /** 清空全部接收记录，返回清掉的条数。 */
+  clearReceived() {
+    const state = this.load()
+    const removed = state.received.length
+    if (removed) {
+      state.received = []
+      this.scheduleSave()
+    }
+    return removed
+  }
+
   saveNow() {
     this.load()
     try {

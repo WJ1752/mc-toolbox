@@ -128,7 +128,7 @@ export const launcherApi = {
   saveUpdateConfig: (patch) => api.put('/api/launcher/update/config', patch),
 
   // 好友（中心服务器：正版 MC 账号登录）
-  friends: () => api.get('/api/friends'),
+  friends: () => api.get('/api/friends', { allowErrorField: true }),
   friendsNotifications: () => api.get('/api/friends/notifications'),
   friendsDiagnostics: () => api.get('/api/friends/diagnostics'),
   friendsLogin: (invite = '') => api.post('/api/friends/login', { invite }),
@@ -151,6 +151,7 @@ export const launcherApi = {
   friendsClearFinishedTransfers: () => api.post('/api/friends/transfers/clear-finished', {}),
   friendsCancelTransfer: (id) => api.del(`/api/friends/transfers/${encodeURIComponent(id)}`),
   friendsSaveReceivedAs: (id, payload) => api.post(`/api/friends/received/${encodeURIComponent(id)}/save-as`, payload),
+  friendsClearReceived: () => api.post('/api/friends/received/clear', {}),
   friendsApplyReceived: (id, instanceId) => api.post(`/api/friends/received/${encodeURIComponent(id)}/apply`, { instanceId }),
   friendsRemoveReceived: (id) => api.del(`/api/friends/received/${encodeURIComponent(id)}`)
 }

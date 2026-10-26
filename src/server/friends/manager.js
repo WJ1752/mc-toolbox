@@ -1044,9 +1044,19 @@ export async function snapshot() {
       serverTime: data?.friends?.serverTime || 0
     }
   } catch (fetchError) {
-    error = fetchError.message
+    error = friendlyServerError(fetchError)
     return { ...base, error }
   }
+}
+
+/** 把网络层错误转成用户能看懂的提示。 */
+function friendlyServerError(error) {
+  const code = String(error?.code || '')
+  if (['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET', 'EAI_AGAIN', 'NETWORK', 'TIMEOUT'].includes(code)) {
+    return '好友服务器暂时不可用，请检查网络后重试'
+  }
+  if (code === 'SESSION_EXPIRED') return '登录已失效，请重新登录'
+  return error?.message || '好友服务器请求失败'
 }
 
 export async function diagnostics() {
@@ -1065,13 +1075,29 @@ export async function diagnostics() {
 export async function removeReceived(id) {
   const record = (getStore().get().received || []).find((item) => item.id === id)
   if (!record) return false
-  for (const file of record.files) {
-    const target = path.resolve(file.path)
+  await removeReceivedFiles(record)
+  getStore().removeReceived(id)
+  return true
+}
+
+/** 只删默认接收目录里的暂存文件夹；另存到其它目录的副本保持不动。 */
+async function removeReceivedFiles(record) {
+  for (const file of Array.isArray(record?.files) ? record.files : []) {
+    const target = path.resolve(String(file?.path || ''))
+    if (!target || target === path.resolve(receivedRoot)) continue
     if (!target.startsWith(path.resolve(receivedRoot) + path.sep)) continue
     await fsp.rm(path.dirname(target), { recursive: true, force: true }).catch(() => {})
   }
-  getStore().removeReceived(id)
-  return true
+}
+
+/** 一键清除全部接收记录：同时清理默认接收目录中的暂存文件，返回清掉的条数。 */
+export async function clearReceived() {
+  const store = getStore()
+  const records = Array.isArray(store.get().received) ? [...store.get().received] : []
+  for (const record of records) await removeReceivedFiles(record)
+  const removed = store.clearReceived()
+  await store.flush().catch(() => {})
+  return { ok: true, removed }
 }
 
 export async function stopFriends() {

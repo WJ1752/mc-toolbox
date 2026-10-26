@@ -308,8 +308,8 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - `POST /api/friends/add`（正版 ID）、`POST /api/friends/respond`、`DELETE /api/friends/:uuid`
 - `GET|POST /api/friends/:uuid/messages`、`POST /api/friends/:uuid/read`
 - `POST /api/friends/packs/share`、`POST /api/friends/transfers/:id/download`、`DELETE /api/friends/transfers/:id`
+- `POST /api/friends/received/clear`（清空全部接收记录）、`POST /api/friends/received/:id/save-as`、`POST /api/friends/received/:id/apply`、`DELETE /api/friends/received/:id`
 - `POST /api/friends/mods/compare|fill|send`、`GET /api/friends/mods/jobs/:id`、`POST /api/friends/mods/jobs/:id/cancel`
-- `DELETE /api/friends/received/:id`
 
 ## 6. 验证记录
 
@@ -481,6 +481,17 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - 自动化测试：`node --test tests/*.test.mjs` **259 项通过**。新增 `tests/launcher-mod-dedupe.test.mjs` 9 项：版本比较、同 modId 多版本、启用优先、内容哈希合并、无元数据文件名兜底、可回收空间汇总、列表整组标记与删除、禁用模式、越界与保留文件缺失。
 - UI 探针：隔离 EXE（`LOCALAPPDATA` + 临时 `dirs.json` / `launcher.json`）伪造一个含 2 组重复的实例，headless Edge 23/23 通过——工具栏显示「整理重复 (2)」、主列表「重复」筛选只显示 4 个组内文件、弹窗按「内容相同」收敛到 1 组、改选保留旧版本、底部计数随选择更新、禁用后文件变为 `.jar.disabled`、再次删除后只剩 3 个文件且重复组归零、空状态与无控制台异常。
 - 构建：`node build.mjs` 生成 `dist/mc-toolbox.exe`（82.9 MB）并通过隔离冒烟；`package.json` / `PRODUCT_VERSION` 为 1.12.1。
+
+### 6.17 已接收文件一键清除（v1.12.2）
+
+验证环境：Windows 10 x64、Node 22.18、headless Edge 155；日期 2026-10-26。
+
+- 接口与语义：`POST /api/friends/received/clear` 清空本地全部接收记录并返回 `{ ok, removed }`；只删除 `receivedRoot` 内的暂存文件夹，另存到其它目录的文件保持不动。单条删除（`DELETE /api/friends/received/:id`）与批量清除共用 `removeReceivedFiles()`，避免行为分叉。
+- 持久化：`ClientStore.clearReceived()` 一次清空并安排落盘，管理器在返回前 `flush()`，刷新后不会出现“记录又回来了”。
+- 离线可用：好友页读取接口改为允许快照里的业务 `error` 字段（`allowErrorField`），服务器连不上时也能渲染本地接收记录并执行清除，页面顶部显示中文错误条而不是一直停在“正在读取好友状态…”。
+- 自动化测试：`node --test tests/*.test.mjs` **262 项通过**。新增 `tests/friends-received-clear.test.mjs` 3 项：批量清除删除暂存目录且保留另存副本、单条删除同语义、`ClientStore.clearReceived` 条数与落盘。
+- UI 探针：隔离 EXE 的 `friends.json` 预置 3 条接收记录（2 条在默认接收目录、1 条另存），并把好友服务器指向不可达地址；headless Edge 16/16 通过——中文错误条、清除按钮、二次确认、列表清空、暂存目录删除、另存文件保留、记录落盘清空，无控制台异常。
+- 构建：`node build.mjs` 生成 `dist/mc-toolbox.exe` 并通过隔离冒烟；`package.json` / `PRODUCT_VERSION` 为 1.12.2。
 
 ## 7. 截图
 
