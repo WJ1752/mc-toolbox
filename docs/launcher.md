@@ -293,6 +293,7 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - `instances/:id/content?type=mods|resourcepacks|shaderpacks|worlds|screenshots|servers|logs|summary`
 - `instances/:id/upload`（原始字节 + `X-File-Name`）、`mods/toggle`、`mods/delete`、`content/delete`、`resourcepack`、`servers`
 - `instances/:id/mods/updates`、`mods/update`、`mods/missing`（Modrinth 更新检查 / 缺失前置）
+- `instances/:id/mods/duplicates`、`mods/dedupe`（重复模组报告；按组提交 `keep` / `remove` 与 `mode=delete|disable`）
 - `instances/:id/export`（创建导出任务）、`exports`、`exports/:id`、`exports/:id/cancel`
 - `versions`、`loaders/:loader/versions`、`install`、`jobs`、`packs/install|upload|inspect|install-online`
 - `java`、`java/required`、`accounts/*`（离线/微软/authlib/select/refresh/delete）
@@ -470,6 +471,16 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - 真实环境：公网 `<公网 IP>` 探测返回预期证书指纹与 `{"ok":true,"name":"mc-toolbox-friends"}`；证书与服务器输出一致；临时文件上传/下载/清理路径由自动化用例覆盖。
 - 客户端：登录页只显示「官方服务器（内置）」与当前启动器账户，不显示地址/证书指纹，也没有修改入口；非正版账户禁用登录并提示先登录微软账户；未登录时不会请求好友数据。
 - 构建：`node build.mjs` 生成 `dist/mc-toolbox.exe` 并通过隔离冒烟。
+
+### 6.16 模组一键去重（v1.12.1）
+
+验证环境：Windows 10 x64、Node 22.18、headless Edge 155；日期 2026-10-26。
+
+- 分组规则（`src/server/launcher/mod-dedupe.js`）：同一 `modId`（含多 modId jar 的并集）的文件归为一组；大小相同且 SHA-256 一致的文件再按内容合并（重命名复制品）；完全没有元数据的 jar 按去掉版本号的规范文件名兜底。保留建议顺序：启用优先 → 版本更高（含 `-hotfix` / 预发布比较）→ 文件名不带复制后缀 → 修改时间新。
+- 接口：`GET /api/launcher/instances/:id/mods/duplicates` 返回 `groups / totalGroups / duplicateItems / reclaimBytes`；`POST .../mods/dedupe` 接受 `mode=delete|disable` 与逐组 `keep / remove`，路径越出 `mods` 或保留文件不存在时拒绝执行。列表接口新增 `duplicateGroups / duplicateItems` 与每个文件的 `duplicateGroup / duplicateKeep / duplicateOf`，只做 ID 分组、不算哈希，避免每次刷新读整包。
+- 自动化测试：`node --test tests/*.test.mjs` **259 项通过**。新增 `tests/launcher-mod-dedupe.test.mjs` 9 项：版本比较、同 modId 多版本、启用优先、内容哈希合并、无元数据文件名兜底、可回收空间汇总、列表整组标记与删除、禁用模式、越界与保留文件缺失。
+- UI 探针：隔离 EXE（`LOCALAPPDATA` + 临时 `dirs.json` / `launcher.json`）伪造一个含 2 组重复的实例，headless Edge 23/23 通过——工具栏显示「整理重复 (2)」、主列表「重复」筛选只显示 4 个组内文件、弹窗按「内容相同」收敛到 1 组、改选保留旧版本、底部计数随选择更新、禁用后文件变为 `.jar.disabled`、再次删除后只剩 3 个文件且重复组归零、空状态与无控制台异常。
+- 构建：`node build.mjs` 生成 `dist/mc-toolbox.exe`（82.9 MB）并通过隔离冒烟；`package.json` / `PRODUCT_VERSION` 为 1.12.1。
 
 ## 7. 截图
 

@@ -219,9 +219,11 @@ async function mountMods(container, t) {
   }
   const updateAllBtn = btn('全部更新', { size: 'sm', iconName: 'download', disabled: true, onClick: () => updateAll() })
   const checkBtn = btn('检查更新', { size: 'sm', iconName: 'refresh', onClick: () => checkUpdates(true) })
+  const dedupeLabel = h('span', {}, '整理重复')
+  const dedupeBtn = btn(dedupeLabel, { size: 'sm', iconName: 'copy', onClick: () => openDedupe() })
   container.appendChild(tabEl(
-    barEl(searchInput, seg([['all', '全部'], ['enabled', '已启用'], ['disabled', '已禁用']], 'all', (value) => { filter = value; paint() }), spacer(), count,
-      checkBtn, updateAllBtn,
+    barEl(searchInput, seg([['all', '全部'], ['enabled', '已启用'], ['disabled', '已禁用'], ['duplicate', '重复']], 'all', (value) => { filter = value; paint() }), spacer(), count,
+      checkBtn, updateAllBtn, dedupeBtn,
       btn('打开 mods 文件夹', { size: 'sm', iconName: 'folder-open', onClick: openFolder }),
       btn('导入 JAR', { size: 'sm', iconName: 'upload', onClick: importOne }),
       btn('安装模组', { size: 'sm', variant: 'primary', iconName: 'package-down', onClick: () => openInstall() })),
@@ -252,21 +254,34 @@ async function mountMods(container, t) {
     const all = data.items || []
     const missing = data.missingDependencies || []
     const updates = updateState.data?.updates || []
+    const duplicateGroups = Number(data.duplicateGroups) || 0
+    const duplicateItems = Number(data.duplicateItems) || 0
     count.textContent = `共 ${data.total ?? all.length} · 启用 ${data.enabled ?? 0} · 禁用 ${data.disabled ?? 0}` +
+      (duplicateGroups ? ` · 重复 ${duplicateGroups} 组` : '') +
       (updates.length ? ` · ${updates.length} 个可更新` : '') +
       (missing.length ? ` · 缺少 ${missing.length} 个前置` : '')
+    dedupeLabel.textContent = duplicateGroups ? `整理重复 (${duplicateGroups})` : '整理重复'
+    dedupeBtn.title = duplicateGroups
+      ? `${duplicateGroups} 组重复 · ${duplicateItems} 个多余文件，可筛选后选择保留或一键删除`
+      : '扫描重复模组；没有重复时只显示提示'
+    dedupeBtn.classList.toggle('has-dup', duplicateGroups > 0)
     paintUpdates()
     const map = updateMap()
     const items = all.filter((item) =>
-      (filter === 'all' || (filter === 'enabled' ? !item.disabled : item.disabled)) &&
+      (filter === 'all'
+        || (filter === 'enabled' ? !item.disabled : filter === 'disabled' ? item.disabled : !!item.duplicateGroup)) &&
       (!query || [item.name, item.modid, item.file, ...(item.modids || [])].join(' ').toLowerCase().includes(query)))
     if (!items.length) {
-      list.replaceChildren(emptyBlock(all.length ? '没有匹配的模组' : '还没有安装模组',
-        all.length ? '换个关键词，或把筛选切回“全部”。' : '拖入 JAR，或点击“安装模组”从 Modrinth / CurseForge 搜索。',
+      const duplicateView = filter === 'duplicate'
+      list.replaceChildren(emptyBlock(
+        all.length ? (duplicateView && !query ? '没有重复模组' : '没有匹配的模组') : '还没有安装模组',
+        all.length
+          ? (duplicateView && !query ? '当前实例里每个模组都只有一个文件，不需要整理。' : '换个关键词，或把筛选切回“全部”。')
+          : '拖入 JAR，或点击“安装模组”从 Modrinth / CurseForge 搜索。',
         all.length
           ? btn('清除筛选', { size: 'sm', onClick: () => { query = ''; filter = 'all'; searchInput.value = ''; paint() } })
           : btn('安装模组', { size: 'sm', variant: 'primary', iconName: 'package-down', onClick: () => openInstall() }),
-        'puzzle'))
+        duplicateView && !query ? 'check' : 'puzzle'))
       return
     }
     fillList(list, items, null, (item) => modItem(item, map.get(item.relPath)))
@@ -319,7 +334,11 @@ async function mountMods(container, t) {
         titleEl(h('b', { title: label }, label), badge(env[0], env[1]),
           item.version ? chip('v' + item.version, 'lp-chip mono') : null,
           upd ? badge('可更新 ' + (upd.latest?.number || ''), 'accent') : null,
-          item.duplicateOf ? badge('重复', 'warn') : null,
+          item.duplicateGroup
+            ? (item.duplicateKeep
+              ? badge('重复 · 建议保留', 'accent')
+              : badge('重复', 'warn'))
+            : null,
           item.loaderMismatch ? badge('加载器不匹配', 'warn') : null,
           missing.length && !item.loaderMismatch ? badge('缺少依赖', 'bad') : null),
         metaEl([item.modid, item.loader ? (MOD_LOADER_LABELS[item.loader] || item.loader) : null, item.file, fmtBytes(item.size), fmtAgo(item.mtime)]),
@@ -344,6 +363,237 @@ async function mountMods(container, t) {
       after: async () => { await load(false); await t.reloadInstance() }
     })
     mutating = false
+  }
+
+  /* ---------------- 重复模组整理 ---------------- */
+  async function openDedupe() {
+    const report = { loading: true, error: '', data: null }
+    const selection = new Map()
+    const rowSyncs = new Map()
+    let query = ''
+    let kind = 'all'
+    let busy = false
+
+    const summary = h('div', { class: 'lp-dedupe-summary' })
+    const search = input({ placeholder: '搜索模组名、文件名或 modid', onInput: () => { query = search.value.trim().toLowerCase(); paint() } })
+    search.style.flex = '1 1 220px'
+    search.style.minWidth = '150px'
+    const kindSeg = seg(
+      [['all', '全部'], ['identical', '内容相同'], ['version', '版本不同']],
+      'all',
+      (value) => { kind = value; paint() }
+    )
+    const groupsBox = h('div', { class: 'lp-dedupe-groups' })
+    const toolbar = h('div', { class: 'lp-dedupe-toolbar' }, search, kindSeg, spacer(),
+      btn('恢复推荐', { size: 'xs', iconName: 'wand', onClick: () => { resetSelection(); paint() } }))
+    const body = h('div', { class: 'lp-dedupe' }, summary, toolbar, groupsBox)
+    const modal = t.modal({ title: '一键整理重复模组', size: 'lg', body })
+    const cancelBtn = btn('取消', { class: 'btn-ghost', onClick: () => modal.close() })
+    const disableLabel = h('span', {}, '禁用多余')
+    const deleteLabel = h('span', {}, '删除多余')
+    const disableBtn = btn(disableLabel, { iconName: 'eye-off', disabled: true, onClick: () => apply('disable') })
+    const deleteBtn = btn(deleteLabel, { variant: 'danger', iconName: 'trash', disabled: true, onClick: () => apply('delete') })
+    modal.foot.append(cancelBtn, disableBtn, deleteBtn)
+
+    function resetSelection() {
+      selection.clear()
+      for (const group of report.data?.groups || []) {
+        selection.set(group.id, { keep: group.keep, checked: true })
+      }
+    }
+
+    function selectedPlan() {
+      const plan = []
+      for (const group of report.data?.groups || []) {
+        const state = selection.get(group.id)
+        if (!state?.checked || !state.keep) continue
+        const remove = group.items
+          .filter((item) => item.relPath !== state.keep)
+          .map((item) => item.relPath)
+        if (remove.length) plan.push({ keep: state.keep, remove })
+      }
+      return plan
+    }
+
+    function matches(group) {
+      if (kind === 'identical' && group.kind !== 'identical') return false
+      if (kind === 'version' && group.kind !== 'version') return false
+      if (!query) return true
+      const text = [group.label, group.modid, ...group.items.map((item) => item.file)]
+        .join(' ').toLowerCase()
+      return text.includes(query)
+    }
+
+    function updateFoot() {
+      const groups = report.data?.groups || []
+      const plan = selectedPlan()
+      const removeCount = plan.reduce((sum, group) => sum + group.remove.length, 0)
+      disableLabel.textContent = removeCount ? `禁用多余 (${removeCount})` : '禁用多余'
+      deleteLabel.textContent = removeCount ? `删除多余 (${removeCount})` : '删除多余'
+      disableBtn.disabled = busy || !removeCount
+      deleteBtn.disabled = busy || !removeCount
+      cancelBtn.disabled = busy
+      if (!report.data) return
+      summary.replaceChildren(
+        h('div', { class: 'lp-dedupe-summary-main' },
+          icon('copy', { size: 15 }),
+          h('b', {}, `发现 ${groups.length} 组重复模组`),
+          h('span', {}, `${report.data.duplicateItems || 0} 个多余文件 · 可回收 ${fmtBytes(report.data.reclaimBytes || 0)}`)),
+        h('div', { class: 'lp-dedupe-summary-pick' }, `已选 ${plan.length}/${groups.length} 组 · 将处理 ${removeCount} 个文件`)
+      )
+    }
+
+    function paint() {
+      clear(groupsBox)
+      rowSyncs.clear()
+      if (report.loading) {
+        summary.replaceChildren(h('div', { class: 'lp-dedupe-summary-main' }, spinner(12), h('span', {}, '正在扫描模组并比对文件内容…')))
+        groupsBox.appendChild(h('div', { class: 'lp-tab-loading' }, spinner(13), '正在读取模组元数据与文件哈希…'))
+        updateFoot()
+        return
+      }
+      if (report.error) {
+        summary.replaceChildren(h('div', { class: 'lp-hint bad' }, '扫描失败：' + report.error))
+        groupsBox.appendChild(failBlock('无法扫描重复模组', report.error, () => { void reload() }))
+        updateFoot()
+        return
+      }
+      const groups = report.data?.groups || []
+      if (!groups.length) {
+        summary.replaceChildren(h('div', { class: 'lp-dedupe-summary-main' }, icon('check', { size: 15 }), h('b', {}, '没有重复模组')))
+        groupsBox.appendChild(emptyBlock('没有重复模组', '当前实例里每个模组都只有一个文件，不需要整理。', null, 'check'))
+        updateFoot()
+        return
+      }
+      const visible = groups.filter(matches)
+      if (!visible.length) {
+        summary.replaceChildren()
+        groupsBox.appendChild(emptyBlock('没有匹配的重复组', '换个关键词，或把筛选切回“全部”。', null, 'filter'))
+        updateFoot()
+        return
+      }
+      for (const group of visible) groupsBox.appendChild(groupCard(group))
+      updateFoot()
+    }
+
+    function groupCard(group) {
+      const state = selection.get(group.id)
+      const card = h('div', { class: 'lp-dedupe-group' + (state?.checked ? '' : ' is-off') })
+      const checkbox = h('input', { type: 'checkbox', 'aria-label': '处理这一组' })
+      checkbox.checked = state?.checked !== false
+      checkbox.onchange = () => {
+        const target = selection.get(group.id)
+        if (target) target.checked = checkbox.checked
+        card.classList.toggle('is-off', !checkbox.checked)
+        updateFoot()
+      }
+      const head = h('div', { class: 'lp-dedupe-head' },
+        h('label', { class: 'lp-inline-check' }, checkbox, '处理'),
+        h('div', { class: 'lp-dedupe-group-title' },
+          h('b', { title: group.label }, group.label),
+          group.modid ? h('span', { class: 'lp-dedupe-modid mono' }, group.modid) : null,
+          group.kind === 'identical' ? badge('内容完全相同', 'warn')
+            : group.kind === 'version' ? badge('版本不同', 'accent')
+              : badge('版本相同', '')),
+        h('span', { class: 'lp-dedupe-reclaim mono' }, `可回收 ${fmtBytes(group.reclaimSize)}`)
+      )
+      const rows = h('div', { class: 'lp-dedupe-items' })
+      const syncs = []
+      for (const item of group.items) rows.appendChild(itemRow(group, item, syncs))
+      rowSyncs.set(group.id, syncs)
+      card.append(head, rows)
+      return card
+    }
+
+    function itemRow(group, item, syncs) {
+      const radio = h('input', { type: 'radio', name: 'dedupe-' + group.id, value: item.relPath })
+      const tag = h('span', { class: 'lp-dedupe-tag' })
+      const recommended = item.relPath === group.keep
+      const row = h('label', { class: 'lp-dedupe-item' },
+        radio,
+        h('span', { class: 'lp-dedupe-file mono', title: item.relPath }, item.file),
+        h('span', { class: 'lp-dedupe-tags' },
+          item.disabled ? badge('已禁用', 'warn') : badge('已启用', 'ok'),
+          recommended ? badge(group.keepReason || '推荐保留', 'accent') : null,
+          item.version ? chip('v' + item.version, 'lp-chip mono') : null),
+        h('span', { class: 'lp-dedupe-meta mono' }, [fmtBytes(item.size), fmtAgo(item.mtime)].filter(Boolean).join(' · ')),
+        tag
+      )
+      const sync = () => {
+        const isKeep = selection.get(group.id)?.keep === item.relPath
+        row.classList.toggle('is-keep', isKeep)
+        row.classList.toggle('is-remove', !isKeep)
+        tag.textContent = isKeep ? '保留' : '删除'
+        tag.className = 'lp-dedupe-tag ' + (isKeep ? 'keep' : 'remove')
+        radio.checked = isKeep
+      }
+      radio.onchange = () => {
+        const target = selection.get(group.id)
+        if (target) target.keep = item.relPath
+        for (const fn of rowSyncs.get(group.id) || []) fn()
+        updateFoot()
+      }
+      syncs.push(sync)
+      sync()
+      return row
+    }
+
+    async function reload() {
+      report.loading = true
+      report.error = ''
+      report.data = null
+      paint()
+      try {
+        report.data = await t.api.modDuplicates(t.id)
+        resetSelection()
+      } catch (error) {
+        report.error = error.message
+      } finally {
+        report.loading = false
+        if (body.isConnected) paint()
+      }
+    }
+
+    async function apply(mode) {
+      if (busy) return
+      const plan = selectedPlan()
+      if (!plan.length) { t.toast('没有选中要处理的重复文件', 'warn'); return }
+      const removeCount = plan.reduce((sum, group) => sum + group.remove.length, 0)
+      const verb = mode === 'disable' ? '禁用' : '删除'
+      const ok = await t.confirm(
+        `将${verb} ${removeCount} 个重复文件，每组保留 1 个（共 ${plan.length} 组）。\n\n` +
+          (mode === 'disable'
+            ? '禁用只是把文件改名为 .jar.disabled，随时可以在模组列表里重新启用。'
+            : '删除后无法恢复；不确定时请先选「禁用多余」。'),
+        { title: `${verb}重复模组`, danger: mode === 'delete', okText: verb }
+      )
+      if (!ok || !body.isConnected) return
+      busy = true
+      updateFoot()
+      try {
+        const result = await t.api.cleanModDuplicates(t.id, mode, plan)
+        const done = result?.done?.length || 0
+        const failed = result?.failed || []
+        const skipped = result?.skipped?.length || 0
+        t.toast(
+          `${verb}了 ${done} 个重复文件` +
+            (failed.length ? `，${failed.length} 个失败` : '') +
+            (skipped ? `，${skipped} 个已跳过` : ''),
+          failed.length ? 'warn' : 'ok'
+        )
+        if (failed.length) console.warn('[mods] 重复模组清理失败项', failed)
+        modal.close()
+        await load(false)
+        await t.reloadInstance()
+      } catch (error) {
+        t.toast(`${verb}失败：` + error.message, 'err')
+      } finally {
+        busy = false
+        if (body.isConnected) updateFoot()
+      }
+    }
+
+    void reload()
   }
 
   /* ---------------- 更新 ---------------- */

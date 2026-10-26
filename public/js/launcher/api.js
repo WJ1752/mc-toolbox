@@ -65,6 +65,8 @@ export const launcherApi = {
   modUpdates: (id, force = false) => api.get(`/api/launcher/instances/${encodeURIComponent(id)}/mods/updates${force ? '?force=1' : ''}`),
   updateMods: (id, items) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/mods/update`, { items }),
   missingDependencies: (id) => api.get(`/api/launcher/instances/${encodeURIComponent(id)}/mods/missing`),
+  modDuplicates: (id) => api.get(`/api/launcher/instances/${encodeURIComponent(id)}/mods/duplicates`),
+  cleanModDuplicates: (id, mode, groups) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/mods/dedupe`, { mode, groups }),
   deleteContent: (id, type, name) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/content/delete`, { type, name }),
   setResourcePack: (id, name, enabled) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/resourcepack`, { name, enabled }),
   serverAction: (id, payload) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/servers`, payload),

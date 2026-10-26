@@ -393,6 +393,23 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
     const inst = instanceOf(params.id)
     return await resolveMissingDependencies(inst)
   })
+  on('GET', '/api/launcher/instances/:id/mods/duplicates', async (_req, params) => {
+    const inst = instanceOf(params.id)
+    return await content.findDuplicateMods(inst)
+  })
+  on('POST', '/api/launcher/instances/:id/mods/dedupe', async (req, params) => {
+    const body = await readBody(req)
+    const inst = instanceOf(params.id)
+    const mode = body.mode === 'disable' ? 'disable' : 'delete'
+    const groups = (Array.isArray(body.groups) ? body.groups : [])
+      .map((group) => ({
+        keep: String(group?.keep || ''),
+        remove: (Array.isArray(group?.remove) ? group.remove : []).map(String).filter(Boolean)
+      }))
+      .filter((group) => group.keep && group.remove.length)
+    if (!groups.length) throw new Error('没有需要整理的重复模组')
+    return await content.cleanDuplicateMods(inst, { mode, groups })
+  })
   on('POST', '/api/launcher/instances/:id/content/delete', async (req, params) => {
     const body = await readBody(req)
     const inst = instanceOf(params.id)

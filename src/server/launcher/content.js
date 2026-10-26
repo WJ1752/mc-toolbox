@@ -4,6 +4,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { instancePaths, findInstance } from './state.js'
 import { scanModsDir } from '../mods.js'
+import { groupModDuplicates, analyzeModDuplicates, cleanupDuplicateMods } from './mod-dedupe.js'
 import { listWorlds } from '../saveeditor.js'
 import { inspectCrash } from './launch.js'
 import { parse as nbtParse, write as nbtWrite, NbtNum } from '../nbt.js'
@@ -129,13 +130,9 @@ export async function listMods(inst, { signal } = {}) {
     for (const id of ids) if (id) provided.add(dependencyId(id))
     for (const id of Object.keys(item.providedVersions || {})) provided.add(dependencyId(id))
   }
-  const seen = new Map()
   const platform = new Set(['minecraft', 'forge', 'neoforge', 'fabricloader', 'fabric', 'quilt_loader', 'quilt', 'java']
     .map((id) => dependencyId(id)))
   for (const item of items) {
-    const key = String(item.modid || item.modids?.[0] || item.relPath).toLowerCase()
-    if (seen.has(key)) item.duplicateOf = seen.get(key)
-    else seen.set(key, item.relPath)
     const instanceLoader = String(inst.loader || 'vanilla').toLowerCase()
     const compatibleHints = new Set(instanceLoader === 'neoforge' ? ['forge', 'neoforge'] : [instanceLoader])
     const hinted = (item.loaderHints || []).some((hint) => compatibleHints.has(String(hint).toLowerCase()))
@@ -153,34 +150,68 @@ export async function listMods(inst, { signal } = {}) {
     }
     if (missing.length) item.missingDependencies = missing
   }
+  // 重复模组：同一 modId / 同内容 / 无元数据时同文件名归为一组。
+  // 列表页只需要组标记（不算哈希，避免每次刷新都读整包），完整报告由 mods/duplicates 提供。
+  const duplicateGroups = groupModDuplicates(items)
+  const byRel = new Map()
+  for (const group of duplicateGroups) {
+    for (const member of group.items) byRel.set(member.relPath, { group, member })
+  }
   return {
     dir: paths.modsDir,
     total: items.length,
     enabled: items.filter((item) => !item.disabled).length,
     disabled: items.filter((item) => item.disabled).length,
     missingDependencies: [...new Set(items.flatMap((item) => item.missingDependencies || []))],
-    items: items.map((item) => ({
-      file: item.file,
-      relPath: item.relPath,
-      size: item.size,
-      mtime: item.mtime,
-      disabled: item.disabled,
-      modid: item.modid,
-      modids: item.modids || [],
-      nestedModIds: item.nestedModIds || [],
-      modIdHints: item.modIdHints || [],
-      providedModIds: item.providedModIds || [],
-      name: item.name,
-      version: item.version,
-      loader: item.loader,
-      loaderHints: item.loaderHints || [],
-      loaderMismatch: item.loaderMismatch === true,
-      environment: item.environment,
-      hasMeta: item.hasMeta,
-      duplicateOf: item.duplicateOf || '',
-      missingDependencies: item.missingDependencies || []
-    }))
+    duplicateGroups: duplicateGroups.length,
+    duplicateItems: duplicateGroups.reduce((sum, group) => sum + group.items.length - 1, 0),
+    items: items.map((item) => {
+      const hit = byRel.get(item.relPath)
+      return {
+        file: item.file,
+        relPath: item.relPath,
+        size: item.size,
+        mtime: item.mtime,
+        disabled: item.disabled,
+        modid: item.modid,
+        modids: item.modids || [],
+        nestedModIds: item.nestedModIds || [],
+        modIdHints: item.modIdHints || [],
+        providedModIds: item.providedModIds || [],
+        name: item.name,
+        version: item.version,
+        loader: item.loader,
+        loaderHints: item.loaderHints || [],
+        loaderMismatch: item.loaderMismatch === true,
+        environment: item.environment,
+        hasMeta: item.hasMeta,
+        duplicateGroup: hit?.group.id || '',
+        duplicateKeep: hit?.member.keep === true,
+        duplicateOf: hit && !hit.member.keep ? hit.group.keep : '',
+        missingDependencies: item.missingDependencies || []
+      }
+    })
   }
+}
+
+/** 完整扫描并计算重复模组报告（含同大小文件的内容哈希）。 */
+export async function findDuplicateMods(inst, { signal } = {}) {
+  const paths = instancePaths(inst)
+  await fsp.mkdir(paths.modsDir, { recursive: true })
+  const items = await scanModsDir(paths.modsDir, {
+    recursive: true,
+    includeDisabled: true,
+    runtime: { mc: inst.mc, loader: inst.loader, loaderVersion: inst.loaderVersion },
+    signal
+  })
+  const report = await analyzeModDuplicates(items)
+  return { dir: paths.modsDir, ...report }
+}
+
+/** 按前端确认的保留/删除计划清理重复模组；mode=disable 只改名，不做不可逆删除。 */
+export async function cleanDuplicateMods(inst, { mode = 'delete', groups = [] } = {}) {
+  const paths = instancePaths(inst)
+  return await cleanupDuplicateMods(paths.modsDir, { mode, groups })
 }
 
 export async function setModEnabled(inst, relPath, enabled) {
