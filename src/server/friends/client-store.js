@@ -13,7 +13,7 @@ export function defaultState() {
     v: CLIENT_VERSION,
     server: { url: '', fingerprint: '', requiresInvite: false },
     session: { token: '', expiresAt: 0, profile: null },
-    prefs: { nickname: '', showActivity: true, allowPull: true },
+    prefs: { nickname: '', showActivity: true, allowPull: true, downloadDir: '', autoApplyMods: true },
     received: []
   }
 }
@@ -49,13 +49,19 @@ function normalize(raw) {
     prefs: {
       nickname: cleanText(prefs.nickname, 24),
       showActivity: prefs.showActivity !== false,
-      allowPull: prefs.allowPull !== false
+      allowPull: prefs.allowPull !== false,
+      // 下载目录：留空表示使用工具箱默认接收目录；非空时必须是绝对路径。
+      downloadDir: path.isAbsolute(String(prefs.downloadDir || '')) ? String(prefs.downloadDir) : '',
+      autoApplyMods: prefs.autoApplyMods !== false
     },
     received: (Array.isArray(raw.received) ? raw.received : [])
       .map((item) => ({
         id: String(item?.id || ''),
+        kind: item?.kind === 'mod' ? 'mod' : 'pack',
         name: cleanText(item?.name, 160),
         peerName: cleanText(item?.peerName, 64),
+        instanceId: String(item?.instanceId || ''),
+        instanceName: cleanText(item?.instanceName, 80),
         at: Number(item?.at) || 0,
         files: (Array.isArray(item?.files) ? item.files : []).map((file) => ({
           name: cleanText(file?.name, 160),
@@ -134,6 +140,8 @@ export class ClientStore {
 
   addReceived(entry) {
     const state = this.load()
+    // 同一次接收重复下载/换目录时只保留最新记录，避免列表里出现两条同名文件。
+    state.received = state.received.filter((item) => item.id !== entry.id)
     state.received.unshift(entry)
     state.received = state.received.slice(0, 40)
     this.scheduleSave()

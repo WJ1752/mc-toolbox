@@ -529,7 +529,16 @@ function pageCtx() {
     },
     openAccounts: () => openAccounts(),
     openSettings: (section = 'launcher-root') => openLauncherSettings(section),
-    setTab: (tab) => setTab(tab)
+    setTab: (tab) => setTab(tab),
+    // 好友页已有最新快照时直接同步计数，避免为了角标再多请求一次服务器。
+    setFriendsBadge: (counts) => {
+      if (!counts || typeof counts !== 'object') return
+      friendNotify.requests = Number(counts.requests) || 0
+      friendNotify.unread = Number(counts.unread) || 0
+      friendNotify.incoming = Number(counts.incoming) || 0
+      friendNotify.activeTransfers = Number(counts.activeTransfers) || 0
+      paintFriendsBadge()
+    }
   }
 }
 
@@ -552,6 +561,8 @@ export async function initLauncherPage(pageHelpers = {}) {
   renderSidebar()
   if (state.instances.length && state.selectedId) await loadDetail(state.selectedId, { render: false })
   renderMain()
+  // 启动时就先拉一次好友提示计数，侧边栏不必等第一次 activate 才出现提示标。
+  void pollFriendsNotifications()
   state.ready = true
   if (state.settings?.needsSetup) setTimeout(() => openSetup(), 320)
   // 启动器自身更新：按设置自动检查一次，发现新版本时右下角弹提示卡片。
@@ -644,8 +655,13 @@ function navButton(id, label, iconName, onClick) {
 
 function buildNav() {
   clear(navWrapEl)
+  const friendsBtn = navButton('friends', '好友', 'user', () => showView('friends'))
+  friendsBtn.badgeEl = h('span', { class: 'lp-nav-badge', hidden: true })
+  friendsBtn.fileEl = h('span', { class: 'lp-nav-file', hidden: true, title: '有文件等待接收' })
+  friendsBtn.append(friendsBtn.badgeEl, friendsBtn.fileEl)
+  state.friendsNavBtn = friendsBtn
   navWrapEl.append(
-    navButton('friends', '好友', 'user', () => showView('friends')),
+    friendsBtn,
     navButton('downloads', '下载中心', 'download', () => showView('downloads')),
     navButton('java', 'Java', 'java', () => showView('java')),
     navButton('import', '导入已有游戏', 'archive', async () => {
@@ -661,12 +677,84 @@ function buildNav() {
     navButton('settings', '设置', 'settings', () => openLauncherSettings())
   )
   updateNav()
+  paintFriendsBadge()
 }
 
 function updateNav() {
   for (const b of navWrapEl.querySelectorAll('.lp-navbtn')) {
     b.classList.toggle('active', b.dataset.nav === state.view)
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* friends notifications (sidebar badges)                             */
+/* ------------------------------------------------------------------ */
+
+const friendNotify = { requests: 0, unread: 0, incoming: 0, activeTransfers: 0 }
+let friendsNotifyTimer = null
+let friendsNotifyBusy = false
+
+function paintFriendsBadge() {
+  const button = state.friendsNavBtn
+  if (!button) return
+  const messages = friendNotify.requests + friendNotify.unread
+  const files = friendNotify.incoming + friendNotify.activeTransfers
+  if (button.badgeEl) {
+    button.badgeEl.hidden = !messages
+    button.badgeEl.textContent = messages > 99 ? '99+' : String(messages)
+    button.badgeEl.className = 'lp-nav-badge' + (friendNotify.requests ? ' accent' : '')
+    button.badgeEl.title = [
+      friendNotify.requests ? `${friendNotify.requests} 个好友请求` : '',
+      friendNotify.unread ? `${friendNotify.unread} 条未读消息` : ''
+    ].filter(Boolean).join(' · ')
+  }
+  if (button.fileEl) {
+    button.fileEl.hidden = !files
+    button.fileEl.textContent = files > 99 ? '99+' : String(files)
+    button.fileEl.className = 'lp-nav-file' + (friendNotify.incoming ? ' active' : '')
+    button.fileEl.title = [
+      friendNotify.incoming ? `${friendNotify.incoming} 个文件等待接收` : '',
+      friendNotify.activeTransfers ? `${friendNotify.activeTransfers} 个传输进行中` : ''
+    ].filter(Boolean).join(' · ')
+  }
+  const hints = []
+  if (friendNotify.requests) hints.push(`${friendNotify.requests} 个好友请求`)
+  if (friendNotify.unread) hints.push(`${friendNotify.unread} 条未读消息`)
+  if (friendNotify.incoming) hints.push(`${friendNotify.incoming} 个文件等待接收`)
+  if (friendNotify.activeTransfers) hints.push(`${friendNotify.activeTransfers} 个传输进行中`)
+  button.title = hints.length ? `好友 · ${hints.join(' · ')}` : '好友'
+}
+
+async function pollFriendsNotifications() {
+  if (friendsNotifyBusy) return
+  friendsNotifyBusy = true
+  try {
+    const data = await api.friendsNotifications()
+    friendNotify.requests = Number(data?.requests) || 0
+    friendNotify.unread = Number(data?.unread) || 0
+    friendNotify.incoming = Number(data?.incoming) || 0
+    friendNotify.activeTransfers = Number(data?.activeTransfers) || 0
+    paintFriendsBadge()
+  } catch {
+    // 未登录/网络不可用时静默处理，不打扰用户。
+  } finally {
+    friendsNotifyBusy = false
+  }
+}
+
+function startFriendsNotifier() {
+  stopFriendsNotifier()
+  void pollFriendsNotifications()
+  friendsNotifyTimer = setInterval(() => {
+    // 好友页自己每 2 秒轮询一次，不需要重复请求。
+    if (!state.active || state.view === 'friends') return
+    void pollFriendsNotifications()
+  }, 6000)
+}
+
+function stopFriendsNotifier() {
+  if (friendsNotifyTimer) clearInterval(friendsNotifyTimer)
+  friendsNotifyTimer = null
 }
 
 /* ------------------------------------------------------------------ */
@@ -2835,6 +2923,7 @@ async function activate() {
   rootEl.hidden = false
   if (!state.ready) return
   startPolling()
+  startFriendsNotifier()
   if (state.view === 'instance') {
     if (state.selectedId) {
       await loadDetail(state.selectedId, { render: false })
@@ -2852,6 +2941,7 @@ function deactivate() {
   state.active = false
   hideDropOverlay()
   stopPolling()
+  stopFriendsNotifier()
   destroyContent()
   startBackgroundStatus()
 }
@@ -2859,6 +2949,7 @@ function deactivate() {
 function destroy() {
   deactivate()
   stopBackgroundStatus()
+  stopFriendsNotifier()
   disposeUpdateChecker()
   state.installController?.destroy?.()
   state.javaController?.destroy?.()

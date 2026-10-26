@@ -5,6 +5,7 @@ export function registerFriendsApi(on, { readBody } = {}) {
   const body = async (req) => (typeof readBody === 'function' ? await readBody(req) : {})
 
   on('GET', '/api/friends', async () => await manager.snapshot())
+  on('GET', '/api/friends/notifications', async () => await manager.notifications())
   on('GET', '/api/friends/diagnostics', async () => await manager.diagnostics())
   on('POST', '/api/friends/login', async (req) => await manager.login(await body(req)))
   on('POST', '/api/friends/logout', async () => await manager.logout())
@@ -40,8 +41,20 @@ export function registerFriendsApi(on, { readBody } = {}) {
     ok: manager.cancelModsJob(params.id)
   }))
 
-  on('POST', '/api/friends/transfers/:id/download', async (_req, params) => await manager.downloadFile(params.id))
+  on('POST', '/api/friends/transfers/:id/download', async (req, params) => {
+    const payload = await body(req)
+    return await manager.downloadFile(params.id, { dir: payload.dir, instanceId: payload.instanceId })
+  })
+  on('POST', '/api/friends/transfers/clear-finished', async () => manager.clearFinishedTransfers())
   on('DELETE', '/api/friends/transfers/:id', async (_req, params) => await manager.cancelFile(params.id))
+  on('POST', '/api/friends/received/:id/save-as', async (req, params) => {
+    const payload = await body(req)
+    return await manager.saveReceivedAs(params.id, { dir: payload.dir, name: payload.name })
+  })
+  on('POST', '/api/friends/received/:id/apply', async (req, params) => {
+    const payload = await body(req)
+    return await manager.applyReceivedToInstance(params.id, payload.instanceId)
+  })
   on('DELETE', '/api/friends/received/:id', async (_req, params) => ({
     ok: await manager.removeReceived(params.id)
   }))

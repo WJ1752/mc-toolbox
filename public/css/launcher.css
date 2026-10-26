@@ -1667,6 +1667,14 @@
 }
 .lp-transfer-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11px; min-width: 0; }
 .lp-transfer-head b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.lp-transfer-peer {
+  font-size: 9.5px;
+  color: var(--dim);
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .lp-transfer-status { margin-left: auto; font-size: 10px; color: var(--mute); }
 .lp-transfer-foot { display: flex; align-items: center; gap: 8px; justify-content: space-between; font-size: 9.5px; }
 
@@ -1842,10 +1850,9 @@
   max-width: 100%;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 900px) {
   .lp-friends-chat-layout { grid-template-columns: minmax(0, 1fr); }
   .lp-friends-side .lp-card-body { max-height: 280px; }
-  .lp-chat-log { max-height: 360px; }
 }
 
 .lp-friends-subhead {
@@ -1862,3 +1869,133 @@
 .lp-friends-profile { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .lp-friends-profile .lp-friend-main { flex: 1; }
 .lp-friends-kv-list { display: flex; flex-direction: column; gap: 5px; }
+
+/* ------------------------------------------------------------------ */
+/* 好友页 v1.12：三张顶部卡片 + 可折叠传输/接收面板                    */
+/* ------------------------------------------------------------------ */
+
+.lp-friends-hero { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.lp-friends-lower {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+  gap: 12px;
+  margin-top: 12px;
+  align-items: start;
+}
+.lp-friends-footer { grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr); }
+.lp-friends-transfers .lp-card-body { max-height: 430px; overflow: auto; }
+.lp-friends-received .lp-card-body { max-height: 430px; overflow: auto; }
+.lp-friends-receive { max-width: none; gap: 7px; }
+.lp-friends-dir {
+  font-size: 10px;
+  color: var(--mute);
+  padding: 5px 7px;
+  border: 1px dashed var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lp-friends-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 10px;
+}
+.lp-friends-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface-2);
+  min-width: 0;
+}
+.lp-friends-stat b { font-size: 14px; line-height: 1.25; font-family: var(--font-mono); }
+.lp-friends-stat span {
+  font-size: 9.5px;
+  color: var(--mute);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lp-friends-stat.warn b { color: var(--amber, #d8a657); }
+.lp-friends-stat.accent b { color: var(--accent); }
+
+/* 聊天区高度：给下方的传输/接收留出可见空间 */
+.lp-friends-chat-main .lp-card-body { min-height: 380px; }
+.lp-chat,
+.lp-chat-panel { min-height: 380px; }
+.lp-chat-log { min-height: 240px; max-height: 420px; }
+.lp-friends-side-tabs .lp-tabs { margin: 0; }
+.lp-friends-side-tabs .lp-tab { height: 22px; font-size: 10px; padding: 0 7px; }
+.lp-friends-title-warn { color: var(--amber, #d8a657) !important; }
+
+.lp-transfer-row.is-finished { opacity: 0.72; }
+.lp-transfer-bulk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 9px;
+  margin-bottom: 7px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 40%, var(--line));
+  border-radius: var(--r-1);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
+  color: var(--accent);
+  font-size: 10.5px;
+}
+.lp-transfer-bulk-text { flex: 1; min-width: 0; }
+.lp-transfer-dir {
+  font-size: 9px;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lp-received-title { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
+.lp-received-title b {
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.lp-received-path { font-size: 9px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 侧边栏「好友」角标：好友请求/未读消息 + 待接收文件 */
+.lp-navbtn .lp-nav-badge,
+.lp-navbtn .lp-nav-file { flex: none; }
+.lp-navbtn .lp-nav-badge + .lp-nav-file { margin-left: 1px; }
+.lp-navbtn .lp-nav-badge[hidden],
+.lp-navbtn .lp-nav-file[hidden] { display: none; }
+.lp-navbtn .lp-nav-badge.accent { background: var(--amber, #d8a657); color: #1d1406; }
+.lp-nav-file {
+  min-width: 16px;
+  height: 15px;
+  padding: 0 4px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+.lp-nav-file.active { background: var(--accent-soft); }
+
+@media (max-width: 1180px) {
+  .lp-friends-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .lp-friends-hero > :nth-child(3) { grid-column: 1 / -1; }
+}
+@media (max-width: 980px) {
+  .lp-friends-lower,
+  .lp-friends-footer { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  .lp-friends-hero { grid-template-columns: minmax(0, 1fr); }
+  .lp-friends-hero > :nth-child(3) { grid-column: auto; }
+}

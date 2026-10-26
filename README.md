@@ -1,5 +1,17 @@
 # Minecraft 工具箱
 
+### v1.12.0 好友页布局、侧边栏提示标与接收体验
+
+- 好友页重排：顶部三张紧凑卡片（资料 + 好友/请求/待接收统计、添加好友、接收与下载），中部「好友列表（含请求页签）+ 聊天」，下方「传输 / 已接收文件」与「设置 / 连接诊断」；长列表重绘时保持滚动位置，窄窗口自动折行。
+- 侧边栏「好友」新增两枚提示标：好友请求 + 未读消息（有请求时琥珀色，悬停显示明细），以及等待接收的文件 / 进行中的传输；未登录或网络不可用时自动隐藏。计数走新的轻量接口 `/api/friends/notifications`，每 6 秒刷新，进入好友页后交给页面自身的 2 秒轮询。
+- 传输面板：可折叠、可切换「显示已完成」、一键「清除已完成」；发送中的文件可取消，等待对方接收的文件可撤回。
+- 接收体验：接收弹窗可选择保存目录（可记住为默认下载目录），也可以选中实例把模组**直接写入该实例 mods 目录**（校验 SHA-1），不再需要先下载再手动搬运；新增「全部接收并加入实例」批量处理待接收模组。已接收列表支持打开所在文件夹、另存为到任意目录、把模组再次加入实例。
+- 设置新增「下载目录」（留空 = 默认接收目录）与「接收模组时默认加入当前选中的实例」；下载目录失效时自动回退到默认目录并记录一条事件。
+- 「新建实例 → 导入已有版本」的目录输入框旁新增「浏览…」按钮，用目录选择器选 `.minecraft` 根目录，选中后立即扫描。
+- 新增接口：`GET /api/friends/notifications`、`POST /api/friends/transfers/clear-finished`、`POST /api/friends/received/:id/save-as`、`POST /api/friends/received/:id/apply`；`POST /api/friends/transfers/:id/download` 现在接受 `{ dir, instanceId }`。
+- 回归与验证：`node --test tests/*.test.mjs` 250 项通过（新增 5 项：下载目录校验、另存为、通知计数、接收记录的 kind/实例字段）；headless Edge 验证好友页、接收/另存为弹窗、侧边栏角标与导入目录选择器渲染且无控制台异常。
+- 构建与版本：`package.json` / `PRODUCT_VERSION` 更新为 1.12.0。
+
 ### v1.11.1 好友服务器地址内置并隐藏
 
 - 好友服务器地址与证书指纹改为启动器内置配置（`src/server/friends/config.js`），好友页不再显示地址/指纹，也不提供「检测服务器 / 更换服务器」；普通玩家无法修改。旧配置里的自定义地址会被强制覆盖为内置值。
@@ -423,11 +435,15 @@ GET    /api/data/export               导出配置
 
 # 好友（中心服务器，详见 docs/friends-server.md）
 POST   /api/friends/login            用启动器当前正版微软账户登录
+GET    /api/friends/notifications    侧边栏提示计数（好友请求 / 未读 / 待接收文件 / 进行中传输）
 POST   /api/friends/add              按正版游戏 ID 发好友请求
 GET/POST /api/friends/:uuid/messages 聊天记录 / 发送消息
 POST   /api/friends/packs/share      导出整合包并上传给好友
 POST   /api/friends/mods/compare     对比双方模组清单（fill / send 为补齐与直传）
-POST   /api/friends/transfers/:id/download 下载好友发来的文件
+POST   /api/friends/transfers/:id/download 下载好友发来的文件（{ dir, instanceId } 可指定目录或直接加入实例）
+POST   /api/friends/transfers/clear-finished 清除本地已结束的传输记录
+POST   /api/friends/received/:id/save-as  把已接收文件另存到指定目录
+POST   /api/friends/received/:id/apply    把已接收的模组加入实例 mods 目录
 
 # 启动器（详见 docs/launcher.md）
 GET    /api/launcher/bootstrap        启动器设置、实例、账户、任务、会话（含进程检测结果）

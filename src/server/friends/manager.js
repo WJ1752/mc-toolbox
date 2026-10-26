@@ -18,7 +18,7 @@ import { listSessions } from '../launcher/launch.js'
 import { startPackExport, getExportJob } from '../launcher/pack-export.js'
 import * as accounts from '../launcher/accounts.js'
 import { applyJar, diffManifests, fillPlan, findStagedBySha, manifestFromItems, sha1File } from './mods-sync.js'
-import { sanitizeFileName } from './transfer.js'
+import { sanitizeFileName, uniqueFileName } from './transfer.js'
 
 const RECEIVED_ROOT = process.env.MC_TOOLBOX_FRIENDS_RECEIVED || path.join(DATA_DIR, 'friends', 'received')
 const MODRINTH_VERSION_FILE = 'https://api.modrinth.com/v2/version_file'
@@ -310,7 +310,9 @@ export async function saveSelf(patch = {}) {
   const prefs = getStore().setPrefs({
     nickname: patch.nickname !== undefined ? patch.nickname : state.prefs.nickname,
     showActivity: patch.showActivity !== undefined ? patch.showActivity : state.prefs.showActivity,
-    allowPull: patch.allowPull !== undefined ? patch.allowPull : state.prefs.allowPull
+    allowPull: patch.allowPull !== undefined ? patch.allowPull : state.prefs.allowPull,
+    downloadDir: patch.downloadDir !== undefined ? patch.downloadDir : state.prefs.downloadDir,
+    autoApplyMods: patch.autoApplyMods !== undefined ? patch.autoApplyMods : state.prefs.autoApplyMods
   })
   return { prefs }
 }
@@ -374,6 +376,43 @@ function fileTargetPath(file) {
   return path.join(receivedRoot, file.id, safe)
 }
 
+/** 校验并解析用户指定的下载目录；空值表示「使用默认接收目录」。 */
+function resolveDownloadDir(customDir) {
+  const raw = String(customDir || '').trim()
+  if (!raw) return ''
+  const abs = path.resolve(raw)
+  let stat
+  try {
+    stat = fs.statSync(abs)
+  } catch {
+    throw Object.assign(new Error('下载目录不存在：' + abs), { code: 'DIR_NOT_FOUND' })
+  }
+  if (!stat.isDirectory()) throw Object.assign(new Error('不是文件夹：' + abs), { code: 'NOT_A_DIR' })
+  return abs
+}
+
+/**
+ * 决定这次下载落到哪里：请求显式指定 > 设置里的下载目录 > 默认接收目录。
+ * 设置里的目录被删除/改名时回退到默认目录，而不是让下载直接失败。
+ */
+function preferredDownloadDir(customDir) {
+  const explicit = String(customDir || '').trim()
+  if (explicit) return resolveDownloadDir(explicit)
+  const saved = String(getStore().get().prefs.downloadDir || '').trim()
+  if (!saved) return ''
+  try {
+    return resolveDownloadDir(saved)
+  } catch {
+    logEvent('设置的下载目录不可用，已回退到默认接收目录', 'warn')
+    return ''
+  }
+}
+
+function downloadTargetFor(file, dir) {
+  if (!dir) return fileTargetPath(file)
+  return path.join(dir, uniqueFileName(dir, file.name))
+}
+
 async function findPeerFile(id) {
   if (cache?.files?.incoming) {
     const found = cache.files.incoming.find((file) => file.id === id)
@@ -390,11 +429,23 @@ function peerName(uuid) {
   return friend?.nickname || friend?.mcName || ''
 }
 
-export async function downloadFile(id) {
+/**
+ * 下载对端文件。
+ * - 默认落到「接收目录」，然后记录到「已接收」；
+ * - 传 dir 时直接落到用户选择的目录（另存为/自定义下载目录）；
+ * - 对模组文件传 instanceId 时，下载完成后直接校验 SHA-1 并放进该实例的 mods 目录，
+ *   不再让用户自己去中转目录里手动搬运。
+ */
+export async function downloadFile(id, { dir = '', instanceId = '' } = {}) {
   const file = await findPeerFile(id)
   if (!file) throw new Error('文件不存在或已被清理')
   if (downloads.get(id)?.status === 'downloading') return { ok: true, already: true }
-  const target = fileTargetPath(file)
+
+  const inst = instanceId ? findInstance(String(instanceId)) : null
+  if (instanceId && !inst) throw new Error('实例不存在')
+  const applyToInstance = file.kind === 'mod' && !!inst
+  const downloadDir = applyToInstance ? '' : preferredDownloadDir(dir)
+  const target = applyToInstance ? fileTargetPath(file) : downloadTargetFor(file, downloadDir)
   const record = {
     id,
     kind: file.kind,
@@ -402,6 +453,8 @@ export async function downloadFile(id) {
     size: file.size,
     sha1: file.sha1,
     path: target,
+    targetDir: downloadDir,
+    appliedTo: applyToInstance ? inst.id : '',
     status: 'downloading',
     progress: 0,
     peer: file.peer,
@@ -417,21 +470,41 @@ export async function downloadFile(id) {
       record.total = total
     }
   }).then(async (result) => {
-    record.status = 'done'
     record.progress = 100
-    record.path = result.path
-    record.finishedAt = Date.now()
-    if (file.kind === 'pack') {
-      getStore().addReceived({
-        id: file.id,
-        name: file.name,
-        peerName: peerName(file.peer),
-        at: Date.now(),
-        files: [{ name: file.name, path: result.path, size: result.size, sha1: result.sha1 }]
+    let finalPath = result.path
+    let finalName = path.basename(result.path)
+    if (applyToInstance) {
+      const applied = await applyJar({
+        sourceFile: result.path,
+        targetDir: instancePaths(inst).modsDir,
+        filename: file.name,
+        sha1: file.sha1 || result.sha1,
+        enabled: true
       })
+      finalPath = applied.file
+      finalName = path.basename(applied.file)
+      // 已经进了实例 mods 目录，中转区的临时副本就没用了。
+      try {
+        if (path.resolve(path.dirname(result.path)).startsWith(path.resolve(receivedRoot) + path.sep)) {
+          await fsp.rm(path.dirname(result.path), { recursive: true, force: true })
+        }
+      } catch {}
     }
+    record.status = 'done'
+    record.path = finalPath
+    record.finishedAt = Date.now()
+    getStore().addReceived({
+      id: file.id,
+      kind: file.kind,
+      name: file.name,
+      peerName: peerName(file.peer),
+      instanceId: applyToInstance ? inst.id : '',
+      instanceName: applyToInstance ? inst.name : '',
+      at: Date.now(),
+      files: [{ name: finalName, path: finalPath, size: result.size, sha1: result.sha1 }]
+    })
     invalidate()
-    logEvent(`已接收 ${file.name}`)
+    logEvent(applyToInstance ? `已接收 ${file.name}，并加入实例「${inst.name}」` : `已接收 ${file.name}`)
     await refresh({ force: true })
   }).catch((error) => {
     record.status = 'failed'
@@ -442,6 +515,44 @@ export async function downloadFile(id) {
   return { ok: true, id }
 }
 
+/** 把「已接收」里的文件另存到用户选择的目录（复制，不移动原文件）。 */
+export async function saveReceivedAs(id, { dir = '', name = '' } = {}) {
+  const record = (getStore().get().received || []).find((item) => item.id === id)
+  if (!record) throw new Error('接收记录不存在')
+  const src = record.files[0]
+  if (!src?.path || !fs.existsSync(src.path)) throw new Error('文件已被移动或删除')
+  const targetDir = resolveDownloadDir(dir)
+  if (!targetDir) throw new Error('请选择保存目录')
+  const fileName = uniqueFileName(targetDir, name || path.basename(src.path))
+  const target = path.join(targetDir, fileName)
+  await fsp.copyFile(src.path, target)
+  logEvent(`已另存 ${fileName}`)
+  return { ok: true, path: target, dir: targetDir, name: fileName }
+}
+
+/** 把已接收的模组文件直接放进某个实例的 mods 目录。 */
+export async function applyReceivedToInstance(id, instanceId) {
+  const record = (getStore().get().received || []).find((item) => item.id === id)
+  if (!record) throw new Error('接收记录不存在')
+  if (record.kind !== 'mod') throw new Error('只有模组文件可以加入实例')
+  const src = record.files[0]
+  if (!src?.path || !fs.existsSync(src.path)) throw new Error('文件已被移动或删除')
+  const inst = findInstance(String(instanceId || ''))
+  if (!inst) throw new Error('实例不存在')
+  const applied = await applyJar({
+    sourceFile: src.path,
+    targetDir: instancePaths(inst).modsDir,
+    filename: record.name || src.name,
+    sha1: src.sha1 || await sha1File(src.path),
+    enabled: true
+  })
+  record.instanceId = inst.id
+  record.instanceName = inst.name
+  getStore().addReceived(record)
+  logEvent(`已把 ${record.name} 加入实例「${inst.name}」`)
+  return { ok: true, file: applied.file, instance: instanceSummary(inst) }
+}
+
 export async function cancelFile(id) {
   const instance = requireClient()
   await instance.request('DELETE', '/api/files/' + encodeURIComponent(id))
@@ -449,6 +560,47 @@ export async function cancelFile(id) {
   downloads.delete(id)
   await refresh({ force: true })
   return { ok: true }
+}
+
+/** 清掉本地已结束的传输记录（正在进行的、以及服务器上等待接收的不动）。 */
+export function clearFinishedTransfers() {
+  const finished = new Set(['done', 'failed', 'cancelled'])
+  let removed = 0
+  for (const [id, record] of uploads) {
+    if (finished.has(record.status)) { uploads.delete(id); removed += 1 }
+  }
+  for (const [id, record] of downloads) {
+    if (finished.has(record.status)) { downloads.delete(id); removed += 1 }
+  }
+  return { ok: true, removed }
+}
+
+// 真正在动的传输（导出/上传/接收中）；「等待对方接收」不算提示，避免角标长期不消。
+function activeTransferCount() {
+  const uploading = [...uploads.values()].filter((record) => ['exporting', 'uploading'].includes(record.status)).length
+  const downloading = [...downloads.values()].filter((record) => record.status === 'downloading').length
+  return uploading + downloading
+}
+
+/** 侧边栏提示用的轻量计数：好友请求、未读消息、待接收文件、进行中的传输。 */
+export async function notifications() {
+  ensureLockedServer()
+  const state = getStore().get()
+  const loggedIn = !!state.session.token && state.session.expiresAt > Date.now()
+  const empty = { loggedIn, requests: 0, unread: 0, incoming: 0, activeTransfers: 0, error: '' }
+  if (!loggedIn) return { ...empty, activeTransfers: activeTransferCount() }
+  let data
+  try {
+    data = await refresh()
+  } catch (error) {
+    return { ...empty, activeTransfers: activeTransferCount(), error: error.message }
+  }
+  const friends = data?.friends || {}
+  const files = data?.files || {}
+  const requests = (friends.incoming || []).length
+  const unread = (friends.friends || []).reduce((sum, friend) => sum + (Number(friend.unread) || 0), 0)
+  const incoming = (files.incoming || []).filter((file) => file.status === 'ready').length
+  return { loggedIn, requests, unread, incoming, activeTransfers: activeTransferCount(), error: '' }
 }
 
 async function uploadToFriend({ friendId, kind, filePath, name, size, sha1, instanceKey = '' }) {
@@ -821,6 +973,7 @@ export async function snapshot() {
     loggedIn: !!state.session.token && state.session.expiresAt > Date.now(),
     server: { locked: true, label: '官方服务器', requiresInvite: state.server.requiresInvite },
     prefs: state.prefs,
+    defaultDownloadDir: receivedRoot,
     account: state.session.profile,
     mcAccount: (() => {
       try {
@@ -865,6 +1018,9 @@ export async function snapshot() {
       total: record.total || record.size,
       peer: record.peer,
       error: record.error,
+      path: record.path || '',
+      targetDir: record.targetDir || '',
+      appliedTo: record.appliedTo || '',
       direction: 'in',
       local: true
     }))

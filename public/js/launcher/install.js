@@ -1311,12 +1311,23 @@ function buildView(ctx, container) {
   const imp = { dir: '', loading: false, scanned: false, roots: [], items: [] }
   let importEpoch = 0
   const scanDirInput = input({ placeholder: '可选：指定 .minecraft 目录（留空自动扫描）', mono: true, title: '启动器根目录，不是 versions 目录' })
+  const browseScanDir = btn('浏览…', {
+    size: 'sm',
+    iconName: 'folder',
+    title: '选择要导入的 .minecraft 目录',
+    onClick: async () => {
+      const dir = await ctx.pickDir(scanDirInput.value.trim(), { title: '选择 .minecraft 目录（含 versions 文件夹）' })
+      if (!dir) return
+      scanDirInput.value = dir
+      await scanImport(dir)
+    }
+  })
   const importHint = hint('')
   const importError = h('div', { class: 'lp-hint bad', role: 'alert', style: { display: 'none' } })
   const importResults = h('div', { class: 'col', style: { gap: '8px' } })
   const importPane = h('div', { style: { ...paneStyle, display: 'none' } },
     card('导入已有版本', 'PCL2 / HMCL / 官方启动器 / 本地 .minecraft',
-      row('row wrap', h('div', { class: 'grow' }, scanDirInput),
+      row('row wrap', h('div', { class: 'grow' }, scanDirInput), browseScanDir,
         btn('扫描', { size: 'sm', iconName: 'refresh', onClick: () => scanImport(scanDirInput.value.trim()) })),
       h('div', { class: 'lp-hint' }, icon('warning', { size: 12 }),
         ' 只引用原目录，不复制游戏文件；原启动器的版本目录必须完整（版本 JSON、客户端 JAR），否则导入后无法启动。'),
