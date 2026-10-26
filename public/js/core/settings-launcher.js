@@ -19,6 +19,7 @@ const DEFAULTS = {
   rootConfigured: false,
   source: 'auto',
   concurrency: 8,
+  threads: 4,
   retries: 3,
   verify: true,
   defaultMinMemory: 1024,
@@ -170,6 +171,7 @@ export function initLauncherSettings({ onStatus = () => {}, onSaved, onRootChang
     return {
       source: SOURCES.some(([value]) => value === draft.source) ? draft.source : 'auto',
       concurrency: Math.round(Number(draft.concurrency) || 8),
+      threads: Math.max(1, Math.min(16, Math.round(Number(draft.threads) || 4))),
       retries: Math.round(Number(draft.retries) || 0),
       verify: draft.verify !== false,
       defaultMinMemory: Math.round(Number(draft.defaultMinMemory) || 1024),
@@ -394,8 +396,9 @@ export function initLauncherSettings({ onStatus = () => {}, onSaved, onRootChang
     }
     return panel('下载与安装', '版本、素材、库文件与 Java 的下载行为。',
       card('下载', '下载源、并发与校验',
-        row('下载源', '自动：优先 BMCL 镜像，失败后回退官方源', segField(() => draft.source, (v) => (draft.source = v), SOURCES)),
-        row('并发下载数', '1–32。并发过高可能被下载源限速', numField(() => draft.concurrency, (v) => (draft.concurrency = v), { min: 1, max: 32 })),
+        row('下载源', '自动：先测速再选最快线路（BMCL 镜像 / 官方），单个文件失败还会自动换源', segField(() => draft.source, (v) => (draft.source = v), SOURCES)),
+        row('并发下载数', '同时下载的文件数。素材阶段会在其基础上自动提高到 4 倍（最多 64）', numField(() => draft.concurrency, (v) => (draft.concurrency = v), { min: 1, max: 32 })),
+        row('单文件分段线程数', '≥4 MB 的文件（客户端、整合包、大音频）用多条连接分段下载；1 = 单连接', numField(() => draft.threads, (v) => (draft.threads = v), { min: 1, max: 16, suffix: '线程' })),
         row('失败重试次数', '0–10。单个文件下载失败后的自动重试次数', numField(() => draft.retries, (v) => (draft.retries = v), { min: 0, max: 10 })),
         row('校验已存在文件', '复用本地文件时校验 SHA1；关闭会更快，但可能漏过损坏文件', switchField(() => draft.verify !== false, (v) => (draft.verify = v))),
         row('下载游戏素材', '关闭后不会下载声音与语言文件，部分版本可能没有声音', switchField(() => draft.downloadAssets !== false, (v) => (draft.downloadAssets = v)))

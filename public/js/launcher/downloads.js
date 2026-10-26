@@ -3,7 +3,7 @@
 import { h, clear, fmtBytes } from '../core/dom.js'
 import {
   isActiveJob, isFinishedJob, jobProgress, jobPercentText, jobBytesText, jobElapsedText,
-  jobSpeedText, jobIdleText, jobStatusLabel, jobMetaText
+  jobSpeedText, jobEtaText, jobIdleText, jobStatusLabel, jobMetaText
 } from '../core/jobs.js'
 import { icon } from '../ui/icons.js'
 import { btn, iconBtn, progress, spinner, badge } from '../ui/kit.js'
@@ -111,6 +111,8 @@ export function jobRowSummary(job, now = Date.now()) {
   if (pctText) parts.push(pctText)
   const speed = jobSpeedText(job)
   if (speed) parts.push(speed)
+  const eta = jobEtaText(job, now)
+  if (eta) parts.push(eta)
   const elapsed = jobElapsedText(job, now)
   if (elapsed) parts.push(elapsed)
   const idle = jobIdleText(job, now)

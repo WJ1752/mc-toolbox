@@ -40,7 +40,9 @@ import {
   BMCL_MAVEN
 } from './meta.js'
 import { collectLibraries, normalizeOs, requiredJavaMajor } from './launch-plan.js'
-import { downloadFromMirrors, fetchToFile, runPool, sha1File } from './download.js'
+import { downloadFromMirrors, fetchToFile, pickFastestSource, runPool, sha1File } from './download.js'
+import { hostOf } from './source-select.js'
+import { nextSpeed } from './speed-meter.js'
 import { pickJava } from './java.js'
 import {
   isSeedableMojmapsProfile, patchJarEntry, patchMojmapsProcessor, readJarJson, resolveMojmapsCoordinate
@@ -122,9 +124,41 @@ class InstallJob {
     this.lockedPhase = ''
     // 逻辑阶段（锁定顶层阶段时仍随内部子阶段变化），用于判断何时清零字节。
     this.phaseKey = this.phase
+    // 实时下载速度（B/s）：由 startSpeedMeter 每 500ms 采样 received 得出。
+    // 前端 core/jobs.js 的 jobSpeedText 直接读这个字段。
+    this.speed = 0
+    this.speedTimer = null
   }
 
   get signal() { return this.controller.signal }
+
+  /**
+   * 开始速度采样。字节计数由各下载阶段写入 received，这里只做差分与平滑，
+   * 因此整合包 / 原版安装共用同一套速度口径。
+   */
+  startSpeedMeter(interval = 500) {
+    this.stopSpeedMeter()
+    let lastBytes = this.received
+    let lastAt = Date.now()
+    this.speedTimer = setInterval(() => {
+      const now = Date.now()
+      const dt = Math.max(0.1, (now - lastAt) / 1000)
+      const delta = this.received - lastBytes
+      lastBytes = this.received
+      lastAt = now
+      // 阶段切换时 received 会被清零：这一拍只重置基线，不能算成负速度。
+      this.speed = delta < 0 ? 0 : nextSpeed(this.speed, delta, dt)
+      if (this.finishedAt) this.stopSpeedMeter()
+    }, interval)
+    // 采样定时器不能阻止进程退出（测试 / 关闭启动器时立即结束）。
+    this.speedTimer.unref?.()
+  }
+
+  stopSpeedMeter() {
+    if (this.speedTimer) clearInterval(this.speedTimer)
+    this.speedTimer = null
+    this.speed = 0
+  }
 
   log(text, kind = '') {
     const line = { seq: ++this.logSeq, t: nowTime(), text: String(text ?? ''), kind }
@@ -189,6 +223,7 @@ class InstallJob {
       indeterminate: this.indeterminate,
       received: this.received,
       total: this.total,
+      speed: this.speed,
       createdAt: this.createdAt,
       startedAt: this.startedAt,
       finishedAt: this.finishedAt,
@@ -201,6 +236,8 @@ class InstallJob {
       loaderVersion: this.loaderVersion,
       openWhenDone: this.openWhenDone === true,
       logSeq: this.logSeq,
+      // 供前端在再次拖入同一个整合包时先做本地判断，避免重新上传 1 GB 才被拒绝。
+      packKey: this.packKey || '',
       logs: includeLogs ? this.logs.slice(-200) : undefined
     }
   }
@@ -212,6 +249,7 @@ function finishJob(job, status, error = '') {
   job.updatedAt = job.finishedAt
   job.status = status
   job.error = error || ''
+  job.stopSpeedMeter?.()
   job.controller = new AbortController()
   job.child = null
 }
@@ -247,6 +285,7 @@ function runJob(job, task) {
     // 只有真正开始执行才写 startedAt；排队等待通过 createdAt 展示。
     job.startedAt = Date.now()
     job.updatedAt = job.startedAt
+    job.startSpeedMeter()
     job.log('任务开始')
     try {
       await task(job)
@@ -340,6 +379,76 @@ export function listJobs() {
 
 export function activeJobs() {
   return [...jobs.values()].filter((job) => !FINISHED.has(job.status))
+}
+
+/* ------------------------------------------------------------------ */
+/* 导入去重与同目录串行化                                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 整合包导入的稳定标识：上传时前端给出「文件名 + 大小 + 修改时间」，本地路径
+ * 安装用解析后的绝对路径。上一次导入还没结束就再次拖入同一个包时直接拒绝，
+ * 避免两个安装器同时改写 libraries / versions 与 patched jar。
+ */
+export function packImportKey(source, packKey = '') {
+  const explicit = String(packKey || '').trim()
+  if (explicit) return explicit
+  const file = path.resolve(String(source || ''))
+  return 'path:' + (process.platform === 'win32' ? file.toLowerCase() : file)
+}
+
+export function findActivePackJob(items, key) {
+  if (!key) return null
+  return (Array.isArray(items) ? items : []).find((job) =>
+    job && job.type === 'pack' && job.packKey === key && !FINISHED.has(job.status)
+  ) || null
+}
+
+const rootInstallLocks = new Map()
+
+/**
+ * 同一个游戏目录的安装共用 libraries / versions / launcher_profiles.json 与
+ * cache/installers 里的 patched jar：并发运行时安装器会互相覆盖文件，直接以
+ * 「A problem installing was detected」退出。这里按 root 串行化安装阶段；
+ * 后来的任务保持 running 并显示「等待同目录安装任务完成…」。
+ */
+export async function withRootInstallLock(root, job, task) {
+  const key = String(root || '').toLowerCase() || '.'
+  const previous = rootInstallLocks.get(key) || null
+  let release
+  const gate = new Promise((resolve) => { release = () => resolve() })
+  const tail = (previous || Promise.resolve()).catch(() => {}).then(() => gate)
+  rootInstallLocks.set(key, tail)
+  const done = () => {
+    release()
+    if (rootInstallLocks.get(key) === tail) rootInstallLocks.delete(key)
+  }
+  if (previous) {
+    job?.log?.('同一游戏目录已有安装任务，等待其完成后再安装…', 'warn')
+    job?.phaseLabel?.(job?.phaseKey || '准备安装', '等待同目录安装任务完成…')
+    try {
+      await new Promise((resolve, reject) => {
+        const signal = job?.signal
+        if (!signal) { previous.catch(() => {}).then(resolve); return }
+        if (signal.aborted) { reject(new Error('已取消')); return }
+        const onAbort = () => reject(new Error('已取消'))
+        signal.addEventListener('abort', onAbort, { once: true })
+        previous.catch(() => {}).then(() => {
+          signal.removeEventListener('abort', onAbort)
+          resolve()
+        })
+      })
+    } catch (e) {
+      done()
+      throw e
+    }
+  }
+  try {
+    job?.signal?.throwIfAborted?.()
+    return await task()
+  } finally {
+    done()
+  }
 }
 
 export function cancelJob(id) {
@@ -545,6 +654,7 @@ async function prefillInstallerLibraries(job, installerFile, root, { source }) {
     ].filter(Boolean)
     try {
       await downloadFromMirrors(urls, dest, {
+        ...netOptions(),
         sha1: artifact.sha1 || '',
         size: Number(artifact.size) || 0,
         signal: job.signal,
@@ -628,6 +738,7 @@ async function prepareInstallerMappings(job, installerFile, root, meta, { source
   if (!valid) {
     job.log('预取 Mojang 映射表（安装器直连 Mojang 经常被重置）…')
     await downloadFromMirrors(candidateUrls(mappings.url, { source }), dest, {
+      ...netOptions(source),
       sha1: mappings.sha1 || '',
       size: expectedSize,
       signal: job.signal,
@@ -639,7 +750,9 @@ async function prepareInstallerMappings(job, installerFile, root, meta, { source
     job.log('复用已校验的 Mojang 映射表')
   }
   if (!patchMojmapsProcessor(profile)) return ''
-  const patched = `${installerFile}.patched.jar`
+  // 每个任务独立文件：即使有别的进程/旧任务还在使用同一个安装器，也不会把
+  // 彼此正在运行的 patched jar 覆盖成半截文件。
+  const patched = `${installerFile}.${job.id}.patched.jar`
   const result = await patchJarEntry(installerFile, 'install_profile.json', (raw) => {
     let next = null
     try { next = JSON.parse(raw.toString('utf8')) } catch { return null }
@@ -741,11 +854,24 @@ async function runInstaller(job, javaPath, installerFile, root) {
 /* Downloads                                                           */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 下载参数：自动源先测速再选线路；显式选择官方 / BMCL 时保持用户给的顺序。
+ * threads 来自启动器设置（大文件分段线程数），小文件会自动退化为单连接。
+ */
+function netOptions(source) {
+  const settings = getSettings()
+  return {
+    threads: Math.max(1, Math.min(16, Number(settings.threads) || 1)),
+    rankBySpeed: (source || settings.source) === 'auto'
+  }
+}
+
 async function downloadOne(job, artifact, dest, { source, from, to, baseDone, baseTotal, label }) {
   const urls = artifactUrls(artifact, source)
   if (!urls.length) throw new Error('缺少下载地址：' + artifact.path)
   let last = 0
   await downloadFromMirrors(urls, dest, {
+    ...netOptions(source),
     sha1: artifact.sha1 || '',
     size: artifact.size || 0,
     signal: job.signal,
@@ -781,7 +907,7 @@ async function downloadLibraries(job, effective, paths, { source, from, to }) {
     done++
     if (done % 40 === 0 || done === list.length) job.log(`依赖库 ${done}/${list.length}`)
     if (!total) progressIn(job, from, to, done / list.length, `依赖库 ${done}/${list.length}`)
-  }, getSettings().concurrency, job.signal)
+  }, Math.max(8, Math.min(32, (Number(getSettings().concurrency) || 8) * 2)), job.signal)
   job.log(`依赖库准备完成（${list.length} 个）`, 'ok')
 }
 
@@ -792,6 +918,33 @@ async function linkOrCopy(source, target, signal) {
     await fsp.link(source, target)
   } catch {
     await fsp.copyFile(source, target)
+  }
+}
+
+/**
+ * 素材下载前先测速：小文件的探测样本只反映延迟，这里拿最大的一个音频
+ * （通常几 MB）同时探测 BMCL 与官方，选快的线路；日志写明结果，
+ * 用户不用再猜「为什么一开始那么慢」。
+ */
+async function probeAssetSource(job, entries, { source }) {
+  if ((source || getSettings().source) !== 'auto') return
+  const biggest = entries
+    .filter(([, value]) => Number(value?.size) >= 1024 * 1024)
+    .sort((a, b) => Number(b[1].size) - Number(a[1].size))[0]
+  const hash = String(biggest?.[1]?.hash || '')
+  if (!hash) return
+  const urls = assetObjectUrls(hash, { source })
+  if (urls.length < 2) return
+  try {
+    const result = await pickFastestSource(urls, { signal: job.signal })
+    if (!result.url) return
+    const speeds = result.speeds
+      .map(({ url, bps }) => `${hostOf(url)} ${bps > 0 ? formatBytes(bps) + '/s' : '未测出'}`)
+      .join(' · ')
+    job.log(`线路测速：${speeds}；资源优先走 ${hostOf(result.url)}`)
+  } catch (e) {
+    if (job.signal.aborted) throw e
+    job.log('线路测速失败，继续按默认顺序下载：' + e.message, 'warn')
   }
 }
 
@@ -812,6 +965,7 @@ async function downloadAssets(job, root, inst, effective, { source, from, to }) 
     const urls = candidateUrls(info.url, { source })
     if (!urls.length) throw new Error('资源索引缺少下载地址')
     await downloadFromMirrors(urls, indexFile, {
+      ...netOptions(source),
       sha1: info.sha1 || '',
       size: info.size || 0,
       signal: job.signal,
@@ -828,12 +982,16 @@ async function downloadAssets(job, root, inst, effective, { source, from, to }) 
   let done = 0
   let lastLog = 0
   job.phaseLabel('下载资源文件', `${entries.length} 个资源，约 ${Math.round(total / 1048576)} MB`)
-  const concurrency = Math.max(4, Math.min(24, Number(getSettings().concurrency) || 8))
+  // 素材大多是几十 KB 的小文件，瓶颈是请求延迟而不是单连接带宽：
+  // 并发开到 16–64，大文件再叠加分段线程，才能跑满线路。
+  const concurrency = Math.max(16, Math.min(64, (Number(getSettings().concurrency) || 8) * 4))
+  await probeAssetSource(job, entries, { source })
   await runPool(entries, async ([name, value]) => {
     const hash = String(value.hash || '')
     const dest = path.join(root, 'assets', 'objects', hash.slice(0, 2), hash)
     let last = 0
     await downloadFromMirrors(assetObjectUrls(hash, { source }), dest, {
+      ...netOptions(source),
       sha1: hash,
       size: Number(value.size) || 0,
       signal: job.signal,
@@ -881,6 +1039,7 @@ async function downloadLogging(job, root, version, { source }) {
   if (fs.existsSync(dest) && (!file.sha1 || !getSettings().verify)) return dest
   job.log('下载日志配置：' + file.id)
   await downloadFromMirrors(candidateUrls(file.url, { source }), dest, {
+    ...netOptions(source),
     sha1: file.sha1 || '',
     size: Number(file.size) || 0,
     signal: job.signal,
@@ -911,6 +1070,7 @@ async function installVersionFiles(job, instId, root, versionId, { source, from,
     // 与其它下载阶段使用同一套计数：detail、received/total 都来自本次下载。
     job.phaseLabel('下载客户端 JAR', jarVersion)
     await downloadFromMirrors(candidateUrls(info.url, { source }), clientJar, {
+      ...netOptions(source),
       sha1: info.sha1, size: info.size, signal: job.signal,
       verify: getSettings().verify !== false, retries: getSettings().retries || 0,
       onProgress: ({ received, total }) => {
@@ -975,6 +1135,7 @@ async function prepareVanilla(job, root, mc, { source, from, to }) {
   let last = 0
   job.phaseLabel('下载客户端', `${mc} · ${Math.round((client.size || 0) / 1048576)} MB`)
   await downloadFromMirrors(candidateUrls(client.url, { source }), jar, {
+    ...netOptions(source),
     sha1: client.sha1,
     size: client.size,
     signal: job.signal,
@@ -1024,6 +1185,7 @@ async function installForgeLike(job, inst, loader, mc, loaderVersion, root, { so
       ? [info.url]
       : [...new Set([info.mirrorUrl, info.url].filter(Boolean))]
     await downloadFromMirrors(urls, installerFile, {
+      ...netOptions(source),
       signal: job.signal,
       retries: getSettings().retries || 0,
       onProgress: ({ received, total }) => {
@@ -1052,16 +1214,22 @@ async function installForgeLike(job, inst, loader, mc, loaderVersion, root, { so
 
   // 预取 Mojang mappings 并给安装器打补丁；失败不阻断安装，安装器会走原流程。
   let runFile = installerFile
+  let patchedFile = ''
   try {
     const patched = await prepareInstallerMappings(job, installerFile, root, meta, { source })
-    if (patched) runFile = patched
+    if (patched) { runFile = patched; patchedFile = patched }
   } catch (e) {
     if (job.signal.aborted) throw e
     job.log('映射表预取失败，继续使用原始安装器：' + e.message, 'warn')
   }
 
   const started = Date.now()
-  await runInstaller(job, java.path, runFile, root)
+  try {
+    await runInstaller(job, java.path, runFile, root)
+  } finally {
+    // 任务专属的 patched jar 用完即删，缓存目录只留官方安装器本体。
+    if (patchedFile) await fsp.rm(patchedFile, { force: true }).catch(() => {})
+  }
   job.signal.throwIfAborted()
 
   let versionId = expectedId
@@ -1093,7 +1261,14 @@ async function installForgeLike(job, inst, loader, mc, loaderVersion, root, { so
 /* Instance installation                                               */
 /* ------------------------------------------------------------------ */
 
-async function installInstanceCore(job, instId, { from = 0, to = 100, source } = {}) {
+async function installInstanceCore(job, instId, options = {}) {
+  const inst = findInstance(instId)
+  if (!inst) throw new Error('实例不存在')
+  const root = inst.root ? path.resolve(inst.root) : launcherRoot()
+  return withRootInstallLock(root, job, () => installInstanceCoreUnlocked(job, instId, options))
+}
+
+async function installInstanceCoreUnlocked(job, instId, { from = 0, to = 100, source } = {}) {
   const inst = findInstance(instId)
   if (!inst) throw new Error('实例不存在')
   const root = inst.root ? path.resolve(inst.root) : launcherRoot()
@@ -1252,6 +1427,7 @@ export function startModUpdates(instanceId, items = []) {
       job.phaseLabel('下载更新', `${item.name || filename} · ${Math.round((Number(item.size) || 0) / 1048576 * 10) / 10} MB`)
       let last = 0
       await downloadFromMirrors([url.toString()], target, {
+        ...netOptions(),
         sha1,
         size: Number(item.size) || 0,
         signal: job.signal,
@@ -1504,6 +1680,10 @@ async function downloadModrinthPackFiles(job, index, gameDir, { from, to, phase 
           // 这里不传 size：清单里的 fileSize 只用来显示进度。真实校验交给
           // 下面的 sha1/sha512，否则清单大小与 CDN 文件差几个字节会误报失败。
           await fetchToFile(url, targetTemp, {
+            // fileSize 只用于「要不要分段」和显示进度，不参与长度校验：
+            // 真实一致性由下面的 sha1 / sha512 决定。
+            expectedSize: Number(item.fileSize) || 0,
+            threads: Math.max(1, Math.min(16, Number(getSettings().threads) || 1)),
             signal: job.signal,
             verify: false,
             retries: getSettings().retries || 0,
@@ -1718,9 +1898,15 @@ async function runPackInstall(job, options = {}) {
   job.log('完成的实例：' + inst.name, 'ok')
 }
 
-export function startPackInstall({ source, name = '', memory = {}, minMemory, javaPath = '', group = '', uploaded = false }) {
+export function startPackInstall({ source, name = '', memory = {}, minMemory, javaPath = '', group = '', uploaded = false, packKey = '' }) {
   if (!source) throw new Error('缺少整合包路径')
+  const importKey = packImportKey(source, packKey)
+  const active = findActivePackJob(activeJobs(), importKey)
+  if (active) {
+    throw new Error(`该整合包正在安装中${active.name ? '：' + active.name : ''}，请等待完成后再试；进度可在「下载中心」查看。`)
+  }
   const job = new InstallJob({ type: 'pack', name: name || path.basename(source), mc: '', loader: 'vanilla' })
+  job.packKey = importKey
   const tempRoot = path.join(launcherRoot(), 'cache', 'packs', job.id)
   job.cleanup = async () => {
     await fsp.rm(tempRoot, { recursive: true, force: true }).catch(() => {})
@@ -1837,6 +2023,7 @@ export function startOnlinePackInstall({
           task.phaseLabel('下载整合包', `${filename}${size ? ' · ' + formatBytes(size) : ''}`)
           task.set(0, '开始下载整合包…')
           await downloadFromMirrors([pack.url], file, {
+            threads: Math.max(1, Math.min(16, Number(settings.threads) || 1)),
             size,
             sha1: pack.hashes?.sha1 || '',
             signal: task.signal,

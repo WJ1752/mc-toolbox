@@ -27,7 +27,8 @@ export const DEFAULT_LAUNCHER_SETTINGS = {
   root: '',
   rootConfigured: false,
   source: 'auto',              // auto | official | bmclapi
-  concurrency: 8,              // 并发下载数
+  concurrency: 8,              // 并发下载数（同时下载的文件数）
+  threads: 4,                  // 单文件分段线程数（≥4 MB 的文件按 Range 分段下载）
   retries: 3,
   verify: true,                // 复用文件时校验 sha1
   defaultMemory: 4096,         // 最大堆内存 MB
@@ -98,11 +99,12 @@ function currentRootFor(data) {
 
 function mergeDefaults(value) {
   const out = { ...DEFAULT_LAUNCHER_SETTINGS, ...(value || {}) }
-  for (const key of ['concurrency', 'retries', 'defaultMemory', 'defaultMinMemory', 'defaultWidth', 'defaultHeight']) {
+  for (const key of ['concurrency', 'threads', 'retries', 'defaultMemory', 'defaultMinMemory', 'defaultWidth', 'defaultHeight']) {
     const n = Number(out[key])
     if (Number.isFinite(n)) out[key] = n
   }
   out.concurrency = Math.max(1, Math.min(32, out.concurrency || 8))
+  out.threads = Math.max(1, Math.min(16, out.threads || 4))
   out.retries = Math.max(0, Math.min(10, out.retries ?? 3))
   out.verify = out.verify !== false
   out.downloadAssets = out.downloadAssets !== false

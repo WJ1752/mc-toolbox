@@ -104,8 +104,8 @@ export const launcherApi = {
   packInspect: (source) => api.post('/api/launcher/packs/inspect', { source }),
   packInstall: (payload) => api.post('/api/launcher/packs/install', payload),
   packOnlineInstall: (payload) => api.post('/api/launcher/packs/install-online', payload),
-  packUpload: (file, { onProgress, name = '', maxMemory = 0, minMemory = 0, group = '', javaPath = '' } = {}) =>
-    upload(`/api/launcher/packs/upload${qs({ name, maxMemory, minMemory, group, javaPath })}`, file, { onProgress }),
+  packUpload: (file, { onProgress, name = '', maxMemory = 0, minMemory = 0, group = '', javaPath = '', packKey = '' } = {}) =>
+    upload(`/api/launcher/packs/upload${qs({ name, maxMemory, minMemory, group, javaPath, packKey })}`, file, { onProgress }),
 
   exportInstance: (id, payload = {}) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/export`, payload),
   exports: () => api.get('/api/launcher/exports'),

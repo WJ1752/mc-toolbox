@@ -135,12 +135,26 @@ export function describeOnlineInstallError(error) {
  */
 export function createInstallCenter(ctx) {
   let active = null
+  let pendingFile = null
   return {
     render(container) {
       if (!container) return
       active?.dispose()
       active = buildView(ctx, container)
+      if (pendingFile && active?.importFile) {
+        const file = pendingFile
+        pendingFile = null
+        void active.importFile(file)
+      }
     },
+    /** 整页拖入 / 外部入口：切到「整合包 → 本地文件」并立即上传。 */
+    importFile(file) {
+      if (!file) return Promise.resolve()
+      if (active?.importFile) return active.importFile(file)
+      pendingFile = file
+      return Promise.resolve()
+    },
+    isImporting() { return active?.isImporting?.() === true },
     destroy() { active?.dispose(); active = null }
   }
 }
@@ -748,10 +762,23 @@ function buildView(ctx, container) {
     setPackError('')
     if (!/\.(mrpack|zip)$/i.test(file.name || '')) return setPackError('只支持 .mrpack 或 .zip 整合包')
     if (Number(file.size) > MAX_PACK_BYTES) return setPackError('整合包超过 4 GB，请改用「选择文件」从本机路径安装')
-    if (pack.busy) return
-    pack.busy = true; updatePackBtn(); show(uploadWrap, true); uploadBar.set(0)
-    uploadText.textContent = '正在上传 ' + file.name + '…'
+    if (pack.busy) return notify('已有整合包正在上传，请等待当前任务完成', 'warn')
+    const packKey = [file.name, file.size, file.lastModified].join(':')
+    // 先占住单飞标记，再查任务列表：两次快速拖入不会同时通过重复检查。
+    pack.busy = true; updatePackBtn()
     try {
+      // 同一个整合包已有任务在跑：先查一次任务列表，避免又上传整个文件才被服务端拒绝。
+      const active = await findActivePackImport(packKey)
+      if (disposed) return
+      if (active) {
+        setPackError(`该整合包正在安装中${active.name ? '：' + active.name : ''}，请等待完成后再试。`)
+        notify(`该整合包正在安装中${active.name ? '：' + active.name : ''}，进度可在「下载中心」查看`, 'warn')
+        return
+      }
+      show(uploadWrap, true); uploadBar.set(0)
+      uploadText.textContent = '正在上传 ' + file.name + '…'
+      uploadWrap.scrollIntoView?.({ block: 'nearest' })
+      notify(`开始导入整合包：${file.name}（${fmtBytes(Number(file.size) || 0)}）`, 'info')
       const memory = readMemory(packMinInput, packMaxInput)
       const result = await ctx.api.packUpload(file, {
         name: packNameInput.value.trim(),
@@ -759,6 +786,8 @@ function buildView(ctx, container) {
         // 上传走 query 参数，之前只传了最大内存，分组/初始内存会被静默丢掉。
         minMemory: memory.error ? 0 : memory.min,
         group: packGroupInput.value.trim(),
+        // 同一个文件在上一次导入结束前再次拖入时，服务端据此拒绝重复任务。
+        packKey,
         onProgress: ({ loaded, total, ratio }) => {
           if (disposed) return
           const pct = Number.isFinite(ratio) ? Math.max(0, Math.min(1, ratio)) * 100 : 0
@@ -778,6 +807,23 @@ function buildView(ctx, container) {
       if (disposed) return
       setPackError('上传失败：' + e.message); notify('上传失败：' + e.message, 'err'); show(uploadWrap, false)
     } finally { pack.busy = false; updatePackBtn() }
+  }
+  async function findActivePackImport(packKey) {
+    if (!packKey) return null
+    try {
+      const data = await ctx.api.jobs()
+      const items = Array.isArray(data?.items) ? data.items : []
+      return items.find((job) => job?.type === 'pack' && job.packKey === packKey && !FINISHED.has(job.status)) || null
+    } catch { return null }
+  }
+  /** 外部入口（整页拖入）：切到本地文件页并立即开始上传。 */
+  function importFile(file) {
+    if (disposed || !file) return Promise.resolve()
+    if (pack.busy) { notify('已有整合包正在上传，请等待当前任务完成', 'warn'); return Promise.resolve() }
+    tabs.setValue?.('pack')
+    switchPackMode('local')
+    switchTab('pack')
+    return uploadPack(file)
   }
 
   /* --- 在线搜索与安装 --- */
@@ -1296,6 +1342,9 @@ function buildView(ctx, container) {
   }
   function switchPackMode(value) {
     pack.mode = value
+    // 程序化切换（拖入文件 / 下载中心载入）也要同步分段控件的选中态，
+    // 否则页面显示本地文件，按钮却还停在「搜索下载」。
+    packModeSeg.setValue?.(value)
     packSearchPane.style.display = value === 'search' ? 'flex' : 'none'
     packLocalPane.style.display = value === 'local' ? 'flex' : 'none'
     packModeHint.textContent = value === 'search'
@@ -1568,7 +1617,14 @@ function buildView(ctx, container) {
       packQueryInput.focus?.()
     }
   }
+  // 整页拖入：安装页渲染完成后立即切到「整合包 → 本地文件」并开始上传，
+  // 用户松手后马上看到真实进度，而不是先静默上传再跳页。
+  const droppedFile = ctx.takePendingPackFile?.() || null
+  if (droppedFile) void importFile(droppedFile)
   return {
+    /** 整页拖入的整合包：切换到本地文件并上传；返回上传 Promise 便于去重。 */
+    importFile,
+    isImporting: () => pack.busy === true,
     dispose() {
       if (disposed) return
       disposed = true

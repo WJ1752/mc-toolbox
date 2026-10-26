@@ -1293,7 +1293,10 @@
 .lp-danger-note { border-left-color: var(--redstone); color: var(--dim); background: color-mix(in srgb, var(--redstone) 6%, transparent); }
 
 .launcher-page.is-drop::after {
-  content: "松开以安装整合包";
+  content: "松开以导入整合包\A支持 .mrpack / .zip，单个最大 4 GB";
+  white-space: pre;
+  text-align: center;
+  line-height: 1.9;
   position: fixed;
   inset: var(--titlebar-h) 0 var(--statusbar-h) 0;
   z-index: 300;

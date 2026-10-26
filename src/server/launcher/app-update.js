@@ -321,6 +321,8 @@ async function downloadAsset(info) {
     size: asset.size || 0,
     maxBytes: MAX_ASSET_BYTES,
     retries: 2,
+    // 自更新包几十 MB，GitHub 资产支持 Range：和其它大文件一样用分段下载。
+    threads: Math.max(1, Math.min(16, Number(getSettings().threads) || 4)),
     headers,
     onProgress: ({ received, total }) => {
       downloadState.received = received

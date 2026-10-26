@@ -163,6 +163,38 @@ async function main() {
     })()`)
     check('下载中心可直接进入整合包安装', installOk && installInfo.tab.includes('整合包'), JSON.stringify(installInfo))
     check('安装进度坞固定在页面上方', installInfo.sticky === 'sticky', JSON.stringify(installInfo))
+    // 整页拖入整合包：必须先切到「整合包 → 本地文件」并显示上传进度。
+    // 回归点：工作台的 document drop 守卫曾 stopPropagation，导致启动器的
+    // drop 处理器收不到事件，用户松开鼠标后完全没有反应。
+    const dropImport = await evaluate(`(async () => {
+      const wait = (ms) => new Promise(r => setTimeout(r, ms))
+      const root = document.getElementById('launcherPage')
+      const originalSend = XMLHttpRequest.prototype.send
+      let held = null
+      XMLHttpRequest.prototype.send = function (body) { held = () => originalSend.call(this, body) }
+      const dt = new DataTransfer()
+      dt.items.add(new File([new Uint8Array(2048)], 'smoke-pack.zip', { type: 'application/zip' }))
+      const target = root.querySelector('.lp-toolbar h2') || root
+      target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }))
+      let info = { tab: false, mode: false, uploading: false }
+      for (let i = 0; i < 60; i++) {
+        await wait(100)
+        const segs = [...root.querySelectorAll('.lp-view-body .seg button')]
+        const text = root.querySelector('.lp-view-body')?.innerText || ''
+        info = {
+          tab: segs.some((b) => b.textContent.trim() === '整合包' && b.classList.contains('active')),
+          mode: segs.some((b) => b.textContent.trim() === '本地文件' && b.classList.contains('active')),
+          uploading: /正在上传/.test(text)
+        }
+        if (info.tab && info.mode && info.uploading) break
+      }
+      // 放行上传，服务端会因测试 ZIP 无效而结束任务并清理临时文件。
+      XMLHttpRequest.prototype.send = originalSend
+      held?.()
+      return info
+    })()`)
+    check('拖入整合包立即切到本地文件并显示上传进度',
+      dropImport.tab && dropImport.mode && dropImport.uploading, JSON.stringify(dropImport))
     await evaluate(`document.querySelector('.lp-back')?.click()`)
     await sleep(300)
   }

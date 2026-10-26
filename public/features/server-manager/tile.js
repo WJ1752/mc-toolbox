@@ -871,14 +871,13 @@ function buildConsole(ctx, container, { expanded }) {
   }
 
   /* ---------------- 生命周期与拖放守卫 ---------------- */
-  // 文件拖到页面其他位置时浏览器会打开/下载文件；只允许本磁贴的 drop-zone 接收。
+  // 文件拖到页面其他位置时浏览器会打开/下载文件；这里只阻止默认行为。
+  // 不能 stopPropagation：本磁贴可能挂在工作台后台，而启动器页、客户端转服务端
+  // 等页面有自己的整页 drop 处理器；拦掉冒泡会让「拖入整合包」完全没有反应。
   const preventOutsideFileDrop = event => {
     const files = event.dataTransfer?.files
     if (!files?.length) return
-    if (!event.target.closest?.('.drop-zone')) {
-      event.preventDefault()
-      event.stopPropagation()
-    }
+    if (!event.target.closest?.('.drop-zone')) event.preventDefault()
   }
   document.addEventListener('dragover', preventOutsideFileDrop, true)
   document.addEventListener('drop', preventOutsideFileDrop, true)

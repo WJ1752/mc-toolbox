@@ -112,6 +112,8 @@ const state = {
   friendsController: null,
   // 下载中心 → 新建实例 的一次性请求：{ path, auto, token }，由安装页消费后清空。
   pendingPackInstall: null,
+  // 整页拖入的整合包 File：安装页完成渲染后消费并立即上传。
+  pendingPackFile: null,
   contentHandle: null,
   contentToken: 0,
   heroRefs: null,
@@ -526,6 +528,11 @@ function pageCtx() {
       const pending = state.pendingPackInstall
       state.pendingPackInstall = null
       return pending
+    },
+    takePendingPackFile: () => {
+      const file = state.pendingPackFile
+      state.pendingPackFile = null
+      return file
     },
     openAccounts: () => openAccounts(),
     openSettings: (section = 'launcher-root') => openLauncherSettings(section),
@@ -1044,6 +1051,7 @@ async function renderInstallView() {
     if (!state.installController) state.installController = mod.createInstallCenter(pageCtx())
     state.installController.render(body)
   } catch (e) {
+    state.pendingPackFile = null
     body.appendChild(h('div', { class: 'lp-main-error' }, icon('warning', { size: 22 }), h('b', {}, '加载安装中心失败'), h('p', {}, e.message)))
   }
 }
@@ -1100,6 +1108,8 @@ async function renderFriendsView() {
 async function showView(view) {
   // 切页时一定收掉拖放遮罩，避免 ESC 取消拖拽后遮罩跟着新页面一起出现。
   hideDropOverlay()
+  // 离开安装页时丢弃还没被消费的拖入文件，避免下次进入安装页时误触发上传。
+  if (view !== 'install') state.pendingPackFile = null
   const previous = state.view
   if (previous === 'downloads' && view !== 'downloads') {
     state.downloadsController?.destroy?.()
@@ -2939,6 +2949,7 @@ async function activate() {
 
 function deactivate() {
   state.active = false
+  state.pendingPackFile = null
   hideDropOverlay()
   stopPolling()
   stopFriendsNotifier()
@@ -3037,14 +3048,19 @@ function bindKeys() {
     hideDropOverlay()
     const file = files[0]
     if (!/\.(mrpack|zip)$/i.test(file.name)) { toast('请拖入 .mrpack 或整合包 ZIP', 'warn'); return }
+    // 上传过程中再次拖入：保留当前进度，不重渲染安装页（重渲染会丢掉上传卡片）。
+    if (state.installController?.isImporting?.()) {
+      toast('正在导入整合包，请等待当前上传完成', 'warn')
+      return
+    }
+    // 先把文件交给安装页，再切页：安装页渲染完成后会立刻切到「整合包 → 本地文件」
+    // 并显示真实上传百分比，不再先静默上传 1 GB 再跳页。
+    state.pendingPackFile = file
     try {
-      const result = await api.packUpload(file, { name: '' })
-      toast('整合包上传完成，正在安装…', 'ok')
       await showView('install')
-      if (result?.job?.id) state.lastJobState.set(result.job.id, result.job.status)
-      await pollStatus(true)
     } catch (err) {
-      toast('整合包上传失败：' + err.message, 'err')
+      state.pendingPackFile = null
+      toast('整合包导入失败：' + err.message, 'err')
     }
   })
   // 这三种情况不会稳定触发 dragleave：拖拽被 Esc 取消、窗口失焦、标签页隐藏。

@@ -182,7 +182,26 @@ export function jobElapsedText(job, now = Date.now()) {
 }
 
 /**
- * 下载行的一行摘要：字节、百分比、速度、耗时。
+ * 预计剩余时间（秒）：只有运行中、速度 > 0 且总量已知时才有意义。
+ * 速度是服务端返回的平滑值，因此这里不再二次平滑。
+ */
+export function jobEtaSeconds(job, now = Date.now()) {
+  if (!job || job.status !== 'running') return 0
+  const speed = num(job.speed)
+  const { received, total } = jobBytes(job)
+  if (speed <= 0 || total <= 0 || received >= total) return 0
+  return Math.max(1, Math.round((total - received) / speed))
+}
+
+/** `剩余 2 分` / `剩余 1 分 30 秒`；无法估算时返回 ''。 */
+export function jobEtaText(job, now = Date.now()) {
+  const seconds = jobEtaSeconds(job, now)
+  if (seconds < 2) return ''
+  return '剩余 ' + fmtDuration(seconds)
+}
+
+/**
+ * 下载行的一行摘要：字节、百分比、速度、剩余时间、耗时。
  * 安装任务没有字节时不硬塞 0%；全部为空时回退到状态文案。
  */
 export function jobMetaText(job, now = Date.now()) {
@@ -196,6 +215,8 @@ export function jobMetaText(job, now = Date.now()) {
   }
   const speed = jobSpeedText(job)
   if (speed) parts.push(speed)
+  const eta = jobEtaText(job, now)
+  if (eta) parts.push(eta)
   const elapsed = jobElapsedText(job, now)
   if (elapsed) parts.push(elapsed)
   const idle = jobIdleText(job, now)

@@ -179,7 +179,7 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
   on('PUT', '/api/launcher/settings', async (req) => {
     const body = await readBody(req)
     const allowed = [
-      'root', 'rootConfigured', 'source', 'concurrency', 'retries', 'verify', 'defaultMemory', 'defaultMinMemory',
+      'root', 'rootConfigured', 'source', 'concurrency', 'threads', 'retries', 'verify', 'defaultMemory', 'defaultMinMemory',
       'defaultJava', 'jvmArgs', 'gameArgs', 'closeOnLaunch', 'showLog', 'msClientId', 'downloadAssets',
       'defaultWidth', 'defaultHeight', 'defaultGroup'
     ]
@@ -614,6 +614,9 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
         minMemory: safeInt(query.minMemory, 0) || undefined,
         group: query.group || '',
         javaPath: query.javaPath || '',
+        // 上传文件的稳定标识（文件名 + 大小 + 修改时间）：同一个包重复拖入时
+        // 服务端拒绝第二个任务，避免并发安装器互相覆盖 libraries / versions。
+        packKey: query.packKey || '',
         uploaded: true
       })
     } catch (e) {
