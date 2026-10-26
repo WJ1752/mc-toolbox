@@ -103,6 +103,7 @@ const state = {
   search: '',
   news: null,
   newsLoading: false,
+  newsError: '',
   community: null,
   lastJobState: new Map(),
   finishedNotified: new Set(),
@@ -2003,22 +2004,50 @@ async function loadRecentLog(slot, inst) {
   }
 }
 
+// 资讯区每次重绘（activate / 设置保存 / 切换页面）都会换一个新的 slot。
+// 载入期间如果页面重绘，结果必须画到当前挂载的 slot 上；旧实现只画发起请求时
+// 捕获的那个节点，节点断开后新页面就永远停在「正在读取 Mojang 资讯…」。
+let newsSlot = null
+let newsCompact = true
+
 async function renderNewsInto(slot, { compact = false, force = false } = {}) {
   if (!slot) return
-  clear(slot)
-  if (state.news) { paintNews(slot, compact); return }
-  slot.appendChild(h('div', { class: 'lp-tab-loading' }, spinner(12), '正在读取 Mojang 资讯…'))
-  if (state.newsLoading) return
-  state.newsLoading = true
+  newsSlot = slot
+  newsCompact = compact
+  // 已有数据 / 已失败 / 已在加载：只按当前状态重绘，不再发请求。
+  const started = !state.news && !state.newsError && !state.newsLoading
+  if (started) state.newsLoading = true
+  paintNewsState(slot, compact)
+  if (!started) return
   try {
-    const data = await api.news(force)
-    state.news = data
-    if (slot.isConnected) paintNews(slot, compact)
+    state.news = await api.news(force)
+    state.newsError = ''
   } catch (e) {
-    if (slot.isConnected) slot.appendChild(h('div', { class: 'lp-hint' }, '资讯加载失败：' + e.message))
+    state.newsError = e?.message || '网络不可用'
   } finally {
     state.newsLoading = false
+    if (newsSlot?.isConnected) paintNewsState(newsSlot, newsCompact)
   }
+}
+
+function paintNewsState(slot, compact) {
+  clear(slot)
+  if (state.news) { paintNews(slot, compact); return }
+  if (state.newsLoading) {
+    slot.appendChild(h('div', { class: 'lp-tab-loading' }, spinner(12), '正在读取 Mojang 资讯…'))
+    return
+  }
+  slot.appendChild(h('div', { class: 'lp-news-error' },
+    h('span', { class: 'lp-hint bad' }, `资讯加载失败：${state.newsError || '网络不可用'}`),
+    btn('重试', {
+      size: 'sm',
+      iconName: 'refresh',
+      onClick: () => {
+        state.newsError = ''
+        renderNewsInto(slot, { compact, force: true })
+      }
+    })
+  ))
 }
 
 function paintNews(slot, compact) {
