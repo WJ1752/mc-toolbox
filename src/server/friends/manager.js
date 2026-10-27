@@ -16,11 +16,15 @@ import * as content from '../launcher/content.js'
 import { findInstance, instancePaths } from '../launcher/state.js'
 import { listSessions } from '../launcher/launch.js'
 import { startPackExport, getExportJob } from '../launcher/pack-export.js'
+import { nextSpeed } from '../launcher/speed-meter.js'
 import * as accounts from '../launcher/accounts.js'
 import { applyJar, diffManifests, fillPlan, findStagedBySha, manifestFromItems, sha1File } from './mods-sync.js'
 import { sanitizeFileName, uniqueFileName } from './transfer.js'
 
 const RECEIVED_ROOT = process.env.MC_TOOLBOX_FRIENDS_RECEIVED || path.join(DATA_DIR, 'friends', 'received')
+const IMAGE_CACHE_DIR = path.join(DATA_DIR, 'friends', 'images')
+const IMAGE_TMP_DIR = path.join(DATA_DIR, 'friends', 'tmp')
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 const MODRINTH_VERSION_FILE = 'https://api.modrinth.com/v2/version_file'
 const USER_AGENT = `MC-Toolbox/${PRODUCT_VERSION} (friends-server)`
 const HEARTBEAT_MS = 25000
@@ -369,6 +373,144 @@ export async function markRead(uuid, upTo = 0) {
   return { ok: true }
 }
 
+// ---------------- 群聊 ----------------
+
+function groupIdOf(value) {
+  const id = String(value || '')
+  if (!/^g_[A-Za-z0-9_-]{4,40}$/.test(id)) throw new Error('群聊标识无效')
+  return id
+}
+
+export async function createGroup({ name = '', members = [] } = {}) {
+  const instance = requireClient()
+  const result = await instance.request('POST', '/api/groups', {
+    body: { name: String(name || '').trim(), members: Array.isArray(members) ? members.map(String) : [] }
+  })
+  invalidate()
+  logEvent(`已创建群聊「${result.group?.name || name}」`)
+  return result
+}
+
+export async function addGroupMember(groupId, uuid) {
+  const instance = requireClient()
+  const result = await instance.request('POST', `/api/groups/${encodeURIComponent(groupIdOf(groupId))}/members`, { body: { uuid: String(uuid || '') } })
+  invalidate()
+  return result
+}
+
+export async function removeGroupMember(groupId, uuid) {
+  const instance = requireClient()
+  const result = await instance.request('DELETE', `/api/groups/${encodeURIComponent(groupIdOf(groupId))}/members/${encodeURIComponent(String(uuid || ''))}`)
+  invalidate()
+  return result
+}
+
+export async function leaveGroup(groupId) {
+  const instance = requireClient()
+  const result = await instance.request('DELETE', `/api/groups/${encodeURIComponent(groupIdOf(groupId))}`)
+  invalidate()
+  return result
+}
+
+export async function listGroups() {
+  ensureLockedServer()
+  const data = await refresh()
+  return { groups: data?.friends?.groups || [] }
+}
+
+export async function groupMessages(groupId, { after = 0, markRead: read = false } = {}) {
+  const instance = requireClient()
+  const id = encodeURIComponent(groupIdOf(groupId))
+  const result = await instance.request('GET', `/api/groups/${id}/messages?after=${Number(after) || 0}${read ? '&markRead=1' : ''}`)
+  return result
+}
+
+export async function sendGroupMessage(groupId, text) {
+  const instance = requireClient()
+  const id = encodeURIComponent(groupIdOf(groupId))
+  const result = await instance.request('POST', `/api/groups/${id}/messages`, {
+    body: { text: String(text || ''), clientId: 'm_' + crypto.randomBytes(9).toString('base64url').slice(0, 16) }
+  })
+  invalidate()
+  return result
+}
+
+export async function markGroupRead(groupId, upTo = 0) {
+  const instance = requireClient()
+  const id = encodeURIComponent(groupIdOf(groupId))
+  await instance.request('POST', `/api/groups/${id}/read`, { body: { upTo: Number(upTo) || Date.now() } })
+  return { ok: true }
+}
+
+// ---------------- 聊天图片 ----------------
+
+const IMAGE_DATA_RE = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/
+
+function imageCacheMeta(id) {
+  return path.join(IMAGE_CACHE_DIR, String(id) + '.json')
+}
+
+/** 取聊天图片：优先本地缓存，没有再从好友服务器下载并缓存。 */
+export async function imageFor(id) {
+  const key = String(id || '')
+  if (!/^f_[A-Za-z0-9_-]{4,60}$/.test(key)) throw new Error('图片标识无效')
+  const metaFile = imageCacheMeta(key)
+  try {
+    const meta = JSON.parse(await fsp.readFile(metaFile, 'utf8'))
+    if (meta?.file && fs.existsSync(meta.file)) return meta
+  } catch {}
+  const instance = requireClient()
+  const result = await instance.downloadBuffer(key)
+  const mime = String(result.contentType || '').startsWith('image/')
+    ? String(result.contentType).split(';')[0]
+    : (String(result.name || '').toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg')
+  await fsp.mkdir(IMAGE_CACHE_DIR, { recursive: true })
+  const file = path.join(IMAGE_CACHE_DIR, key + '.bin')
+  await fsp.writeFile(file, result.buffer)
+  const meta = { file, mime, name: result.name || 'image', at: Date.now() }
+  await fsp.writeFile(metaFile, JSON.stringify(meta), 'utf8')
+  return meta
+}
+
+/**
+ * 发送聊天图片：把剪贴板/文件里的图片先传到好友服务器，再发一条带附件
+ * 的消息。图片和普通文件共用 12 小时中转缓存，不占用「传输」面板。
+ */
+export async function sendImage({ to = '', groupId = '', text = '', dataUrl = '', name = '', width = 0, height = 0 } = {}) {
+  const match = IMAGE_DATA_RE.exec(String(dataUrl || ''))
+  if (!match) throw new Error('只支持 PNG / JPEG / WebP / GIF 图片')
+  const mime = match[1]
+  const buffer = Buffer.from(match[2], 'base64')
+  if (!buffer.length) throw new Error('图片内容为空')
+  if (buffer.length > MAX_IMAGE_BYTES) throw new Error('图片太大（最大 10 MB）')
+  const ext = mime === 'image/png' ? '.png' : mime === 'image/webp' ? '.webp' : mime === 'image/gif' ? '.gif' : '.jpg'
+  const fileName = sanitizeFileName(name || ('image' + ext), { fallback: 'image' + ext })
+  const temp = path.join(IMAGE_TMP_DIR, 'img_' + crypto.randomBytes(8).toString('hex') + ext)
+  await fsp.mkdir(IMAGE_TMP_DIR, { recursive: true })
+  await fsp.writeFile(temp, buffer)
+  const instance = requireClient()
+  const targets = groupId
+    ? [{ type: 'group', id: groupIdOf(groupId) }]
+    : [{ type: 'friend', id: String(to || '') }]
+  try {
+    const sha1 = crypto.createHash('sha1').update(buffer).digest('hex')
+    const created = await instance.request('POST', '/api/files', {
+      body: { targets, kind: 'image', name: fileName, size: buffer.length, sha1, width: Number(width) || 0, height: Number(height) || 0 }
+    })
+    const file = created.file
+    await instance.uploadFile(file.id, temp, { size: buffer.length })
+    const image = { id: file.id, name: fileName, size: buffer.length, width: Number(width) || 0, height: Number(height) || 0 }
+    const clientId = 'm_' + crypto.randomBytes(9).toString('base64url').slice(0, 16)
+    const result = groupId
+      ? await instance.request('POST', `/api/groups/${encodeURIComponent(groupIdOf(groupId))}/messages`, { body: { text: String(text || ''), image, clientId } })
+      : await instance.request('POST', '/api/messages', { body: { to: String(to || ''), text: String(text || ''), image, clientId } })
+    invalidate()
+    return result
+  } finally {
+    await fsp.rm(temp, { force: true }).catch(() => {})
+  }
+}
+
 // ---------------- 文件传输 ----------------
 
 function fileTargetPath(file) {
@@ -455,22 +597,33 @@ export async function downloadFile(id, { dir = '', instanceId = '' } = {}) {
     path: target,
     targetDir: downloadDir,
     appliedTo: applyToInstance ? inst.id : '',
+    targets: Array.isArray(file.targets) ? file.targets : [],
+    groupId: file.groupId || '',
     status: 'downloading',
+    phase: '接收',
+    detail: '',
+    indeterminate: false,
     progress: 0,
+    loaded: 0,
+    total: file.size,
+    speed: 0,
     peer: file.peer,
     error: '',
     startedAt: Date.now()
   }
   downloads.set(id, record)
   const instance = requireClient()
+  const meter = makeSpeedMeter(record)
   instance.downloadFile(id, target, {
     onProgress: ({ loaded, total, ratio }) => {
       record.progress = ratio * 100
       record.loaded = loaded
       record.total = total
+      meter(loaded)
     }
   }).then(async (result) => {
     record.progress = 100
+    record.speed = 0
     let finalPath = result.path
     let finalName = path.basename(result.path)
     if (applyToInstance) {
@@ -508,6 +661,7 @@ export async function downloadFile(id, { dir = '', instanceId = '' } = {}) {
     await refresh({ force: true })
   }).catch((error) => {
     record.status = 'failed'
+    record.speed = 0
     record.error = error.message
     record.finishedAt = Date.now()
     logEvent(`接收 ${file.name} 失败：${error.message}`, 'err')
@@ -577,7 +731,7 @@ export function clearFinishedTransfers() {
 
 // 真正在动的传输（导出/上传/接收中）；「等待对方接收」不算提示，避免角标长期不消。
 function activeTransferCount() {
-  const uploading = [...uploads.values()].filter((record) => ['exporting', 'uploading'].includes(record.status)).length
+  const uploading = [...uploads.values()].filter((record) => ['exporting', 'verifying', 'uploading'].includes(record.status)).length
   const downloading = [...downloads.values()].filter((record) => record.status === 'downloading').length
   return uploading + downloading
 }
@@ -597,64 +751,188 @@ export async function notifications() {
   }
   const friends = data?.friends || {}
   const files = data?.files || {}
-  const requests = (friends.incoming || []).length
-  const unread = (friends.friends || []).reduce((sum, friend) => sum + (Number(friend.unread) || 0), 0)
-  const incoming = (files.incoming || []).filter((file) => file.status === 'ready').length
-  return { loggedIn, requests, unread, incoming, activeTransfers: activeTransferCount(), error: '' }
+  const requestCount = (friends.incoming || []).length
+  const directUnread = (friends.friends || []).reduce((sum, friend) => sum + (Number(friend.unread) || 0), 0)
+  const groupUnread = (friends.groups || []).reduce((sum, group) => sum + (Number(group.unread) || 0), 0)
+  const unread = directUnread + groupUnread
+  const incoming = (files.incoming || []).filter((file) => file.status === 'ready' && file.kind !== 'image').length
+  return { loggedIn, requests: requestCount, unread, incoming, activeTransfers: activeTransferCount(), error: '' }
 }
 
-async function uploadToFriend({ friendId, kind, filePath, name, size, sha1, instanceKey = '' }) {
+// 传输记录的实时速度（B/s）：每 200ms 用已传字节做一次差分并指数平滑，
+// 阶段切换或被取消时把速度清零，避免界面停在最后一次峰值。
+function makeSpeedMeter(record) {
+  let lastAt = Date.now()
+  let lastBytes = Math.max(0, Number(record.loaded) || 0)
+  return (loaded) => {
+    const now = Date.now()
+    const dt = (now - lastAt) / 1000
+    if (dt < 0.2) return
+    const bytes = Math.max(0, Number(loaded) || 0)
+    const delta = bytes - lastBytes
+    lastAt = now
+    lastBytes = bytes
+    record.speed = delta < 0 ? 0 : nextSpeed(record.speed, delta, dt)
+  }
+}
+
+/**
+ * 上传文件到好友服务器。
+ * 传入 record 时复用它（分享整合包从「导出中」直接切换到「上传中」），
+ * 不传则新建一条；无论哪种都会把地图键换成服务器返回的文件 id。
+ */
+async function uploadToFriend({ friendId = '', targets = null, kind, filePath, name, size, sha1, instanceKey = '', record = null }) {
+  const list = Array.isArray(targets) && targets.length
+    ? targets
+    : [{ type: 'friend', id: String(friendId || '') }]
   const instance = requireClient()
   const created = await instance.request('POST', '/api/files', {
-    body: { to: friendId, kind, name, size, sha1, instanceKey }
+    body: { targets: list, kind, name, size, sha1, instanceKey }
   })
   const file = created.file
-  const record = {
+  if (record) uploads.delete(record.id)
+  const target = record || {}
+  Object.assign(target, {
     id: file.id,
     kind,
     name,
     size,
     sha1,
+    targets: list,
+    groupIds: list.filter((entry) => entry.type === 'group').map((entry) => entry.id),
+    broadcast: list.length > 1 || list.some((entry) => entry.type === 'group'),
+    recipientCount: Number(file.recipientCount) || 0,
+    peer: list.find((entry) => entry.type === 'friend')?.id || '',
     status: 'uploading',
+    phase: '上传',
+    detail: '',
+    indeterminate: false,
     progress: 0,
     loaded: 0,
     total: size,
-    peer: friendId,
+    speed: 0,
     error: '',
-    startedAt: Date.now()
-  }
-  uploads.set(file.id, record)
+    startedAt: Date.now(),
+    finishedAt: 0
+  })
+  uploads.set(file.id, target)
+  const meter = makeSpeedMeter(target)
   instance.uploadFile(file.id, filePath, {
     size,
     onProgress: ({ loaded, total, ratio }) => {
-      record.progress = ratio * 100
-      record.loaded = loaded
-      record.total = total
+      target.progress = ratio * 100
+      target.loaded = loaded
+      target.total = total
+      meter(loaded)
     }
   }).then(async () => {
-    record.status = 'ready'
-    record.progress = 100
-    record.finishedAt = Date.now()
+    target.status = 'ready'
+    target.progress = 100
+    target.speed = 0
+    target.detail = ''
+    target.finishedAt = Date.now()
     invalidate()
     logEvent(`已上传 ${name}`)
     await refresh({ force: true })
   }).catch((error) => {
+    target.status = 'failed'
+    target.speed = 0
+    target.error = error.message
+    target.finishedAt = Date.now()
+    logEvent(`上传 ${name} 失败：${error.message}`, 'err')
+    instance.request('DELETE', '/api/files/' + encodeURIComponent(target.id)).catch(() => {})
+  })
+  return target
+}
+
+/**
+ * 发送任意本地文件：先算 SHA-1，再走与整合包相同的「导出/上传」传输台账，
+ * 目标可以是好友、群聊，也可以一次群发多个会话。
+ */
+export async function sendFile({ targets = null, friendId = '', groupId = '', filePath = '' } = {}) {
+  if (!cache?.friends) await refresh({ force: true })
+  const list = resolveShareTargets({ friendId, groupId, targets })
+  const abs = path.resolve(String(filePath || ''))
+  const stat = await fsp.stat(abs).catch(() => null)
+  if (!stat || !stat.isFile()) throw new Error('文件不存在或不是普通文件')
+  if (stat.size <= 0) throw new Error('不能发送空文件')
+  if (stat.size > 2 * 1024 * 1024 * 1024) throw new Error('文件超过 2 GB，好友服务器不支持')
+  const name = path.basename(abs)
+  const kind = /\.jar$/i.test(name) ? 'mod' : 'pack'
+  const record = {
+    id: 'local_' + Date.now().toString(36),
+    kind,
+    name,
+    size: stat.size,
+    status: 'verifying',
+    phase: '校验文件',
+    detail: '正在计算 SHA-1…',
+    indeterminate: true,
+    progress: null,
+    loaded: 0,
+    total: stat.size,
+    speed: 0,
+    targets: list,
+    groupIds: list.filter((entry) => entry.type === 'group').map((entry) => entry.id),
+    broadcast: list.length > 1 || list.some((entry) => entry.type === 'group'),
+    peer: list.find((entry) => entry.type === 'friend')?.id || '',
+    error: '',
+    startedAt: Date.now()
+  }
+  uploads.set(record.id, record)
+  try {
+    const sha1 = await sha1For(abs, stat.size, stat.mtimeMs)
+    await uploadToFriend({ targets: list, kind, filePath: abs, name, size: stat.size, sha1, record })
+    return { ok: true, id: record.id }
+  } catch (error) {
     record.status = 'failed'
     record.error = error.message
+    record.indeterminate = false
     record.finishedAt = Date.now()
-    logEvent(`上传 ${name} 失败：${error.message}`, 'err')
-    instance.request('DELETE', '/api/files/' + encodeURIComponent(record.id)).catch(() => {})
-  })
-  return record
+    logEvent(`发送 ${name} 失败：${error.message}`, 'err')
+    throw error
+  }
 }
 
 // ---------------- 分享整合包 ----------------
 
-export async function sharePack({ friendId, instanceId, format = 'mrpack', includeSaves = false, includeScreenshots = false } = {}) {
+/**
+ * 解析「导出后发给谁」：单个好友、群聊或一次群发多个会话。
+ * 只接受当前好友列表 / 群聊列表里的目标，防止把文件发到任意 UUID。
+ */
+function resolveShareTargets({ friendId = '', groupId = '', targets = null } = {}) {
+  const raw = Array.isArray(targets) && targets.length
+    ? targets
+    : [
+        ...(friendId ? [{ type: 'friend', id: friendId }] : []),
+        ...(groupId ? [{ type: 'group', id: groupId }] : [])
+      ]
+  const friends = cache?.friends?.friends || []
+  const groups = cache?.friends?.groups || []
+  const list = []
+  const seen = new Set()
+  for (const entry of raw) {
+    const type = entry?.type === 'group' ? 'group' : 'friend'
+    const id = String(entry?.id || '')
+    const key = type + ':' + id
+    if (!id || seen.has(key)) continue
+    if (type === 'friend') {
+      if (!friends.some((friend) => friend.uuid === id)) throw new Error('好友不存在或已不再是好友')
+    } else if (!groups.some((group) => group.id === id)) {
+      throw new Error('群聊不存在或你不在群里')
+    }
+    seen.add(key)
+    list.push({ type, id })
+  }
+  if (!list.length) throw new Error('请选择至少一个好友或群聊')
+  return list
+}
+
+export async function sharePack({ friendId = '', groupId = '', targets = null, instanceId, format = 'mrpack', includeSaves = false, includeScreenshots = false } = {}) {
+  if (!cache?.friends) await refresh({ force: true })
   const inst = findInstance(String(instanceId || ''))
   if (!inst) throw new Error('实例不存在')
-  const friend = (cache?.friends?.friends || []).find((item) => item.uuid === friendId)
-  if (!friend) throw new Error('好友不存在')
+  const list = resolveShareTargets({ friendId, groupId, targets })
   const exported = startPackExport(inst.id, { format, includeSaves, includeScreenshots })
   const record = {
     id: 'local_' + Date.now().toString(36),
@@ -662,35 +940,70 @@ export async function sharePack({ friendId, instanceId, format = 'mrpack', inclu
     name: inst.name,
     size: 0,
     status: 'exporting',
+    phase: '准备',
+    detail: '正在启动导出…',
+    indeterminate: true,
     progress: 0,
-    peer: friendId,
+    loaded: 0,
+    total: 0,
+    speed: 0,
+    targets: list,
+    groupIds: list.filter((entry) => entry.type === 'group').map((entry) => entry.id),
+    broadcast: list.length > 1 || list.some((entry) => entry.type === 'group'),
+    peer: list.find((entry) => entry.type === 'friend')?.id || '',
     error: '',
     startedAt: Date.now(),
     exportJobId: exported.job.id
   }
   uploads.set(record.id, record)
   ;(async () => {
+    let lastBytes = 0
+    let lastSampleAt = Date.now()
     try {
       const deadline = Date.now() + 30 * 60 * 1000
       while (Date.now() < deadline) {
         const job = getExportJob(exported.job.id)
         if (!job) throw new Error('导出任务不存在')
-        record.progress = Number(job.progress) || 0
+        // 导出阶段使用任务自己的百分比（可能是不确定进度），不能拿字节数除以总大小。
+        record.progress = job.progress === null || job.progress === undefined ? null : Number(job.progress) || 0
+        record.indeterminate = job.indeterminate === true
+        record.phase = job.phase || record.phase
+        record.detail = job.detail || ''
         record.name = job.name || record.name
+        // 打包阶段会按真实写入字节上报，速度只在这段有意义；其他阶段保持 0。
+        const bytes = Number(job.bytes) || 0
+        const totalBytes = Number(job.totalBytes) || 0
+        if (bytes !== lastBytes) {
+          const now = Date.now()
+          const dt = (now - lastSampleAt) / 1000
+          if (dt > 0) record.speed = bytes < lastBytes ? 0 : nextSpeed(record.speed, bytes - lastBytes, dt)
+          lastBytes = bytes
+          lastSampleAt = now
+        }
+        record.loaded = bytes
+        record.total = totalBytes
         if (job.status === 'failed') throw new Error(job.error || '导出失败')
         if (job.status === 'cancelled') throw new Error('导出已取消')
         if (job.status === 'done') {
           if (!job.file || !fs.existsSync(job.file)) throw new Error('导出完成但没有找到文件')
           const stat = await fsp.stat(job.file)
+          record.status = 'verifying'
+          record.phase = '校验文件'
+          record.detail = '正在计算文件校验值…'
+          record.progress = null
+          record.indeterminate = true
+          record.speed = 0
+          record.loaded = 0
+          record.total = stat.size
           const sha1 = await sha1For(job.file, stat.size, stat.mtimeMs)
-          uploads.delete(record.id)
           await uploadToFriend({
-            friendId,
+            targets: list,
             kind: 'pack',
             filePath: job.file,
             name: path.basename(job.file),
             size: stat.size,
-            sha1
+            sha1,
+            record
           })
           return
         }
@@ -699,6 +1012,8 @@ export async function sharePack({ friendId, instanceId, format = 'mrpack', inclu
       throw new Error('导出超时')
     } catch (error) {
       record.status = 'failed'
+      record.speed = 0
+      record.indeterminate = false
       record.error = error.message
       record.finishedAt = Date.now()
       logEvent('分享整合包失败：' + error.message, 'err')
@@ -999,10 +1314,19 @@ export async function snapshot() {
       name: record.name,
       size: record.size,
       status: record.status,
+      phase: record.phase || '',
+      detail: record.detail || '',
+      indeterminate: record.indeterminate === true,
       progress: record.progress,
       loaded: record.loaded || 0,
       total: record.total || record.size,
-      peer: record.peer,
+      speed: record.speed || 0,
+      startedAt: record.startedAt || 0,
+      peer: record.peer || '',
+      targets: Array.isArray(record.targets) ? record.targets : [],
+      groupIds: Array.isArray(record.groupIds) ? record.groupIds : [],
+      broadcast: record.broadcast === true,
+      recipientCount: Number(record.recipientCount) || 0,
       error: record.error,
       direction: 'out',
       local: true
@@ -1013,10 +1337,17 @@ export async function snapshot() {
       name: record.name,
       size: record.size,
       status: record.status,
+      phase: record.phase || '',
+      detail: record.detail || '',
+      indeterminate: record.indeterminate === true,
       progress: record.progress,
       loaded: record.loaded || 0,
       total: record.total || record.size,
+      speed: record.speed || 0,
+      startedAt: record.startedAt || 0,
       peer: record.peer,
+      targets: Array.isArray(record.targets) ? record.targets : [],
+      groupId: record.groupId || '',
       error: record.error,
       path: record.path || '',
       targetDir: record.targetDir || '',
@@ -1034,6 +1365,7 @@ export async function snapshot() {
       error,
       profile: data?.friends?.profile || state.session.profile,
       friends: data?.friends?.friends || [],
+      groups: data?.friends?.groups || [],
       incoming: data?.friends?.incoming || [],
       outgoing: data?.friends?.outgoing || [],
       files: {

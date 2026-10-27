@@ -52,6 +52,9 @@ class ExportJob {
     this.detail = '等待开始…'
     this.progress = 0
     this.indeterminate = false
+    // 打包阶段累计写入的字节 / 待写入总字节，供好友传输面板显示实时速度。
+    this.bytes = 0
+    this.totalBytes = 0
     // 与 InstallJob / 社区任务保持一致：createdAt 是排队时刻，startedAt 真正开跑时写。
     this.createdAt = Date.now()
     this.startedAt = 0
@@ -106,6 +109,8 @@ class ExportJob {
       detail: this.detail,
       progress: this.progress,
       indeterminate: this.indeterminate,
+      bytes: this.bytes,
+      totalBytes: this.totalBytes,
       createdAt: this.createdAt,
       startedAt: this.startedAt,
       finishedAt: this.finishedAt,
@@ -280,8 +285,10 @@ export function startPackExport(instanceId, options = {}) {
       now: options.now,
       signal: job.signal,
       log: (text, kind) => job.log(text, kind),
-      onProgress: ({ phase, detail, progress, indeterminate }) => {
+      onProgress: ({ phase, detail, progress, indeterminate, bytes, totalBytes }) => {
         if (phase) job.phase = phase
+        if (Number.isFinite(bytes)) job.bytes = bytes
+        if (Number.isFinite(totalBytes)) job.totalBytes = totalBytes
         job.set(progress, detail, { indeterminate: Boolean(indeterminate) || progress === null || progress === undefined })
       }
     })
@@ -493,8 +500,8 @@ export async function exportInstanceToPack(options = {}) {
     report('打包', 55, `正在生成 ${formatInfo.label}…`, false)
     let packed
     try {
-      packed = await packDirectory(stagingRoot, tempFile, (ratio, entry) => {
-        report('打包', 55 + 37 * Math.max(0, Math.min(1, Number(ratio) || 0)), `正在写入：${entry}`, false)
+      packed = await packDirectory(stagingRoot, tempFile, (ratio, entry, stats) => {
+        report('打包', 55 + 37 * Math.max(0, Math.min(1, Number(ratio) || 0)), `正在写入：${entry}`, false, stats)
       }, signal)
     } catch (e) {
       if (signal?.aborted) throw abortError(signal)
@@ -943,7 +950,7 @@ function makeReporter(onProgress) {
   let lastPhase = ''
   let lastValue = null
   let lastDetail = ''
-  return (phase, progress, detail, indeterminate = false) => {
+  return (phase, progress, detail, indeterminate = false, bytes = null) => {
     const value = progress === null || progress === undefined ? null : clamp(progress)
     const now = Date.now()
     if (
@@ -956,12 +963,15 @@ function makeReporter(onProgress) {
     lastPhase = phase
     lastValue = value
     lastDetail = detail
-    onProgress({
+    const payload = {
       phase,
       detail: String(detail ?? ''),
       progress: value,
       indeterminate: Boolean(indeterminate) || value === null
-    })
+    }
+    if (bytes && Number.isFinite(Number(bytes.bytes))) payload.bytes = Number(bytes.bytes)
+    if (bytes && Number.isFinite(Number(bytes.total))) payload.totalBytes = Number(bytes.total)
+    onProgress(payload)
   }
 }
 

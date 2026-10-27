@@ -1,4 +1,5 @@
 // 好友功能 REST 接口（中心服务器模式）。
+import fsp from 'node:fs/promises'
 import * as manager from './manager.js'
 
 export function registerFriendsApi(on, { readBody } = {}) {
@@ -22,11 +23,49 @@ export function registerFriendsApi(on, { readBody } = {}) {
     const payload = await body(req)
     return await manager.sharePack({
       friendId: payload.friendId,
+      groupId: payload.groupId,
+      targets: Array.isArray(payload.targets) ? payload.targets : null,
       instanceId: payload.instanceId,
       format: payload.format === 'zip' ? 'zip' : 'mrpack',
       includeSaves: payload.includeSaves === true,
       includeScreenshots: payload.includeScreenshots === true
     })
+  })
+
+  // ---------------- 群聊 ----------------
+  on('GET', '/api/friends/groups', async () => await manager.listGroups())
+  on('POST', '/api/friends/groups', async (req) => await manager.createGroup(await body(req)))
+  on('POST', '/api/friends/groups/:id/members', async (req, params) => {
+    const payload = await body(req)
+    return await manager.addGroupMember(params.id, payload.uuid)
+  })
+  on('DELETE', '/api/friends/groups/:id/members/:uuid', async (_req, params) => await manager.removeGroupMember(params.id, params.uuid))
+  on('DELETE', '/api/friends/groups/:id', async (_req, params) => await manager.leaveGroup(params.id))
+  on('GET', '/api/friends/groups/:id/messages', async (_req, params, query) => await manager.groupMessages(params.id, {
+    after: Number(query.after) || 0,
+    markRead: query.markRead === '1'
+  }))
+  on('POST', '/api/friends/groups/:id/messages', async (req, params) => {
+    const payload = await body(req)
+    return await manager.sendGroupMessage(params.id, payload.text)
+  })
+  on('POST', '/api/friends/groups/:id/read', async (req, params) => {
+    const payload = await body(req)
+    return await manager.markGroupRead(params.id, payload.upTo)
+  })
+
+  // ---------------- 聊天图片 ----------------
+  on('POST', '/api/friends/files/send', async (req) => await manager.sendFile(await body(req)))
+  on('POST', '/api/friends/images', async (req) => await manager.sendImage(await body(req)))
+  on('GET', '/api/friends/images/:id', async (_req, params, _query, res) => {
+    const meta = await manager.imageFor(params.id)
+    const data = await fsp.readFile(meta.file)
+    res.writeHead(200, {
+      'Content-Type': meta.mime || 'image/png',
+      'Content-Length': data.length,
+      'Cache-Control': 'private, max-age=86400'
+    })
+    res.end(data)
   })
 
   on('POST', '/api/friends/mods/compare', async (req) => await manager.compareMods(await body(req)))

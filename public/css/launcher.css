@@ -1755,6 +1755,7 @@
 }
 .lp-transfer-status { margin-left: auto; font-size: 10px; color: var(--mute); }
 .lp-transfer-foot { display: flex; align-items: center; gap: 8px; justify-content: space-between; font-size: 9.5px; }
+.lp-transfer-meta { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .lp-received-row {
   display: flex;
@@ -1891,12 +1892,15 @@
 .lp-chat-empty { margin: auto; font-size: 11px; color: var(--mute); padding: 24px 0; text-align: center; }
 .lp-chat-composer {
   display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 7px;
   padding: 9px 11px;
   border-top: 1px solid var(--line);
   background: var(--surface-2);
 }
+.lp-chat-composer-row { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+.lp-chat-composer-row .lp-chat-input { flex: 1; }
 .lp-chat-input {
   flex: 1;
   min-width: 0;
@@ -2064,6 +2068,94 @@
   font-size: 9px;
 }
 .lp-nav-file.active { background: var(--accent-soft); }
+
+/* 群聊、聊天图片与聊天里的文件卡片 */
+.lp-friends-side-tabs-row { display: flex; align-items: center; gap: 5px; justify-content: space-between; }
+.lp-friends-side-tabs-row .lp-tabs { min-width: 0; }
+.lp-group-row .lp-friend-avatar { border-radius: 9px; }
+.lp-chat-sender { font-size: 9.5px; color: var(--dim); padding-left: 2px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-chat-image {
+  display: block;
+  max-width: min(260px, 46vw);
+  max-height: 240px;
+  margin-top: 3px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  cursor: zoom-in;
+  background: var(--surface);
+}
+.lp-chat-bubble .lp-chat-text + .lp-chat-image { margin-top: 6px; }
+.lp-chat-image-preview {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 40%, var(--line));
+  border-radius: var(--r-1);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+.lp-chat-image-preview[hidden] { display: none; }
+.lp-chat-image-thumb { width: 54px; height: 54px; object-fit: cover; border-radius: 5px; border: 1px solid var(--line); }
+.lp-chat-image-info { display: flex; flex-direction: column; gap: 2px; font-size: 10px; min-width: 0; flex: 1; }
+.lp-chat-file {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  align-self: flex-start;
+  max-width: 86%;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+.lp-chat-file.out {
+  align-self: flex-end;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-2));
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+}
+.lp-chat-file-icon { flex: none; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 7px; background: var(--surface); color: var(--accent); border: 1px solid var(--line); }
+.lp-chat-file-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+.lp-chat-file-main b { font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-chat-file-main .bar { margin: 1px 0; }
+.lp-chat-file-meta { font-size: 9.5px; color: var(--mute); }
+.lp-chat-file-detail { font-size: 9px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-chat-file-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.lp-chat-file-actions .btn { height: 22px; padding: 0 6px; font-size: 9.5px; }
+.lp-share-targets {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 260px;
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: var(--surface);
+}
+.lp-share-target { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px; cursor: pointer; font-size: 11px; }
+.lp-share-target:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.lp-share-target input[type="checkbox"] { flex: none; accent-color: var(--accent); }
+.lp-share-target .lp-friend-avatar { width: 24px; height: 24px; font-size: 11px; border-radius: 6px; }
+.lp-share-target-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.lp-share-target-main b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-share-target-main span { font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lp-image-lightbox { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.lp-image-zoom-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  max-height: 68vh;
+  min-height: 260px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  background: color-mix(in srgb, #000 55%, var(--surface));
+}
+.lp-image-zoom-img { max-width: 100%; max-height: 64vh; transition: transform .08s ease-out; transform-origin: center center; }
+.lp-image-zoom-bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.lp-image-zoom-bar .lp-friends-hint { margin-left: auto; }
 
 @media (max-width: 1180px) {
   .lp-friends-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); }

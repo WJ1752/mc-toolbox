@@ -156,6 +156,15 @@ async function listFiles(dir, rel = '') {
 export async function packDirectory(sourceDir, outputFile, onProgress, signal) {
   const files = await listFiles(sourceDir)
   if (files.length >= 65535) throw new Error('服务端包超过 65534 个文件，暂不支持生成 ZIP64；请清理客户端缓存后重试')
+  // 先取一次文件大小：循环里要校验上限，同时把总字节数提供给「打包速度」。
+  const sizes = []
+  let totalBytes = 0
+  for (const file of files) {
+    const size = (await fsp.stat(file.full)).size
+    if (size > 512 * 1024 ** 2) throw new Error('单文件超过 512 MB：' + file.rel + '，请检查是否包含客户端缓存或不需要的文件')
+    sizes.push(size)
+    totalBytes += size
+  }
   await fsp.mkdir(path.dirname(outputFile), { recursive: true })
   const output = await fsp.open(outputFile, 'w')
   try {
@@ -165,7 +174,6 @@ export async function packDirectory(sourceDir, outputFile, onProgress, signal) {
     signal?.throwIfAborted()
     const file = files[index]
     const name = Buffer.from(file.rel, 'utf8')
-    if ((await fsp.stat(file.full)).size > 512 * 1024 ** 2) throw new Error('单文件超过 512 MB：' + file.rel + '，请检查是否包含客户端缓存或不需要的文件')
     const input = await fsp.readFile(file.full)
     const compressed = input.length ? await deflateRaw(input, { level: 6 }) : input
     const method = input.length ? 8 : 0
@@ -198,7 +206,7 @@ export async function packDirectory(sourceDir, outputFile, onProgress, signal) {
     centrals.push(central)
     offset += local.length + compressed.length
     if (offset >= 0xffffffff) throw new Error('服务端 ZIP 超过 4 GB，暂不支持生成 ZIP64')
-    onProgress?.((index + 1) / Math.max(1, files.length), file.rel)
+    onProgress?.((index + 1) / Math.max(1, files.length), file.rel, { bytes: offset, total: totalBytes })
   }
   const centralDir = Buffer.concat(centrals)
   const eocd = Buffer.alloc(22)

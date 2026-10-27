@@ -10,10 +10,12 @@ import { createFriendsServer } from '../tools/friends-server.mjs'
 const quiet = { log() {}, warn() {}, error() {} }
 const UUID_A = 'aaaaaaaa-1111-2222-3333-444444444444'
 const UUID_B = 'bbbbbbbb-1111-2222-3333-444444444444'
+const UUID_C = 'cccccccc-1111-2222-3333-444444444444'
 
 const verifier = async (token) => {
   if (token === 'token-alice') return { uuid: UUID_A, name: 'Alice' }
   if (token === 'token-bob') return { uuid: UUID_B, name: 'Bob' }
+  if (token === 'token-carol') return { uuid: UUID_C, name: 'Carol' }
   const error = new Error('正版令牌无效或已过期，请重新登录微软账户')
   error.code = 'MC_AUTH_FAILED'
   throw error
@@ -61,6 +63,15 @@ async function login(base, token, extra = {}) {
   const result = await api(base, 'POST', '/api/auth/minecraft', { body: { accessToken: token, ...extra } })
   assert.equal(result.status, 200, result.data?.error)
   return result.data
+}
+
+async function waitFor(check, timeout = 2000) {
+  const deadline = Date.now() + timeout
+  while (Date.now() < deadline) {
+    if (await check()) return true
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  return false
 }
 
 test('健康检查与 MC 令牌校验登录', async (t) => {
@@ -247,7 +258,7 @@ test('上传校验：哈希不符或越权取消都会被拒绝', async (t) => {
   assert.equal(deny.status, 404)
 })
 
-test('配额限制与文件名消毒', async (t) => {
+test('配额限制与文件名消毒：超限时删除自己的旧文件', async (t) => {
   const ctx = await startServer({ quotaPerUser: 100, globalQuota: 1000 })
   t.after(() => ctx.close())
   const a = await login(ctx.base, 'token-alice')
@@ -261,11 +272,202 @@ test('配额限制与文件名消毒', async (t) => {
   })
   assert.equal(first.status, 201)
   assert.equal(first.data.file.name, 'evil.mrpack')
+  const firstId = first.data.file.id
   const second = await api(ctx.base, 'POST', '/api/files', {
     token: a.token,
     body: { to: UUID_B, kind: 'pack', name: 'b', size: 40, sha1 }
   })
-  assert.equal(second.status, 413)
+  // 新文件放得下：旧的 80 字节文件被自动清掉，而不是直接报配额已满。
+  assert.equal(second.status, 201)
+  assert.equal(ctx.store.files.has(firstId), false)
+  assert.equal(fs.existsSync(path.join(ctx.dataDir, 'files', firstId + '.bin')), false)
+})
+
+test('总缓存上限：任何人的旧文件都会被删除以腾出空间', async (t) => {
+  const ctx = await startServer({ quotaPerUser: 1000, globalQuota: 100 })
+  t.after(() => ctx.close())
+  const a = await login(ctx.base, 'token-alice')
+  const b = await login(ctx.base, 'token-bob')
+  await api(ctx.base, 'POST', '/api/friends/request', { token: a.token, body: { mcName: 'Bob' } })
+  await api(ctx.base, 'POST', '/api/friends/respond', { token: b.token, body: { uuid: UUID_A, accept: true } })
+  const sha1 = 'a'.repeat(40)
+  const first = await api(ctx.base, 'POST', '/api/files', {
+    token: a.token,
+    body: { to: UUID_B, kind: 'pack', name: 'old.mrpack', size: 80, sha1 }
+  })
+  assert.equal(first.status, 201)
+  const second = await api(ctx.base, 'POST', '/api/files', {
+    token: b.token,
+    body: { to: UUID_A, kind: 'mod', name: 'new.jar', size: 80, sha1 }
+  })
+  assert.equal(second.status, 201)
+  assert.equal(ctx.store.files.has(first.data.file.id), false)
+  assert.equal(ctx.store.usedBytes(), 80)
+})
+
+test('文件缓存最长 12 小时，过期后清理', async (t) => {
+  const ctx = await startServer()
+  t.after(() => ctx.close())
+  const a = await login(ctx.base, 'token-alice')
+  const b = await login(ctx.base, 'token-bob')
+  await api(ctx.base, 'POST', '/api/friends/request', { token: a.token, body: { mcName: 'Bob' } })
+  await api(ctx.base, 'POST', '/api/friends/respond', { token: b.token, body: { uuid: UUID_A, accept: true } })
+  const created = await api(ctx.base, 'POST', '/api/files', {
+    token: a.token,
+    body: { to: UUID_B, kind: 'pack', name: 'ttl.mrpack', size: 10, sha1: 'a'.repeat(40) }
+  })
+  const file = ctx.store.files.get(created.data.file.id)
+  assert.ok(file.expiresAt - file.createdAt <= 12 * 60 * 60 * 1000 + 1000)
+  file.expiresAt = Date.now() - 1
+  await ctx.store.cleanup()
+  assert.equal(ctx.store.files.has(file.id), false)
+})
+
+test('群聊：创建、拉人、消息、未读与已读', async (t) => {
+  const ctx = await startServer()
+  t.after(() => ctx.close())
+  const a = await login(ctx.base, 'token-alice')
+  const b = await login(ctx.base, 'token-bob')
+  const c = await login(ctx.base, 'token-carol')
+  await api(ctx.base, 'POST', '/api/friends/request', { token: a.token, body: { mcName: 'Bob' } })
+  await api(ctx.base, 'POST', '/api/friends/respond', { token: b.token, body: { uuid: UUID_A, accept: true } })
+  await api(ctx.base, 'POST', '/api/friends/request', { token: a.token, body: { mcName: 'Carol' } })
+  await api(ctx.base, 'POST', '/api/friends/respond', { token: c.token, body: { uuid: UUID_A, accept: true } })
+
+  const created = await api(ctx.base, 'POST', '/api/groups', {
+    token: a.token,
+    body: { name: '周末开荒', members: [UUID_B, UUID_C] }
+  })
+  assert.equal(created.status, 200, created.data?.error)
+  const groupId = created.data.group.id
+  assert.equal(created.data.group.members.length, 3)
+
+  const bGroups = await api(ctx.base, 'GET', '/api/friends', { token: b.token })
+  assert.equal(bGroups.data.groups.length, 1)
+  assert.equal(bGroups.data.groups[0].unread, 0)
+
+  const sent = await api(ctx.base, 'POST', `/api/groups/${groupId}/messages`, {
+    token: a.token,
+    body: { text: '晚上八点集合', clientId: 'm_group1' }
+  })
+  assert.equal(sent.status, 200, sent.data?.error)
+
+  const bList = await api(ctx.base, 'GET', '/api/groups', { token: b.token })
+  assert.equal(bList.data.groups[0].unread, 1)
+  const bInbox = await api(ctx.base, 'GET', `/api/groups/${groupId}/messages?markRead=1`, { token: b.token })
+  assert.equal(bInbox.data.items.length, 1)
+  assert.equal(bInbox.data.items[0].text, '晚上八点集合')
+  assert.equal(bInbox.data.unread, 0)
+
+  const reply = await api(ctx.base, 'POST', `/api/groups/${groupId}/messages`, { token: b.token, body: { text: '收到' } })
+  assert.equal(reply.status, 200)
+  const aInbox = await api(ctx.base, 'GET', `/api/groups/${groupId}/messages?after=${sent.data.message.at}`, { token: a.token })
+  assert.equal(aInbox.data.items.length, 1)
+  assert.equal(aInbox.data.items[0].text, '收到')
+
+  const removed = await api(ctx.base, 'DELETE', `/api/groups/${groupId}/members/${UUID_C}`, { token: a.token })
+  assert.equal(removed.status, 200)
+  const denied = await api(ctx.base, 'GET', `/api/groups/${groupId}/messages`, { token: c.token })
+  assert.equal(denied.status, 404)
+})
+
+test('群发文件：好友与群聊一起发，按收件人分别记录送达', async (t) => {
+  const ctx = await startServer()
+  t.after(() => ctx.close())
+  const a = await login(ctx.base, 'token-alice')
+  const b = await login(ctx.base, 'token-bob')
+  const c = await login(ctx.base, 'token-carol')
+  for (const peer of [{ token: b.token, uuid: UUID_A, name: 'Bob' }, { token: c.token, uuid: UUID_A, name: 'Carol' }]) {
+    await api(ctx.base, 'POST', '/api/friends/request', { token: a.token, body: { mcName: peer.name } })
+    await api(ctx.base, 'POST', '/api/friends/respond', { token: peer.token, body: { uuid: peer.uuid, accept: true } })
+  }
+  const group = await api(ctx.base, 'POST', '/api/groups', { token: a.token, body: { name: '开荒组', members: [UUID_B, UUID_C] } })
+  const groupId = group.data.group.id
+  const content = Buffer.from('broadcast pack')
+  const sha1 = crypto.createHash('sha1').update(content).digest('hex')
+  const created = await api(ctx.base, 'POST', '/api/files', {
+    token: a.token,
+    body: {
+      targets: [{ type: 'friend', id: UUID_B }, { type: 'group', id: groupId }],
+      kind: 'pack',
+      name: '群发.mrpack',
+      size: content.length,
+      sha1
+    }
+  })
+  assert.equal(created.status, 201, created.data?.error)
+  const fileId = created.data.file.id
+  assert.equal(created.data.file.broadcast, true)
+  assert.equal(created.data.file.recipientCount, 2)
+
+  const upload = await api(ctx.base, 'PUT', '/api/files/' + fileId, {
+    token: a.token,
+    raw: content,
+    headers: { 'Content-Length': String(content.length) }
+  })
+  assert.equal(upload.status, 200)
+
+  const bIncoming = await api(ctx.base, 'GET', '/api/files', { token: b.token })
+  assert.equal(bIncoming.data.incoming.length, 1)
+  assert.equal(bIncoming.data.incoming[0].broadcast, true)
+  assert.equal(bIncoming.data.incoming[0].targets.length, 2)
+
+  const firstDownload = await api(ctx.base, 'GET', `/api/files/${fileId}/download`, { token: b.token })
+  assert.deepEqual(firstDownload.buffer, content)
+  const cIncoming = await api(ctx.base, 'GET', '/api/files', { token: c.token })
+  assert.equal(cIncoming.data.incoming[0].status, 'ready')
+  assert.equal(ctx.store.files.get(fileId).deleteAt, undefined)
+  const secondDownload = await api(ctx.base, 'GET', `/api/files/${fileId}/download`, { token: c.token })
+  assert.deepEqual(secondDownload.buffer, content)
+  assert.equal(await waitFor(() => ctx.store.files.get(fileId)?.deleteAt > Date.now()), true)
+})
+
+test('聊天图片：附件消息、群成员可看、不因单人下载提前删除', async (t) => {
+  const ctx = await startServer()
+  t.after(() => ctx.close())
+  const a = await login(ctx.base, 'token-alice')
+  const b = await login(ctx.base, 'token-bob')
+  const c = await login(ctx.base, 'token-carol')
+  for (const peer of [{ token: b.token, uuid: UUID_A, name: 'Bob' }, { token: c.token, uuid: UUID_A, name: 'Carol' }]) {
+    await api(ctx.base, 'POST', '/api/friends/request', { token: a.token, body: { mcName: peer.name } })
+    await api(ctx.base, 'POST', '/api/friends/respond', { token: peer.token, body: { uuid: peer.uuid, accept: true } })
+  }
+  const group = await api(ctx.base, 'POST', '/api/groups', { token: a.token, body: { name: '截图群', members: [UUID_B, UUID_C] } })
+  const groupId = group.data.group.id
+  const image = Buffer.from('fake png bytes')
+  const sha1 = crypto.createHash('sha1').update(image).digest('hex')
+  const created = await api(ctx.base, 'POST', '/api/files', {
+    token: a.token,
+    body: { targets: [{ type: 'group', id: groupId }], kind: 'image', name: 'steve.png', size: image.length, sha1, width: 320, height: 200 }
+  })
+  assert.equal(created.status, 201, created.data?.error)
+  const imageId = created.data.file.id
+  await api(ctx.base, 'PUT', '/api/files/' + imageId, {
+    token: a.token,
+    raw: image,
+    headers: { 'Content-Length': String(image.length) }
+  })
+  const sent = await api(ctx.base, 'POST', `/api/groups/${groupId}/messages`, {
+    token: a.token,
+    body: { text: '', image: { id: imageId, name: 'steve.png', width: 320, height: 200, size: image.length } }
+  })
+  assert.equal(sent.status, 200, sent.data?.error)
+  assert.equal(sent.data.message.image.id, imageId)
+
+  const bInbox = await api(ctx.base, 'GET', `/api/groups/${groupId}/messages`, { token: b.token })
+  assert.equal(bInbox.data.items.length, 1)
+  assert.equal(bInbox.data.items[0].image.width, 320)
+
+  const bImage = await api(ctx.base, 'GET', `/api/files/${imageId}/download`, { token: b.token })
+  assert.deepEqual(bImage.buffer, image)
+  assert.equal(await waitFor(() => ctx.store.files.get(imageId)?.status === 'ready'), true)
+  const record = ctx.store.files.get(imageId)
+  assert.equal(record.status, 'ready')
+  assert.equal(record.deleteAt, undefined)
+  const cImage = await api(ctx.base, 'GET', `/api/files/${imageId}/download`, { token: c.token })
+  assert.deepEqual(cImage.buffer, image)
+  assert.equal(await waitFor(() => ctx.store.files.get(imageId)?.status === 'ready'), true)
+  assert.equal(ctx.store.files.get(imageId).deleteAt, undefined)
 })
 
 test('模组清单：自己可写，好友可读，陌生人不可读', async (t) => {

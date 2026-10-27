@@ -5,8 +5,9 @@
 // api.minecraftservices.com 校验后拿到 UUID/正版 ID；不保存访问令牌，只发一个
 // 30 天的会话令牌（哈希存盘）。好友能看到正版 ID，昵称可自定义。
 //
-// 数据：好友关系 / 在线状态 / 离线聊天 / 模组清单长期保存；整合包与模组文件
-// 只做临时中转——接收方下载完成后 10 分钟删除，未下载的 24 小时过期。
+// 数据：好友关系 / 在线状态 / 离线聊天 / 群聊 / 模组清单长期保存；整合包、
+// 模组与聊天图片只做临时中转——接收方全部下载后 10 分钟删除，未下载最长
+// 12 小时；总缓存 10 GB，超出时按创建时间删除最旧的文件。
 //
 // 传输：默认 HTTPS（自签证书 + 客户端指纹固定）；测试可用 --http。
 //
@@ -22,17 +23,21 @@ import crypto from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const SERVER_NAME = 'mc-toolbox-friends'
-const SERVER_VERSION = 1
+const SERVER_VERSION = 2
 const SESSION_DAYS = 30
 const MAX_JSON_BODY = 1024 * 1024
 const MAX_MESSAGE = 2000
 const MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
-const DEFAULT_QUOTA_PER_USER = 5 * 1024 * 1024 * 1024
-const DEFAULT_GLOBAL_QUOTA = 15 * 1024 * 1024 * 1024
-const FILE_TTL_MS = 24 * 60 * 60 * 1000
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024
+const DEFAULT_QUOTA_PER_USER = 10 * 1024 * 1024 * 1024
+// 云端中转总缓存 10 GB：超出时优先删除最早的文件，最多保留 12 小时。
+const DEFAULT_GLOBAL_QUOTA = 10 * 1024 * 1024 * 1024
+const FILE_TTL_MS = 12 * 60 * 60 * 1000
 const DELIVERED_TTL_MS = 10 * 60 * 1000
 const ONLINE_WINDOW = 70 * 1000
 const MAX_FRIENDS = 200
+const MAX_GROUP_MEMBERS = 50
+const MAX_GROUPS_PER_USER = 50
 const MAX_MANIFEST_ITEMS = 500
 
 function now() { return Date.now() }
@@ -48,6 +53,27 @@ function cleanText(value, max) {
 }
 function cleanMessage(value) {
   return String(value ?? '').replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').trim().slice(0, MAX_MESSAGE)
+}
+/** 聊天图片附件只保留文件 id 与尺寸，真实字节走文件中转接口。 */
+function cleanMessageImage(value) {
+  if (!value || typeof value !== 'object') return null
+  const id = String(value.id || '')
+  if (!/^f_[A-Za-z0-9_-]{6,60}$/.test(id)) return null
+  return {
+    id,
+    name: sanitizeFileName(value.name || 'image.png'),
+    width: Math.max(0, Math.min(20000, Number(value.width) || 0)),
+    height: Math.max(0, Math.min(20000, Number(value.height) || 0)),
+    size: Math.max(0, Number(value.size) || 0)
+  }
+}
+function imageMime(name) {
+  const ext = path.extname(String(name || '')).toLowerCase()
+  if (ext === '.png') return 'image/png'
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg'
+  if (ext === '.webp') return 'image/webp'
+  if (ext === '.gif') return 'image/gif'
+  return ''
 }
 function sanitizeFileName(name) {
   const base = String(name || '').split(/[\\/]/).pop().replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/g, '_').trim().replace(/[. ]+$/g, '')
@@ -74,24 +100,30 @@ function friendView(account) {
 }
 
 class Store {
-  constructor(dir, logger = console) {
+  constructor(dir, { logger = console, quotaPerUser = DEFAULT_QUOTA_PER_USER, globalQuota = DEFAULT_GLOBAL_QUOTA } = {}) {
     this.dir = dir
     this.logger = logger
+    this.quotaPerUser = quotaPerUser
+    this.globalQuota = globalQuota
     this.accountsFile = path.join(dir, 'accounts.json')
     this.sessionsFile = path.join(dir, 'sessions.json')
+    this.groupsFile = path.join(dir, 'groups.json')
     this.filesDir = path.join(dir, 'files')
     this.filesIndex = path.join(this.filesDir, 'index.json')
     this.messagesDir = path.join(dir, 'messages')
+    this.groupMessagesDir = path.join(this.messagesDir, 'groups')
     this.modsDir = path.join(dir, 'mods')
     this.accounts = new Map()
     this.sessions = new Map()
+    this.groups = new Map()
     this.files = new Map()
     this.messages = new Map()
+    this.groupMessages = new Map()
     this.timers = []
   }
 
   async init() {
-    for (const dir of [this.dir, this.filesDir, this.messagesDir, this.modsDir]) await fsp.mkdir(dir, { recursive: true })
+    for (const dir of [this.dir, this.filesDir, this.messagesDir, this.groupMessagesDir, this.modsDir]) await fsp.mkdir(dir, { recursive: true })
     await this.loadJson(this.accountsFile, (data) => {
       for (const account of Array.isArray(data) ? data : []) {
         if (!account?.uuid) continue
@@ -100,7 +132,21 @@ class Store {
           incoming: [],
           outgoing: [],
           reads: {},
+          groupReads: {},
           ...account
+        })
+      }
+    })
+    await this.loadJson(this.groupsFile, (data) => {
+      for (const group of Array.isArray(data) ? data : []) {
+        if (!group?.id || !Array.isArray(group.members)) continue
+        this.groups.set(group.id, {
+          owner: '',
+          name: '群聊',
+          createdAt: 0,
+          updatedAt: 0,
+          ...group,
+          members: group.members.filter((uuid) => this.accounts.has(uuid))
         })
       }
     })
@@ -148,6 +194,63 @@ class Store {
     return this.writeJson(this.filesIndex, [...this.files.values()]).catch((error) => this.logger.warn?.('[friends-server] 保存文件索引失败：' + error.message))
   }
 
+  saveGroups() {
+    return this.writeJson(this.groupsFile, [...this.groups.values()]).catch((error) => this.logger.warn?.('[friends-server] 保存群聊失败：' + error.message))
+  }
+
+  createGroup(owner, { name, members }) {
+    const group = {
+      id: randomId('g_'),
+      name,
+      owner,
+      members: [...new Set([owner, ...members])].slice(0, MAX_GROUP_MEMBERS),
+      createdAt: now(),
+      updatedAt: now()
+    }
+    this.groups.set(group.id, group)
+    return group
+  }
+
+  groupsFor(account) {
+    return [...this.groups.values()].filter((group) => group.members.includes(account.uuid))
+  }
+
+  groupMessagesFor(group) {
+    if (!this.groupMessages.has(group.id)) {
+      let items = []
+      try {
+        items = fs.readFileSync(path.join(this.groupMessagesDir, group.id + '.jsonl'), 'utf8')
+          .split('\n').filter(Boolean).map((line) => {
+            try { return JSON.parse(line) } catch { return null }
+          }).filter(Boolean)
+      } catch {}
+      this.groupMessages.set(group.id, items)
+    }
+    return this.groupMessages.get(group.id)
+  }
+
+  async appendGroupMessage(group, message) {
+    const items = this.groupMessagesFor(group)
+    items.push(message)
+    group.updatedAt = message.at
+    await fsp.appendFile(path.join(this.groupMessagesDir, group.id + '.jsonl'), JSON.stringify(message) + '\n', 'utf8')
+    return message
+  }
+
+  groupReadsFor(account, groupId) {
+    return account.groupReads?.[groupId] || 0
+  }
+
+  unreadForGroup(account, group) {
+    const readAt = this.groupReadsFor(account, group.id)
+    return this.groupMessagesFor(group).filter((message) => message.from !== account.uuid && message.at > readAt).length
+  }
+
+  lastGroupMessage(group) {
+    const items = this.groupMessagesFor(group)
+    return items.length ? items[items.length - 1] : null
+  }
+
   createAccount({ uuid, mcName, nickname }) {
     const account = {
       uuid,
@@ -159,7 +262,8 @@ class Store {
       friends: [],
       incoming: [],
       outgoing: [],
-      reads: {}
+      reads: {},
+      groupReads: {}
     }
     this.accounts.set(uuid, account)
     return account
@@ -260,10 +364,47 @@ class Store {
     return total
   }
 
+  async removeFile(id, status = 'deleted') {
+    const file = this.files.get(id)
+    if (!file) return null
+    await fsp.rm(path.join(this.filesDir, id + '.bin'), { force: true }).catch(() => {})
+    file.status = status
+    file.deletedAt = now()
+    this.files.delete(id)
+    return file
+  }
+
+  /**
+   * 为新文件腾空间：总缓存超限时按创建时间删除最旧的文件，
+   * 单个账号超限时只删这个账号自己的旧文件。返回是否放得下。
+   */
+  async makeRoom(size, { excludeId = '', userUuid = '' } = {}) {
+    await this.cleanup()
+    const need = Math.max(0, Number(size) || 0)
+    const active = () => [...this.files.values()]
+      .filter((file) => file.id !== excludeId && ['uploading', 'ready', 'downloading', 'delivered'].includes(file.status))
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+    let globalOk = this.usedBytes(excludeId) + need <= this.globalQuota
+    while (!globalOk) {
+      const oldest = active()[0]
+      if (!oldest) break
+      await this.removeFile(oldest.id, 'evicted')
+      globalOk = this.usedBytes(excludeId) + need <= this.globalQuota
+    }
+    let userOk = !userUuid || this.userBytes(userUuid, excludeId) + need <= this.quotaPerUser
+    while (!userOk) {
+      const oldest = active().find((file) => file.from === userUuid)
+      if (!oldest) break
+      await this.removeFile(oldest.id, 'evicted')
+      userOk = this.userBytes(userUuid, excludeId) + need <= this.quotaPerUser
+    }
+    return { globalOk, userOk }
+  }
+
   async cleanup() {
     const at = now()
     let changed = false
-    for (const [id, file] of this.files) {
+    for (const [id, file] of [...this.files]) {
       const expired = file.expiresAt && file.expiresAt <= at
       const delivered = file.deleteAt && file.deleteAt <= at
       if (!expired && !delivered) continue
@@ -273,12 +414,22 @@ class Store {
       this.files.delete(id)
       changed = true
     }
+    // 兜底：即使没有新上传，也把总缓存压回上限，避免重启后旧数据常驻。
+    if (this.usedBytes() > this.globalQuota) {
+      const oldest = [...this.files.values()]
+        .filter((file) => ['uploading', 'ready', 'downloading', 'delivered'].includes(file.status))
+        .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+      while (this.usedBytes() > this.globalQuota && oldest.length) {
+        await this.removeFile(oldest.shift().id, 'evicted')
+        changed = true
+      }
+    }
     if (changed) await this.saveFiles()
   }
 
   async shutdown() {
     for (const timer of this.timers) clearInterval(timer)
-    await Promise.all([this.saveAccounts(), this.saveSessions(), this.saveFiles()])
+    await Promise.all([this.saveAccounts(), this.saveSessions(), this.saveFiles(), this.saveGroups()])
   }
 }
 
@@ -354,7 +505,7 @@ export function createFriendsServer(options = {}) {
   const quotaPerUser = Number(options.quotaPerUser) || DEFAULT_QUOTA_PER_USER
   const globalQuota = Number(options.globalQuota) || DEFAULT_GLOBAL_QUOTA
   const logger = options.logger || console
-  const store = new Store(dataDir, logger)
+  const store = new Store(dataDir, { logger, quotaPerUser, globalQuota })
   const authAttempts = new Map()
   let ready = null
 
@@ -387,6 +538,117 @@ export function createFriendsServer(options = {}) {
       return null
     }
     return store.accounts.get(uuid) || null
+  }
+
+  function groupView(account, group) {
+    return {
+      id: group.id,
+      name: group.name,
+      owner: group.owner,
+      memberIds: group.members.slice(),
+      members: group.members.map((uuid) => store.accounts.get(uuid)).filter(Boolean).map(friendView),
+      createdAt: group.createdAt || 0,
+      updatedAt: group.updatedAt || 0,
+      unread: store.unreadForGroup(account, group),
+      lastMessage: store.lastGroupMessage(group)
+    }
+  }
+
+  function groupsFor(account) {
+    return store.groupsFor(account)
+      .sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0))
+      .slice(0, MAX_GROUPS_PER_USER)
+      .map((group) => groupView(account, group))
+  }
+
+  function groupOrFail(account, id, res) {
+    const group = store.groups.get(String(id || ''))
+    if (!group || !group.members.includes(account.uuid)) {
+      json(res, 404, { error: '群聊不存在或你不在群里' })
+      return null
+    }
+    return group
+  }
+
+  /**
+   * 解析发送目标：好友、群聊、或者两者的组合（群发）。
+   * 返回去重后的 targets 和真正的收件人列表。
+   */
+  function resolveTargets(account, body, res) {
+    const raw = []
+    if (Array.isArray(body.targets)) raw.push(...body.targets)
+    else {
+      const list = Array.isArray(body.to) ? body.to : (body.to ? [body.to] : [])
+      for (const id of list) raw.push({ type: 'friend', id })
+      if (body.groupId) raw.push({ type: 'group', id: body.groupId })
+    }
+    const targets = []
+    const seen = new Set()
+    const recipients = new Set()
+    for (const entry of raw) {
+      const type = entry?.type === 'group' ? 'group' : 'friend'
+      const id = String(entry?.id || '')
+      const key = type + ':' + id
+      if (!id || seen.has(key)) continue
+      if (type === 'friend') {
+        const peer = store.accounts.get(id)
+        if (!peer || !account.friends.includes(id)) {
+          json(res, 404, { error: '对方不是你的好友' })
+          return null
+        }
+        recipients.add(id)
+      } else {
+        const group = store.groups.get(id)
+        if (!group || !group.members.includes(account.uuid)) {
+          json(res, 404, { error: '群聊不存在或你不在群里' })
+          return null
+        }
+        for (const member of group.members) if (member !== account.uuid) recipients.add(member)
+      }
+      seen.add(key)
+      targets.push({ type, id })
+    }
+    if (!targets.length) {
+      json(res, 400, { error: '请选择至少一个好友或群聊' })
+      return null
+    }
+    if (!recipients.size) {
+      json(res, 400, { error: '没有可接收文件的成员' })
+      return null
+    }
+    return { targets, recipients: [...recipients] }
+  }
+
+  function fileTargets(file) {
+    if (Array.isArray(file.targets) && file.targets.length) return file.targets
+    return file.to ? [{ type: 'friend', id: file.to }] : []
+  }
+
+  function fileRecipients(file) {
+    if (Array.isArray(file.recipients) && file.recipients.length) return file.recipients
+    return file.to ? [file.to] : []
+  }
+
+  function visibleTargets(file, viewer) {
+    const targets = fileTargets(file)
+    if (viewer === file.from) return targets
+    return targets.filter((target) => target.type === 'friend'
+      ? target.id === viewer
+      : store.groups.get(target.id)?.members?.includes(viewer))
+  }
+
+  function allDelivered(file) {
+    const recipients = fileRecipients(file)
+    const delivered = file.deliveredBy || {}
+    return recipients.length > 0 && recipients.every((uuid) => delivered[uuid])
+  }
+
+  function fileStatusFor(file, viewer) {
+    if (file.status === 'uploading') return 'uploading'
+    if (file.kind === 'image') return file.status === 'ready' ? 'ready' : file.status
+    const delivered = file.deliveredBy || {}
+    if (viewer === file.from) return allDelivered(file) ? 'delivered' : 'ready'
+    return delivered[viewer] ? 'delivered' : (file.status === 'delivered' ? 'ready' : 'ready')
   }
 
   async function handleAuthMinecraft(req, res) {
@@ -440,31 +702,44 @@ export function createFriendsServer(options = {}) {
       friends,
       incoming,
       outgoing,
+      groups: groupsFor(account),
       serverTime: now()
     })
   }
 
   async function handleFileCreate(req, res, account) {
     const body = await readJson(req)
-    const peer = friendOrFail(account, String(body.to || ''), res)
-    if (!peer) return
-    const kind = body.kind === 'mod' ? 'mod' : 'pack'
+    const resolved = resolveTargets(account, body, res)
+    if (!resolved) return
+    const { targets, recipients } = resolved
+    const kind = ['mod', 'image'].includes(body.kind) ? body.kind : 'pack'
     const size = Number(body.size) || 0
     const sha1 = String(body.sha1 || '').toLowerCase()
+    const maxBytes = kind === 'image' ? MAX_IMAGE_BYTES : MAX_FILE_BYTES
     if (!validSha1(sha1)) return json(res, 400, { error: '文件 SHA-1 无效' })
-    if (size <= 0 || size > MAX_FILE_BYTES) return json(res, 400, { error: '文件大小超出限制（最大 2 GB）' })
-    if (store.userBytes(account.uuid) + size > quotaPerUser) return json(res, 413, { error: '你的中转配额已满，请等待已发送文件被接收或清理' })
-    if (store.usedBytes() + size > globalQuota) return json(res, 413, { error: '服务器中转空间已满，请稍后再试' })
+    if (size <= 0 || size > maxBytes) {
+      return json(res, 400, { error: kind === 'image' ? '图片大小超出限制（最大 10 MB）' : '文件大小超出限制（最大 2 GB）' })
+    }
+    // 先清理过期文件，再按「总缓存 10 GB、超出删最旧」腾空间。
+    const room = await store.makeRoom(size, { userUuid: account.uuid })
+    if (!room.globalOk) return json(res, 413, { error: '服务器中转空间已满（10 GB），请稍后再试' })
+    if (!room.userOk) return json(res, 413, { error: '你的中转配额已满，请等待已发送文件被接收或清理' })
     const file = {
       id: randomId('f_'),
       from: account.uuid,
-      to: peer.uuid,
+      to: recipients.length === 1 ? recipients[0] : '',
+      recipients,
+      targets,
+      groupIds: targets.filter((target) => target.type === 'group').map((target) => target.id),
       kind,
-      name: sanitizeFileName(body.name),
+      name: sanitizeFileName(body.name || (kind === 'image' ? 'image.png' : 'file')),
       size,
       sha1,
+      width: Math.max(0, Number(body.width) || 0),
+      height: Math.max(0, Number(body.height) || 0),
       instanceKey: cleanText(body.instanceKey, 80),
       status: 'uploading',
+      deliveredBy: {},
       createdAt: now(),
       expiresAt: now() + FILE_TTL_MS
     }
@@ -475,18 +750,27 @@ export function createFriendsServer(options = {}) {
   }
 
   function publicFile(file, viewer) {
+    const targets = visibleTargets(file, viewer)
+    const recipients = fileRecipients(file)
     return {
       id: file.id,
       kind: file.kind,
       name: file.name,
       size: file.size,
       sha1: file.sha1,
-      status: file.status,
+      width: file.width || 0,
+      height: file.height || 0,
+      status: fileStatusFor(file, viewer),
       direction: viewer === file.from ? 'out' : 'in',
-      peer: viewer === file.from ? file.to : file.from,
+      peer: viewer === file.from ? (targets.find((target) => target.type === 'friend')?.id || '') : file.from,
+      groupId: targets.length === 1 && targets[0].type === 'group' ? targets[0].id : '',
+      groupIds: targets.filter((target) => target.type === 'group').map((target) => target.id),
+      targets,
+      broadcast: targets.length > 1 || (targets.length === 1 && targets[0].type === 'group' && recipients.length > 1),
+      recipientCount: recipients.length,
       instanceKey: file.instanceKey || '',
       createdAt: file.createdAt,
-      downloadedAt: file.downloadedAt || 0,
+      downloadedAt: file.deliveredBy?.[viewer] || 0,
       expiresAt: file.expiresAt || 0
     }
   }
@@ -527,14 +811,15 @@ export function createFriendsServer(options = {}) {
 
   async function handleFileDownload(req, res, account, id) {
     const file = store.files.get(id)
-    if (!file || (file.from !== account.uuid && file.to !== account.uuid)) return json(res, 404, { error: '文件不存在或已被清理' })
+    const recipients = file ? fileRecipients(file) : []
+    if (!file || (file.from !== account.uuid && !recipients.includes(account.uuid))) return json(res, 404, { error: '文件不存在或已被清理' })
     if (!['ready', 'downloading', 'delivered'].includes(file.status)) return json(res, 409, { error: '文件还没有准备好' })
     const target = path.join(store.filesDir, file.id + '.bin')
     if (!fs.existsSync(target)) return json(res, 404, { error: '文件已被清理' })
     file.status = 'downloading'
     await store.saveFiles()
     res.writeHead(200, {
-      'Content-Type': 'application/octet-stream',
+      'Content-Type': file.kind === 'image' ? (imageMime(file.name) || 'application/octet-stream') : 'application/octet-stream',
       'Content-Length': file.size,
       'X-File-Name': encodeURIComponent(file.name),
       'X-File-Sha1': file.sha1
@@ -545,14 +830,25 @@ export function createFriendsServer(options = {}) {
       try { res.destroy() } catch {}
     })
     res.on('finish', async () => {
-      if (account.uuid !== file.to) {
+      // 聊天图片要在 12 小时内对所有成员可看，不能因为一个人看过就进入删除倒计时。
+      if (file.kind === 'image') {
         file.status = 'ready'
         await store.saveFiles()
         return
       }
-      file.status = 'delivered'
-      file.downloadedAt = now()
-      file.deleteAt = now() + DELIVERED_TTL_MS
+      if (account.uuid === file.from) {
+        file.status = 'ready'
+        await store.saveFiles()
+        return
+      }
+      file.deliveredBy = { ...(file.deliveredBy || {}), [account.uuid]: now() }
+      if (allDelivered(file)) {
+        file.status = 'delivered'
+        file.downloadedAt = now()
+        file.deleteAt = now() + DELIVERED_TTL_MS
+      } else {
+        file.status = 'ready'
+      }
       await store.saveFiles()
     })
   }
@@ -669,11 +965,19 @@ export function createFriendsServer(options = {}) {
         const peer = store.accounts.get(String(body.to || ''))
         if (!peer || !account.friends.includes(peer.uuid)) return json(res, 404, { error: '对方不是你的好友' })
         const text = cleanMessage(body.text)
-        if (!text) return json(res, 400, { error: '消息不能为空' })
+        const image = cleanMessageImage(body.image)
+        if (image) {
+          const file = store.files.get(image.id)
+          if (!file || file.from !== account.uuid || !fileRecipients(file).includes(peer.uuid)) {
+            return json(res, 400, { error: '图片附件无效或已过期' })
+          }
+        }
+        if (!text && !image) return json(res, 400, { error: '消息不能为空' })
         const id = /^[a-zA-Z0-9_-]{6,40}$/.test(String(body.clientId || '')) ? String(body.clientId) : randomId('m_')
         const existing = store.messagesFor(account.uuid, peer.uuid).find((message) => message.id === id)
         if (existing) return json(res, 200, { message: existing })
         const message = { id, from: account.uuid, to: peer.uuid, text, at: now() }
+        if (image) message.image = image
         await store.appendMessage(account.uuid, peer.uuid, message)
         return json(res, 200, { message })
       }
@@ -685,13 +989,113 @@ export function createFriendsServer(options = {}) {
         await store.saveAccounts()
         return json(res, 200, { ok: true })
       }
+      // ---------------- 群聊 ----------------
+      if (method === 'GET' && pathname === '/api/groups') {
+        return json(res, 200, { groups: groupsFor(account) })
+      }
+      if (method === 'POST' && pathname === '/api/groups') {
+        const body = await readJson(req)
+        const name = cleanText(body.name, 40) || '新群聊'
+        if (store.groupsFor(account).length >= MAX_GROUPS_PER_USER) return json(res, 400, { error: '群聊数量已达上限（50 个）' })
+        const requested = Array.isArray(body.members) ? [...new Set(body.members.map(String))] : []
+        const members = []
+        for (const uuid of requested) {
+          if (!validUuid(uuid) || !account.friends.includes(uuid)) return json(res, 404, { error: '只能邀请自己的好友加入群聊' })
+          members.push(uuid)
+        }
+        if (members.length + 1 > MAX_GROUP_MEMBERS) return json(res, 400, { error: `群成员上限 ${MAX_GROUP_MEMBERS} 人` })
+        const group = store.createGroup(account.uuid, { name, members })
+        await store.saveGroups()
+        return json(res, 200, { group: groupView(account, group) })
+      }
+      const groupMemberMatch = pathname.match(/^\/api\/groups\/([A-Za-z0-9_-]+)\/members(?:\/([A-Za-z0-9-]+))?$/)
+      if (groupMemberMatch) {
+        const group = groupOrFail(account, groupMemberMatch[1], res)
+        if (!group) return
+        if (method === 'POST' && !groupMemberMatch[2]) {
+          const body = await readJson(req)
+          const uuid = String(body.uuid || '')
+          if (!validUuid(uuid) || !account.friends.includes(uuid)) return json(res, 404, { error: '只能邀请自己的好友加入群聊' })
+          if (group.members.length >= MAX_GROUP_MEMBERS) return json(res, 400, { error: `群成员上限 ${MAX_GROUP_MEMBERS} 人` })
+          if (!group.members.includes(uuid)) {
+            group.members.push(uuid)
+            group.updatedAt = now()
+            await store.saveGroups()
+          }
+          return json(res, 200, { ok: true, group: groupView(account, group) })
+        }
+        if (method === 'DELETE' && groupMemberMatch[2]) {
+          const uuid = groupMemberMatch[2]
+          if (uuid !== account.uuid && group.owner !== account.uuid) return json(res, 403, { error: '只有群主可以移除其他成员' })
+          group.members = group.members.filter((member) => member !== uuid)
+          if (group.owner === uuid) group.owner = group.members[0] || ''
+          group.updatedAt = now()
+          if (!group.members.length) store.groups.delete(group.id)
+          await store.saveGroups()
+          return json(res, 200, { ok: true })
+        }
+      }
+      if (method === 'DELETE' && pathname.startsWith('/api/groups/')) {
+        const group = groupOrFail(account, pathname.slice('/api/groups/'.length), res)
+        if (!group) return
+        group.members = group.members.filter((member) => member !== account.uuid)
+        if (group.owner === account.uuid) group.owner = group.members[0] || ''
+        group.updatedAt = now()
+        if (!group.members.length) store.groups.delete(group.id)
+        await store.saveGroups()
+        return json(res, 200, { ok: true })
+      }
+      if (method === 'GET' && pathname.startsWith('/api/groups/') && pathname.endsWith('/messages')) {
+        const id = pathname.slice('/api/groups/'.length, -'/messages'.length)
+        const group = groupOrFail(account, id, res)
+        if (!group) return
+        const after = Number(url.searchParams.get('after')) || 0
+        const items = store.groupMessagesFor(group).filter((message) => !after || message.at > after).slice(-500)
+        if (url.searchParams.get('markRead') === '1') {
+          account.groupReads = { ...(account.groupReads || {}), [group.id]: now() }
+          await store.saveAccounts()
+        }
+        return json(res, 200, { group: groupView(account, group), items, unread: store.unreadForGroup(account, group) })
+      }
+      if (method === 'POST' && pathname.startsWith('/api/groups/') && pathname.endsWith('/messages')) {
+        const id = pathname.slice('/api/groups/'.length, -'/messages'.length)
+        const group = groupOrFail(account, id, res)
+        if (!group) return
+        const body = await readJson(req)
+        const text = cleanMessage(body.text)
+        const image = cleanMessageImage(body.image)
+        if (image) {
+          const file = store.files.get(image.id)
+          const targetsGroup = file && fileTargets(file).some((target) => target.type === 'group' && target.id === group.id)
+          if (!file || file.from !== account.uuid || !targetsGroup) return json(res, 400, { error: '图片附件无效或已过期' })
+        }
+        if (!text && !image) return json(res, 400, { error: '消息不能为空' })
+        const messageId = /^[a-zA-Z0-9_-]{6,40}$/.test(String(body.clientId || '')) ? String(body.clientId) : randomId('m_')
+        const existing = store.groupMessagesFor(group).find((message) => message.id === messageId)
+        if (existing) return json(res, 200, { message: existing })
+        const message = { id: messageId, from: account.uuid, groupId: group.id, text, at: now() }
+        if (image) message.image = image
+        await store.appendGroupMessage(group, message)
+        await store.saveGroups()
+        return json(res, 200, { message })
+      }
+      if (method === 'POST' && pathname.startsWith('/api/groups/') && pathname.endsWith('/read')) {
+        const id = pathname.slice('/api/groups/'.length, -'/read'.length)
+        const group = groupOrFail(account, id, res)
+        if (!group) return
+        const body = await readJson(req)
+        account.groupReads = { ...(account.groupReads || {}), [group.id]: Number(body.upTo) || now() }
+        await store.saveAccounts()
+        return json(res, 200, { ok: true })
+      }
       if (method === 'POST' && pathname === '/api/files') return await handleFileCreate(req, res, account)
       if (method === 'GET' && pathname === '/api/files') {
         const incoming = []
         const outgoing = []
         for (const file of store.files.values()) {
-          if (file.to === account.uuid) incoming.push(publicFile(file, account.uuid))
-          else if (file.from === account.uuid) outgoing.push(publicFile(file, account.uuid))
+          const recipients = fileRecipients(file)
+          if (file.from === account.uuid) outgoing.push(publicFile(file, account.uuid))
+          else if (recipients.includes(account.uuid)) incoming.push(publicFile(file, account.uuid))
         }
         const sort = (list) => list.sort((a, b) => b.createdAt - a.createdAt).slice(0, 50)
         return json(res, 200, { incoming: sort(incoming), outgoing: sort(outgoing) })

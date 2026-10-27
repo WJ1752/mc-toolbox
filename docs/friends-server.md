@@ -10,11 +10,12 @@
 | --- | --- | --- |
 | 账户、好友、请求、已读位置、活动 | `accounts.json` | 长期 |
 | 会话令牌哈希 | `sessions.json` | 30 天 |
-| 聊天 | `messages/<a>_<b>.jsonl` | 长期 |
+| 聊天 | `messages/<a>_<b>.jsonl`、`messages/groups/<群id>.jsonl` | 长期 |
+| 群聊成员 | `groups.json` | 长期 |
 | 模组清单 | `mods/<uuid>.json` | 长期 |
-| 整合包 / 模组文件 | `files/<id>.bin` | 下载后 10 分钟删除；未下载 24 小时过期 |
+| 整合包 / 模组 / 聊天图片 | `files/<id>.bin` | 接收方全部下载后 10 分钟删除；未下载最长 12 小时 |
 
-配额默认 **5 GB/账号**、**15 GB 全局**，可用 `--quota-mb`、`--global-mb` 调整。文件不会被长期保存。
+云端中转是**总缓存 10 GB 的滚动空间**：新文件放不下时按创建时间删除最旧的文件，单账号默认也是 **10 GB**（超过时同样先删自己的旧文件）。可用 `--global-mb`、`--quota-mb` 调整。聊天图片同样走临时中转，不占「传输」面板，但受同一套 12 小时 / 10 GB 限制。
 
 ## 2. 身份与安全
 
@@ -128,8 +129,10 @@ journalctl -u mc-toolbox-friends -f
 - `GET /api/health`（版本、是否需邀请码、配额）
 - `POST /api/auth/minecraft`（MC 访问令牌 + 可选邀请码 → 会话）
 - `GET /api/friends`、`POST /api/friends/request`、`POST /api/friends/respond`、`DELETE /api/friends/:uuid`
-- `GET|POST /api/messages`、`POST /api/read`
-- `POST /api/files`、`PUT /api/files/:id`、`GET /api/files`、`GET /api/files/:id/download`、`DELETE /api/files/:id`
+- `GET|POST /api/messages`、`POST /api/read`（消息可带 `image` 附件）
+- `GET /api/groups`、`POST /api/groups`、`POST|DELETE /api/groups/:id/members[/:uuid]`、`DELETE /api/groups/:id`
+- `GET|POST /api/groups/:id/messages`、`POST /api/groups/:id/read`
+- `POST /api/files`（`to` / `groupId` / `targets` 支持好友、群聊与群发）、`PUT /api/files/:id`、`GET /api/files`、`GET /api/files/:id/download`、`DELETE /api/files/:id`
 - `PUT /api/mods/:key`、`GET /api/mods?uuid=`
 - `PUT /api/me`、`POST /api/heartbeat`、`POST /api/auth/logout`
 
@@ -153,14 +156,14 @@ openssl x509 -in /etc/mctb-friends/cert.pem -noout -fingerprint -sha256
 | 指纹不匹配 | 服务器是否换了证书；更新内置证书指纹并重新发版 |
 | 登录提示邀请码 | 注册需要 `MCTB_FRIENDS_INVITE`；已注册账户不需要 |
 | 登录提示非正版 | 启动器账户必须是微软正版；离线/第三方无法校验 |
-| 上传提示配额满 | 等待好友下载或 24 小时过期；调整 `--quota-mb` / `--global-mb` |
+| 上传提示配额满 | 等待好友下载或 12 小时过期；调整 `--quota-mb` / `--global-mb` |
 | 文件已清理 | 下载完成后 10 分钟删除，需重新发送 |
 
 ## 7. 验证
 
 仓库测试：
 
-- `tests/friends-server.test.mjs`：MC 校验、邀请码、好友、离线聊天、文件生命周期与配额、模组清单权限、会话失效。
+- `tests/friends-server.test.mjs`：MC 校验、邀请码、好友、离线聊天、群聊、群发文件、图片附件、文件生命周期/总缓存淘汰/12 小时 TTL、模组清单权限、会话失效。
 - `tests/friends-client.test.mjs`：自签证书指纹探测/固定、指纹不匹配拒绝、公网 HTTP 拒绝、HTTPS 登录与文件上传下载。
 
 真实环境：Ubuntu 24.04 + Node 18.19，systemd 运行在 443，公网探测证书指纹与健康检查一致；临时文件上下行由本地 HTTPS 集成用例覆盖。

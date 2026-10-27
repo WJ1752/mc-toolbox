@@ -202,6 +202,35 @@ export class FriendsServerClient {
     return await readJsonResponse(res)
   }
 
+  async downloadBuffer(id, { limit = 12 * 1024 * 1024 } = {}) {
+    const res = await requestRaw({
+      base: this.base,
+      method: 'GET',
+      pathname: `/api/files/${encodeURIComponent(id)}/download`,
+      headers: { Accept: '*/*', Authorization: 'Bearer ' + this.token },
+      expectedFingerprint: this.fingerprint,
+      timeoutMs: 0
+    })
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      const error = await readJsonResponse(res).catch(() => null)
+      throw Object.assign(new Error(error?.error || `服务器返回 HTTP ${res.statusCode}`), { code: 'SERVER_ERROR', status: res.statusCode })
+    }
+    const chunks = []
+    let total = 0
+    for await (const chunk of res) {
+      total += chunk.length
+      if (total > limit) throw Object.assign(new Error('图片超过大小限制'), { code: 'RESPONSE_TOO_LARGE' })
+      chunks.push(chunk)
+    }
+    let name = ''
+    try { name = decodeURIComponent(String(res.headers['x-file-name'] || '')) } catch {}
+    return {
+      buffer: Buffer.concat(chunks, total),
+      contentType: String(res.headers['content-type'] || ''),
+      name
+    }
+  }
+
   async downloadFile(id, targetPath, { onProgress, signal } = {}) {
     const res = await requestRaw({
       base: this.base,

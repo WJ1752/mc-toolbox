@@ -1,11 +1,12 @@
 // 好友页（中心服务器模式）：正版 MC 账号登录、好友列表、聊天、临时文件中转与模组同步。
-import { h, clear, fmtBytes, fmtAgo, fmtDateTime, fmtTime } from '../core/dom.js'
+import { h, clear, fmtBytes, fmtAgo, fmtDateTime, fmtTime, fmtDuration } from '../core/dom.js'
 import { btn, input, select, toggle, progress, spinner, badge, dot, field, iconBtn, icon } from '../ui/kit.js'
 import { sectionCard, emptyBlock, tabBar } from './ui.js'
 
 const KIND_LABEL = { pack: '整合包', mod: '模组文件' }
 const STATUS_LABEL = {
   exporting: '导出中',
+  verifying: '校验中',
   uploading: '上传中',
   ready: '等待对方接收',
   downloading: '接收中',
@@ -18,6 +19,50 @@ const STATUS_LABEL = {
 // 传输列表里「还在动」与「已经结束」的状态分组——折叠时只保留进行中的。
 const TRANSFER_ACTIVE = new Set(['exporting', 'uploading', 'downloading', 'ready', 'offering', 'waiting', 'sending', 'receiving', 'verifying', 'offered'])
 const TRANSFER_FINISHED = new Set(['done', 'delivered', 'failed', 'expired', 'deleted', 'cancelled'])
+// 这些状态会显示进度条：导出 / 校验允许「不确定进度」，上传与接收按字节计算。
+const TRANSFER_MOVING = new Set(['exporting', 'verifying', 'uploading', 'downloading', 'sending', 'receiving'])
+
+/** 传输速度文案：服务端返回 B/s，小于 1 KB/s 视为已经停下。 */
+function speedText(bps) {
+  const speed = Number(bps) || 0
+  if (speed <= 0) return ''
+  return `${fmtBytes(speed)}/s`
+}
+
+/**
+ * 传输行底部的实时信息。
+ * - 导出/校验：阶段、百分比和打包速度（只有打包阶段有真实字节）。
+ * - 上传/接收：已传字节、百分比、速度和剩余时间。
+ */
+function transferMeta(item, ratio) {
+  const parts = []
+  const loaded = Math.max(0, Number(item.loaded) || 0)
+  const total = Math.max(0, Number(item.total) || Number(item.size) || 0)
+  if (item.status === 'exporting' || item.status === 'verifying') {
+    if (item.phase) parts.push(item.phase)
+    if (ratio !== null && ratio !== undefined) parts.push(Math.round(ratio) + '%')
+    if (loaded > 0) parts.push(total > 0 ? `${fmtBytes(loaded)} / ${fmtBytes(total)}` : fmtBytes(loaded))
+    const speed = speedText(item.speed)
+    if (speed) parts.push(speed)
+    if (item.detail && item.detail !== item.phase) parts.push(shortPath(item.detail, 56))
+  } else if (item.status === 'uploading' || item.status === 'downloading') {
+    if (total > 0) parts.push(`${fmtBytes(Math.min(loaded, total))} / ${fmtBytes(total)}`)
+    if (ratio !== null && ratio !== undefined) parts.push(Math.round(ratio) + '%')
+    const speed = speedText(item.speed)
+    if (speed) {
+      parts.push(speed)
+      const remaining = total - loaded
+      if (remaining > 0 && Number(item.speed) > 0) parts.push('剩余 ' + fmtDuration(Math.ceil(remaining / Number(item.speed))))
+    }
+  } else if (item.status === 'ready') {
+    if (item.direction === 'in') parts.push(`${fmtBytes(item.size || 0)} · 点击「接收」保存文件`)
+    else parts.push(`${fmtBytes(item.size || 0)} · 等待对方接收`)
+  } else {
+    if (item.size) parts.push(fmtBytes(item.size))
+    if (item.error) parts.push(item.error)
+  }
+  return parts.filter(Boolean).join(' · ')
+}
 
 function avatarFor(name) {
   const text = String(name || '?').trim() || '?'
@@ -33,6 +78,12 @@ function avatarFor(name) {
 }
 
 function ratioOf(item) {
+  // 导出/校验阶段由导出任务给百分比；不确定进度时返回 null，让进度条走动画。
+  if (item.status === 'exporting' || item.status === 'verifying') {
+    if (item.indeterminate) return null
+    const pct = Number(item.progress)
+    return Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : null
+  }
   const total = Number(item.total) || Number(item.size) || 0
   if (!total) return item.status === 'done' || item.status === 'delivered' ? 100 : null
   const loaded = Number(item.loaded) || 0
@@ -70,7 +121,9 @@ export function createFriendsView(ctx) {
     diagnosticsOpen: false
   }
   const chat = {
+    kind: 'friend',
     friendId: '',
+    groupId: '',
     messages: [],
     lastAt: 0,
     loading: false,
@@ -81,7 +134,10 @@ export function createFriendsView(ctx) {
     area: null,
     sendBtn: null,
     nearBottom: true,
-    lastFetchAt: 0
+    lastFetchAt: 0,
+    image: null,
+    imagePreview: null,
+    signature: ''
   }
 
   function toast(text, kind = 'info') {
@@ -103,11 +159,12 @@ export function createFriendsView(ctx) {
     }
     // 传输记录里只有真正在动的（导出/上传/接收）算提示，等待对方接收不算。
     const local = [...(data.transfers?.uploads || []), ...(data.transfers?.downloads || [])]
-    const running = local.filter((record) => ['exporting', 'uploading', 'downloading'].includes(record.status)).length
+    const running = local.filter((record) => ['exporting', 'verifying', 'uploading', 'downloading'].includes(record.status)).length
     ctx.setFriendsBadge?.({
       requests: (data.incoming || []).length,
-      unread: (data.friends || []).reduce((sum, friend) => sum + (Number(friend.unread) || 0), 0),
-      incoming: (data.files?.incoming || []).filter((file) => file.status === 'ready').length,
+      unread: (data.friends || []).reduce((sum, friend) => sum + (Number(friend.unread) || 0), 0)
+        + (data.groups || []).reduce((sum, group) => sum + (Number(group.unread) || 0), 0),
+      incoming: (data.files?.incoming || []).filter((file) => file.status === 'ready' && file.kind !== 'image').length,
       activeTransfers: running
     })
   }
@@ -124,6 +181,7 @@ export function createFriendsView(ctx) {
     paintSettings()
     paintEvents()
     updateChatHead()
+    renderChatTimeline()
   }
 
   function buildLayout() {
@@ -318,7 +376,7 @@ export function createFriendsView(ctx) {
     const profile = data.profile || data.account || {}
     const friendCount = (data.friends || []).length
     const requestCount = (data.incoming || []).length
-    const waitingCount = (data.files?.incoming || []).filter((file) => file.status === 'ready').length
+    const waitingCount = (data.files?.incoming || []).filter((file) => file.status === 'ready' && file.kind !== 'image').length
     refs.profile.replaceChildren(
       h('div', { class: 'lp-friends-profile' },
         avatarFor(profile.nickname || profile.mcName),
@@ -404,7 +462,17 @@ export function createFriendsView(ctx) {
   // ---------------- 聊天 ----------------
 
   function currentFriend() {
+    if (chat.kind !== 'friend') return null
     return (data?.friends || []).find((friend) => friend.uuid === chat.friendId) || null
+  }
+
+  function currentGroup() {
+    if (chat.kind !== 'group') return null
+    return (data?.groups || []).find((group) => group.id === chat.groupId) || null
+  }
+
+  function currentChat() {
+    return chat.kind === 'group' ? currentGroup() : currentFriend()
   }
 
   /** 把好友 uuid 换成可读名字；对方已删除好友时回退为空串。 */
@@ -414,8 +482,70 @@ export function createFriendsView(ctx) {
     return friend?.nickname || friend?.mcName || ''
   }
 
+  function groupLabel(id) {
+    if (!id) return ''
+    const group = (data?.groups || []).find((item) => item.id === id)
+    return group?.name || ''
+  }
+
+  /** 群成员不一定是自己的好友，名字可以从所有群成员里兜底查。 */
+  function memberLabel(uuid) {
+    const direct = peerLabel(uuid)
+    if (direct) return direct
+    for (const group of data?.groups || []) {
+      const member = (group.members || []).find((item) => item.uuid === uuid)
+      if (member) return member.nickname || member.mcName || ''
+    }
+    return ''
+  }
+
+  /** 文件的目标摘要：单好友 / 单群聊 / 群发 N 个会话。 */
+  function transferPeerLabel(item) {
+    const targets = Array.isArray(item.targets) && item.targets.length
+      ? item.targets
+      : [
+          ...(item.peer ? [{ type: 'friend', id: item.peer }] : []),
+          ...(item.groupId ? [{ type: 'group', id: item.groupId }] : [])
+        ]
+    if (targets.length === 1 && targets[0].type === 'group') {
+      const name = groupLabel(targets[0].id)
+      return item.recipientCount > 1 ? `${name || '群聊'} · ${item.recipientCount} 人` : (name || '群聊')
+    }
+    if (item.broadcast || targets.length > 1) return `群发 · ${targets.length || 1} 个会话`
+    const target = targets[0]
+    if (!target) return ''
+    return target.type === 'group' ? groupLabel(target.id) : peerLabel(target.id)
+  }
+
   function updateChatHead() {
     if (!chat.head) return
+    if (chat.kind === 'group') {
+      const group = currentGroup()
+      if (!group) {
+        closeChat()
+        return
+      }
+      const online = (group.members || []).filter((member) => member.online).length
+      chat.head.replaceChildren(
+        avatarFor(group.name),
+        h('div', { class: 'lp-chat-title' },
+          h('b', {}, group.name),
+          h('span', { class: 'lp-chat-status' },
+            badge(`${(group.members || []).length} 人`, ''),
+            ` · ${online} 人在线`,
+            group.owner === data?.profile?.uuid ? ' · 我创建的' : ''
+          )
+        ),
+        h('div', { class: 'lp-chat-actions' },
+          btn('分享整合包', { size: 'sm', variant: 'ghost', iconName: 'upload', onClick: () => openShareModal({ type: 'group', id: group.id }) }),
+          btn('发送文件', { size: 'sm', variant: 'ghost', iconName: 'file', onClick: () => sendLocalFileToChat() }),
+          btn('邀请好友', { size: 'sm', variant: 'ghost', iconName: 'user', onClick: () => openAddMemberModal(group) }),
+          btn('退出群聊', { size: 'sm', variant: 'ghost', onClick: () => leaveGroup(group) })
+        )
+      )
+      if (chat.area) chat.area.placeholder = '发消息到群聊，支持粘贴图片，Enter 发送'
+      return
+    }
     const friend = currentFriend()
     if (!friend) {
       closeChat()
@@ -433,50 +563,252 @@ export function createFriendsView(ctx) {
         )
       ),
       h('div', { class: 'lp-chat-actions' },
-        btn('分享整合包', { size: 'sm', variant: 'ghost', iconName: 'upload', onClick: () => openShareModal(friend) }),
+        btn('分享整合包', { size: 'sm', variant: 'ghost', iconName: 'upload', onClick: () => openShareModal({ type: 'friend', id: friend.uuid }) }),
+        btn('发送文件', { size: 'sm', variant: 'ghost', iconName: 'file', onClick: () => sendLocalFileToChat() }),
         btn('模组同步', { size: 'sm', variant: 'ghost', iconName: 'swap', onClick: () => openModsModal(friend) }),
         btn('删除好友', { size: 'sm', variant: 'ghost', onClick: () => removeFriend(friend) })
       )
     )
-    if (chat.area) chat.area.placeholder = '输入消息，Enter 发送，Shift+Enter 换行'
+    if (chat.area) chat.area.placeholder = '输入消息，Enter 发送，Shift+Enter 换行；支持粘贴图片'
   }
 
-  function appendMessageNode(message) {
-    if (!chat.log) return null
-    const empty = chat.log.querySelector('.lp-chat-empty')
-    if (empty) empty.remove()
+  // ---------------- 聊天时间线 ----------------
+
+  /** 当前会话里应该显示的文件（不含聊天图片，图片作为消息气泡显示）。 */
+  function chatFiles() {
+    const list = []
+    const seen = new Set()
+    const add = (item) => {
+      if (!item?.id || item.kind === 'image' || seen.has(item.id)) return
+      const targets = Array.isArray(item.targets) && item.targets.length
+        ? item.targets
+        : [
+            ...(item.peer ? [{ type: 'friend', id: item.peer }] : []),
+            ...(item.groupId ? [{ type: 'group', id: item.groupId }] : [])
+          ]
+      const matched = chat.kind === 'group'
+        ? targets.some((target) => target.type === 'group' && target.id === chat.groupId)
+        // 收件箱里的文件可能来自群发：只有存在好友目标时才显示在单聊里，
+        // 纯群文件不重复出现在和发送者的私聊中。
+        : item.direction === 'in'
+          ? (targets.some((target) => target.type === 'friend') && item.peer === chat.friendId)
+          : targets.some((target) => target.type === 'friend' && target.id === chat.friendId)
+      if (!matched) return
+      seen.add(item.id)
+      list.push(item)
+    }
+    for (const item of data?.transfers?.uploads || []) add({ ...item, direction: 'out' })
+    for (const item of data?.transfers?.downloads || []) add({ ...item, direction: 'in' })
+    for (const item of data?.files?.incoming || []) add({ ...item, direction: 'in' })
+    for (const item of data?.files?.outgoing || []) add({ ...item, direction: 'out' })
+    return list.sort((a, b) => (a.createdAt || a.startedAt || 0) - (b.createdAt || b.startedAt || 0))
+  }
+
+  function fileStatusText(item) {
+    if (item.status === 'ready') return item.direction === 'in' ? '待接收' : '等待对方接收'
+    return STATUS_LABEL[item.status] || item.status
+  }
+
+  function chatFileCard(item) {
+    const mine = item.direction === 'out'
+    const ratio = ratioOf(item)
+    const moving = TRANSFER_MOVING.has(item.status)
+    const actions = []
+    if (!mine && item.status === 'ready') {
+      actions.push(btn(item.kind === 'mod' ? '接收并加入实例' : '接收', {
+        size: 'xs',
+        variant: 'primary',
+        iconName: 'download',
+        onClick: () => openReceiveModal(item)
+      }))
+    }
+    if (!mine && item.status === 'done' && item.path) {
+      actions.push(btn('打开文件夹', { size: 'xs', variant: 'ghost', iconName: 'folder-open', onClick: () => ctx.openPath(item.path) }))
+    }
+    const meta = transferMeta(item, ratio) || fileStatusText(item)
+    return h('div', { class: 'lp-chat-file ' + (mine ? 'out' : 'in'), dataset: { id: item.id } },
+      h('div', { class: 'lp-chat-file-icon' }, icon(item.kind === 'mod' ? 'file' : 'package-down', { size: 18 })),
+      h('div', { class: 'lp-chat-file-main' },
+        h('b', { title: item.name || '文件' }, item.name || '文件'),
+        h('span', { class: 'lp-chat-file-meta' }, `${mine ? '我发送了文件' : '对方发送了文件'} · ${fileStatusText(item)}${item.size ? ' · ' + fmtBytes(item.size) : ''}`),
+        moving || ratio !== null ? progress(ratio, { title: meta }).el : null,
+        meta ? h('span', { class: 'lp-chat-file-detail', title: meta }, meta) : null
+      ),
+      actions.length ? h('div', { class: 'lp-chat-file-actions' }, ...actions) : null
+    )
+  }
+
+  function chatMessageNode(message) {
     const mine = message.from === data?.profile?.uuid
-    const node = h('div', {
-      class: 'lp-chat-msg ' + (mine ? 'out' : 'in'),
-      dataset: { id: message.id }
-    },
-      h('div', { class: 'lp-chat-bubble' }, message.text),
+    const group = currentGroup()
+    const sender = group ? (group.members || []).find((member) => member.uuid === message.from) : null
+    const senderName = sender ? (sender.nickname || sender.mcName) : memberLabel(message.from)
+    const image = message.image
+    const bubble = h('div', { class: 'lp-chat-bubble' })
+    if (message.text) bubble.appendChild(h('div', { class: 'lp-chat-text' }, message.text))
+    if (image?.id) {
+      const img = h('img', {
+        class: 'lp-chat-image',
+        src: `/api/friends/images/${encodeURIComponent(image.id)}`,
+        alt: image.name || '聊天图片',
+        loading: 'lazy',
+        title: '点击查看大图'
+      })
+      img.addEventListener('click', () => openImageLightbox(img.src, image.name || '聊天图片'))
+      bubble.appendChild(img)
+    }
+    return h('div', { class: 'lp-chat-msg ' + (mine ? 'out' : 'in'), dataset: { id: message.id } },
+      !mine && group && senderName ? h('div', { class: 'lp-chat-sender' }, senderName) : null,
+      bubble,
       h('div', { class: 'lp-chat-meta' }, `${fmtTime(message.at)}${mine ? ' · 已发送' : ''}`)
     )
-    chat.log.appendChild(node)
-    return node
+  }
+
+  function chatTimelineSignature() {
+    const messages = chat.messages.map((message) => message.id + ':' + (message.image?.id || '')).join(',')
+    const files = chatFiles().map((item) => `${item.id}:${item.status}:${Math.round(Number(item.progress) || 0)}:${item.speed || 0}`).join(',')
+    return chat.kind + ':' + (chat.friendId || chat.groupId) + '|' + messages + '|' + files
+  }
+
+  function renderChatTimeline({ force = false } = {}) {
+    if (!chat.log) return
+    const signature = chatTimelineSignature()
+    if (!force && signature === chat.signature) return
+    chat.signature = signature
+    const el = chat.log
+    const stick = chat.nearBottom || (el.scrollHeight - el.scrollTop - el.clientHeight < 48)
+    const entries = [
+      ...chat.messages.map((message) => ({ at: message.at || 0, node: chatMessageNode(message) })),
+      ...chatFiles().map((item) => ({ at: item.createdAt || item.startedAt || 0, node: chatFileCard(item) }))
+    ].sort((a, b) => a.at - b.at)
+    if (!entries.length) {
+      el.replaceChildren(h('div', { class: 'lp-chat-empty' }, '还没有消息，打个招呼吧；也可以直接粘贴图片发送'))
+    } else {
+      el.replaceChildren(...entries.map((entry) => entry.node))
+    }
+    if (stick) el.scrollTop = el.scrollHeight
+  }
+
+  function imageDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result || ''))
+      reader.onerror = () => reject(reader.error || new Error('读取图片失败'))
+      reader.readAsDataURL(file)
+    })
+  }
+
+  function imageDimensions(dataUrl) {
+    return new Promise((resolve) => {
+      const img = new Image()
+      img.onload = () => resolve({ width: img.naturalWidth || 0, height: img.naturalHeight || 0 })
+      img.onerror = () => resolve({ width: 0, height: 0 })
+      img.src = dataUrl
+    })
+  }
+
+  function paintChatImagePreview() {
+    if (!chat.imagePreview) return
+    if (!chat.image) {
+      chat.imagePreview.hidden = true
+      chat.imagePreview.replaceChildren()
+      return
+    }
+    chat.imagePreview.hidden = false
+    chat.imagePreview.replaceChildren(
+      h('img', { class: 'lp-chat-image-thumb', src: chat.image.dataUrl, alt: '待发送图片' }),
+      h('div', { class: 'lp-chat-image-info' },
+        h('b', {}, '图片已就绪'),
+        h('span', { class: 'muted' }, `${chat.image.width || '?'} × ${chat.image.height || '?'} · ${fmtBytes(chat.image.size || 0)}`)
+      ),
+      btn('移除', {
+        size: 'xs',
+        variant: 'ghost',
+        iconName: 'trash',
+        onClick: () => {
+          chat.image = null
+          paintChatImagePreview()
+        }
+      })
+    )
+  }
+
+  async function attachImageBlob(file) {
+    if (!file || !String(file.type || '').startsWith('image/')) return
+    if (file.size > 10 * 1024 * 1024) {
+      toast('图片太大（最大 10 MB）', 'warn')
+      return
+    }
+    try {
+      const dataUrl = await imageDataUrl(file)
+      const size = await imageDimensions(dataUrl)
+      chat.image = {
+        dataUrl,
+        name: file.name || `image-${Date.now()}.png`,
+        size: file.size,
+        width: size.width,
+        height: size.height
+      }
+      paintChatImagePreview()
+      chat.area?.focus()
+    } catch (error) {
+      toast('读取图片失败：' + error.message, 'err')
+    }
+  }
+
+  function openImageLightbox(src, name = '聊天图片') {
+    let zoom = 1
+    const img = h('img', { class: 'lp-image-zoom-img', src, alt: name })
+    const label = h('span', { class: 'lp-friends-hint' }, '滚轮或按钮缩放 · 100%')
+    const apply = () => {
+      img.style.transform = `scale(${zoom})`
+      label.textContent = `滚轮或按钮缩放 · ${Math.round(zoom * 100)}%`
+    }
+    const zoomBy = (factor) => {
+      zoom = Math.max(0.2, Math.min(5, zoom * factor))
+      apply()
+    }
+    const body = h('div', { class: 'lp-image-lightbox' },
+      h('div', { class: 'lp-image-zoom-stage' }, img),
+      h('div', { class: 'lp-image-zoom-bar' },
+        btn('缩小', { size: 'sm', onClick: () => zoomBy(1 / 1.25) }),
+        btn('100%', { size: 'sm', onClick: () => { zoom = 1; apply() } }),
+        btn('放大', { size: 'sm', onClick: () => zoomBy(1.25) }),
+        label
+      )
+    )
+    body.addEventListener('wheel', (event) => {
+      event.preventDefault()
+      zoomBy(event.deltaY > 0 ? 1 / 1.1 : 1.1)
+    }, { passive: false })
+    apply()
+    ctx.openModal({ title: name, size: 'lg', body, buttons: [{ label: '关闭', onClick: (api) => api.close() }] })
   }
 
   async function loadChat({ initial = false } = {}) {
-    if (!chat.friendId || chat.loading) return
+    if (!currentChat() || chat.loading) return
     chat.loading = true
-    const friendId = chat.friendId
+    const kind = chat.kind
+    const chatId = kind === 'group' ? chat.groupId : chat.friendId
     try {
       const after = initial ? 0 : Math.max(0, chat.lastAt - 5000)
-      const result = await ctx.api.friendsMessages(friendId, after, true)
+      const result = kind === 'group'
+        ? await ctx.api.friendsGroupMessages(chatId, after, true)
+        : await ctx.api.friendsMessages(chatId, after, true)
       chat.lastFetchAt = Date.now()
-      if (chat.friendId !== friendId) return
-      if (initial) chat.log.replaceChildren()
+      if (chat.kind !== kind || (kind === 'group' ? chat.groupId : chat.friendId) !== chatId) return
+      if (initial) chat.messages = []
       const known = new Set(chat.messages.map((message) => message.id))
       for (const message of result.items || []) {
         if (known.has(message.id)) continue
         chat.messages.push(message)
-        chat.lastAt = Math.max(chat.lastAt, message.at)
-        appendMessageNode(message)
+        chat.lastAt = Math.max(chat.lastAt, message.at || 0)
       }
-      if (!chat.messages.length) chat.log.replaceChildren(h('div', { class: 'lp-chat-empty' }, '还没有消息，打个招呼吧'))
-      if (initial || chat.nearBottom) chat.log.scrollTop = chat.log.scrollHeight
-      if (initial) refreshBadge()
+      renderChatTimeline({ force: true })
+      if (initial) {
+        chat.log.scrollTop = chat.log.scrollHeight
+        refreshBadge()
+      }
     } catch (error) {
       if (initial && chat.log) chat.log.replaceChildren(h('div', { class: 'lp-chat-empty warn-text' }, '读取消息失败：' + error.message))
     } finally {
@@ -484,25 +816,38 @@ export function createFriendsView(ctx) {
     }
   }
 
-  function buildChatPanel(friend) {
+  function buildChatPanel() {
     chat.messages = []
     chat.lastAt = 0
     chat.nearBottom = true
+    chat.signature = ''
+    chat.image = null
     chat.head = h('div', { class: 'lp-chat-head' })
     chat.log = h('div', { class: 'lp-chat-log', role: 'log', 'aria-live': 'polite' })
     chat.log.addEventListener('scroll', () => {
       const el = chat.log
       chat.nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 48
     })
-    chat.area = h('textarea', { class: 'lp-chat-input', rows: 2, placeholder: '输入消息，Enter 发送，Shift+Enter 换行', 'aria-label': '聊天消息' })
+    chat.imagePreview = h('div', { class: 'lp-chat-image-preview', hidden: true })
+    chat.area = h('textarea', { class: 'lp-chat-input', rows: 2, placeholder: '输入消息，Enter 发送，Shift+Enter 换行；支持粘贴图片', 'aria-label': '聊天消息' })
     chat.area.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault()
         sendChatMessage()
       }
     })
+    chat.area.addEventListener('paste', (event) => {
+      const items = Array.from(event.clipboardData?.items || [])
+      const imageItem = items.find((item) => String(item.type || '').startsWith('image/'))
+      if (!imageItem) return
+      const file = imageItem.getAsFile()
+      if (!file) return
+      event.preventDefault()
+      void attachImageBlob(file)
+    })
     chat.sendBtn = btn('发送', { variant: 'primary', iconName: 'arrow-right', onClick: () => sendChatMessage() })
-    chat.panel = h('div', { class: 'lp-chat-panel' }, chat.head, chat.log, h('div', { class: 'lp-chat-composer' }, chat.area, chat.sendBtn))
+    chat.panel = h('div', { class: 'lp-chat-panel' }, chat.head, chat.log,
+      h('div', { class: 'lp-chat-composer' }, chat.imagePreview, h('div', { class: 'lp-chat-composer-row' }, chat.area, chat.sendBtn)))
     refs.chat.replaceChildren(chat.panel)
     updateChatHead()
     void loadChat({ initial: true })
@@ -511,13 +856,27 @@ export function createFriendsView(ctx) {
   function selectFriend(uuid) {
     const friend = (data?.friends || []).find((item) => item.uuid === uuid)
     if (!friend) return
+    chat.kind = 'friend'
     chat.friendId = uuid
-    buildChatPanel(friend)
+    chat.groupId = ''
+    buildChatPanel()
+    paintSide()
+  }
+
+  function selectGroup(id) {
+    const group = (data?.groups || []).find((item) => item.id === id)
+    if (!group) return
+    chat.kind = 'group'
+    chat.groupId = id
+    chat.friendId = ''
+    buildChatPanel()
     paintSide()
   }
 
   function closeChat() {
+    chat.kind = 'friend'
     chat.friendId = ''
+    chat.groupId = ''
     chat.messages = []
     chat.lastAt = 0
     chat.panel = null
@@ -525,57 +884,136 @@ export function createFriendsView(ctx) {
     chat.log = null
     chat.area = null
     chat.sendBtn = null
-    if (refs.chat) refs.chat.replaceChildren(h('div', { class: 'lp-chat-empty' }, '选择左侧好友开始聊天'))
+    chat.image = null
+    chat.imagePreview = null
+    chat.signature = ''
+    if (refs.chat) refs.chat.replaceChildren(h('div', { class: 'lp-chat-empty' }, '选择左侧好友或群聊开始聊天'))
     paintSide()
   }
 
   async function sendChatMessage() {
+    if (!currentChat() || chat.sending) return
     const text = String(chat.area?.value || '').trim()
-    if (!text || !chat.friendId || chat.sending) return
+    const image = chat.image
+    if (!text && !image) return
     chat.sending = true
     if (chat.sendBtn) chat.sendBtn.disabled = true
     try {
-      const result = await ctx.api.friendsSendChat(chat.friendId, text)
+      const result = image
+        ? await ctx.api.friendsSendImage({
+            to: chat.friendId,
+            groupId: chat.groupId,
+            text,
+            dataUrl: image.dataUrl,
+            name: image.name,
+            width: image.width,
+            height: image.height
+          })
+        : chat.kind === 'group'
+          ? await ctx.api.friendsSendGroupChat(chat.groupId, text)
+          : await ctx.api.friendsSendChat(chat.friendId, text)
       chat.area.value = ''
-      if (!chat.messages.some((message) => message.id === result.message.id)) {
+      chat.image = null
+      paintChatImagePreview()
+      if (result?.message && !chat.messages.some((message) => message.id === result.message.id)) {
         chat.messages.push(result.message)
-        chat.lastAt = Math.max(chat.lastAt, result.message.at)
-        appendMessageNode(result.message)
+        chat.lastAt = Math.max(chat.lastAt, result.message.at || 0)
       }
       chat.nearBottom = true
-      chat.log.scrollTop = chat.log.scrollHeight
+      renderChatTimeline({ force: true })
       await refreshData(true)
     } catch (error) {
       toast(error.message, 'err')
     } finally {
       chat.sending = false
+      if (chat.sendBtn) chat.sendBtn.disabled = false
       updateChatHead()
     }
   }
 
-  // ---------------- 好友 / 请求列表 ----------------
+  // ---------------- 好友 / 群聊 / 请求列表 ----------------
+
+  function pendingFilesFor(target) {
+    const files = data?.files?.incoming || []
+    return files.filter((file) => {
+      if (!file?.id || file.kind === 'image' || file.status !== 'ready') return false
+      const targets = Array.isArray(file.targets) && file.targets.length
+        ? file.targets
+        : [
+            ...(file.peer ? [{ type: 'friend', id: file.peer }] : []),
+            ...(file.groupId ? [{ type: 'group', id: file.groupId }] : [])
+          ]
+      return targets.some((entry) => entry.type === target.type && entry.id === target.id)
+        || (target.type === 'friend'
+          && file.direction === 'in'
+          && file.peer === target.id
+          && !targets.some((entry) => entry.type === 'group'))
+    })
+  }
+
+  function messagePreview(message, { group = false } = {}) {
+    if (!message) return '还没有消息'
+    const mine = message.from === data?.profile?.uuid
+    const prefix = mine ? '我：' : group ? (memberLabel(message.from) ? memberLabel(message.from) + '：' : '') : ''
+    const text = message.image && !message.text
+      ? '[图片]'
+      : `${message.image ? '[图片] ' : ''}${String(message.text || '').replace(/\s+/g, ' ').slice(0, 42)}`
+    return prefix + text
+  }
 
   function friendRow(friend) {
     const unread = Number(friend.unread) || 0
-    const last = friend.lastMessage
-    const preview = last ? `${last.from === data?.profile?.uuid ? '我：' : ''}${String(last.text).replace(/\s+/g, ' ').slice(0, 42)}` : '还没有消息'
+    const files = pendingFilesFor({ type: 'friend', id: friend.uuid })
+    const active = chat.kind === 'friend' && chat.friendId === friend.uuid
     const row = h('button', {
-      class: 'lp-friend-row selectable' + (chat.friendId === friend.uuid ? ' active' : ''),
+      class: 'lp-friend-row selectable' + (active ? ' active' : ''),
       type: 'button',
-      'aria-pressed': String(chat.friendId === friend.uuid)
+      'aria-pressed': String(active)
     },
       avatarFor(friend.nickname || friend.mcName),
       h('div', { class: 'lp-friend-main' },
         h('div', { class: 'lp-friend-top' },
           h('b', {}, friend.nickname || friend.mcName),
-          h('span', { class: 'lp-friend-status' }, dot(friend.online ? 'ok' : ''), friend.online ? '在线' : '离线')
+          h('span', { class: 'lp-friend-status' }, dot(friend.online ? 'ok' : ''), friend.online ? '在线' : '离线'),
+          files.length ? badge(`文件 ${files.length}`, 'accent') : null
         ),
-        h('div', { class: 'lp-friend-preview' }, preview),
-        h('div', { class: 'lp-friend-meta' }, h('span', { class: 'mono' }, friend.mcName || ''))
+        h('div', { class: 'lp-friend-preview' }, messagePreview(friend.lastMessage)),
+        h('div', { class: 'lp-friend-meta' },
+          h('span', { class: 'mono' }, friend.mcName || ''),
+          files.length ? h('span', { class: 'warn-text' }, '有文件等待接收') : null
+        )
       ),
       unread ? badge(String(unread > 99 ? '99+' : unread), 'warn') : null
     )
     row.onclick = () => selectFriend(friend.uuid)
+    return row
+  }
+
+  function groupRow(group) {
+    const unread = Number(group.unread) || 0
+    const files = pendingFilesFor({ type: 'group', id: group.id })
+    const active = chat.kind === 'group' && chat.groupId === group.id
+    const row = h('button', {
+      class: 'lp-friend-row selectable lp-group-row' + (active ? ' active' : ''),
+      type: 'button',
+      'aria-pressed': String(active)
+    },
+      avatarFor(group.name),
+      h('div', { class: 'lp-friend-main' },
+        h('div', { class: 'lp-friend-top' },
+          h('b', {}, group.name),
+          badge(`${(group.members || []).length} 人`, ''),
+          files.length ? badge(`文件 ${files.length}`, 'accent') : null
+        ),
+        h('div', { class: 'lp-friend-preview' }, messagePreview(group.lastMessage, { group: true })),
+        h('div', { class: 'lp-friend-meta' },
+          h('span', { class: 'muted' }, group.owner === data?.profile?.uuid ? '我创建的群' : '群聊'),
+          files.length ? h('span', { class: 'warn-text' }, '群文件待接收') : null
+        )
+      ),
+      unread ? badge(String(unread > 99 ? '99+' : unread), 'warn') : null
+    )
+    row.onclick = () => selectGroup(group.id)
     return row
   }
 
@@ -612,16 +1050,25 @@ export function createFriendsView(ctx) {
   function paintSideInner() {
     if (!refs.sideBody || !data) return
     const friends = data.friends || []
+    const groups = data.groups || []
     const incoming = data.incoming || []
     const outgoing = data.outgoing || []
     if (refs.sideTabs) {
-      refs.sideTabs.replaceChildren(tabBar([
+      const tabs = tabBar([
         ['friends', '好友', friends.length],
+        ['groups', '群聊', groups.length],
         ['requests', '请求', incoming.length]
       ], ui.tab, (id) => {
         ui.tab = id
         paintSide()
-      }))
+      })
+      const createGroupBtn = iconBtn('add', {
+        label: '新建群聊',
+        title: '选择好友新建群聊',
+        size: 14,
+        onClick: () => openCreateGroupModal()
+      })
+      refs.sideTabs.replaceChildren(h('div', { class: 'lp-friends-side-tabs-row' }, tabs, createGroupBtn))
     }
     if (ui.tab === 'requests') {
       const rows = []
@@ -633,18 +1080,24 @@ export function createFriendsView(ctx) {
       refs.sideBody.replaceChildren(...rows)
       return
     }
-    if (!friends.length) {
-      if (chat.friendId) {
-        chat.friendId = ''
-        if (refs.chat) refs.chat.replaceChildren(h('div', { class: 'lp-chat-empty' }, '选择左侧好友开始聊天'))
+    if (ui.tab === 'groups') {
+      if (!groups.length) {
+        refs.sideBody.replaceChildren(emptyBlock('还没有群聊', '点右上角「+」，选几个好友拉一个群，就能在群里发消息、分享整合包和图片。', null, 'user'))
+        return
       }
+      refs.sideBody.replaceChildren(h('div', { class: 'lp-friends-list' }, ...groups.map(groupRow)))
+      return
+    }
+    if (!friends.length) {
+      if (chat.kind === 'friend' && chat.friendId) closeChat()
       refs.sideBody.replaceChildren(emptyBlock('还没有好友', '输入对方的正版游戏 ID 发送请求；对方接受后会出现在这里。', null, 'user'))
       return
     }
     refs.sideBody.replaceChildren(h('div', { class: 'lp-friends-list' }, ...friends.map(friendRow)))
-    if (!chat.friendId || !friends.some((friend) => friend.uuid === chat.friendId)) {
-      selectFriend(friends[0].uuid)
-    }
+    const valid = chat.kind === 'group'
+      ? groups.some((group) => group.id === chat.groupId)
+      : friends.some((friend) => friend.uuid === chat.friendId)
+    if (!valid) selectFriend(friends[0].uuid)
   }
 
   async function respond(uuid, accept) {
@@ -682,6 +1135,8 @@ export function createFriendsView(ctx) {
     const seen = new Set()
     return items.filter((item) => {
       if (!item?.id || seen.has(item.id)) return false
+      // 聊天图片走消息气泡，不占用「传输」面板。
+      if (item.kind === 'image') return false
       seen.add(item.id)
       return true
     }).sort((a, b) => (b.createdAt || b.startedAt || 0) - (a.createdAt || a.startedAt || 0))
@@ -794,16 +1249,18 @@ export function createFriendsView(ctx) {
     const extra = []
     if (item.direction === 'in' && item.status === 'done' && item.appliedTo) extra.push(badge('已加入实例', 'ok'))
     if (item.direction === 'in' && item.targetDir) extra.push(h('span', { class: 'lp-transfer-dir muted', title: item.targetDir }, shortPath(item.targetDir, 44)))
+    const showBar = TRANSFER_MOVING.has(item.status)
+    const meta = transferMeta(item, ratio)
     return h('div', { class: 'lp-transfer-row' + (TRANSFER_FINISHED.has(item.status) ? ' is-finished' : '') },
       h('div', { class: 'lp-transfer-head' },
         h('b', { title: item.name || '文件' }, item.name || '文件'),
         badge(`${item.direction === 'in' ? '接收' : '发送'} · ${KIND_LABEL[item.kind] || '文件'}`, ''),
-        peerLabel(item.peer || item.peerId) ? h('span', { class: 'lp-transfer-peer' }, peerLabel(item.peer || item.peerId)) : null,
+        transferPeerLabel(item) ? h('span', { class: 'lp-transfer-peer', title: transferPeerLabel(item) }, transferPeerLabel(item)) : null,
         h('span', { class: 'lp-transfer-status' }, label)
       ),
-      ratio === null ? null : progress(ratio).el,
+      showBar || ratio !== null ? progress(ratio, { title: meta || label }).el : null,
       h('div', { class: 'lp-transfer-foot' },
-        h('span', { class: 'muted' }, item.size ? `${fmtBytes(item.loaded || 0)} / ${fmtBytes(item.size)}` : item.error || ''),
+        h('span', { class: 'lp-transfer-meta muted', title: meta }, meta || (item.error || '')),
         h('div', { class: 'lp-friend-actions' }, ...extra, ...actions)
       )
     )
@@ -1244,7 +1701,39 @@ export function createFriendsView(ctx) {
     return (ctx.getState().instances || []).map((inst) => [inst.id, `${inst.name} · ${inst.mc}${inst.loader && inst.loader !== 'vanilla' ? ' · ' + inst.loader : ''}`])
   }
 
-  function openShareModal(friend) {
+  /** 好友 + 群聊多选列表，用于群发整合包 / 文件。 */
+  function recipientPicker(current = null) {
+    const selected = new Set(current ? [current.type + ':' + current.id] : [])
+    const rows = []
+    const makeRow = (type, id, name, meta) => {
+      const key = type + ':' + id
+      const cb = h('input', { type: 'checkbox', checked: selected.has(key), dataset: { target: key } })
+      cb.addEventListener('change', () => {
+        if (cb.checked) selected.add(key)
+        else selected.delete(key)
+      })
+      rows.push(h('label', { class: 'lp-share-target' }, cb, avatarFor(name),
+        h('div', { class: 'lp-share-target-main' }, h('b', {}, name), h('span', { class: 'muted' }, meta))))
+    }
+    for (const friend of data?.friends || []) {
+      makeRow('friend', friend.uuid, friend.nickname || friend.mcName, `好友 · ${friend.mcName || ''}`)
+    }
+    for (const group of data?.groups || []) {
+      makeRow('group', group.id, group.name, `群聊 · ${(group.members || []).length} 人`)
+    }
+    const el = rows.length
+      ? h('div', { class: 'lp-share-targets' }, ...rows)
+      : h('div', { class: 'lp-friends-hint' }, '还没有好友或群聊，先添加好友再发送。')
+    return {
+      el,
+      values: () => [...selected].map((key) => {
+        const [type, ...rest] = key.split(':')
+        return { type, id: rest.join(':') }
+      })
+    }
+  }
+
+  function openShareModal(current = null) {
     const options = instanceOptions()
     if (!options.length) {
       toast('还没有实例，先创建一个实例再分享', 'warn')
@@ -1254,22 +1743,28 @@ export function createFriendsView(ctx) {
     const formatSel = select([['mrpack', 'Modrinth · .mrpack（推荐）'], ['zip', '通用 · .zip']], 'mrpack')
     const saves = toggle(false, () => {})
     const screenshots = toggle(false, () => {})
+    const picker = recipientPicker(current)
     const status = h('div', { class: 'lp-friends-modal-status' })
     const start = btn('导出并上传', {
       variant: 'primary',
       iconName: 'upload',
       onClick: async () => {
+        const targets = picker.values()
+        if (!targets.length) {
+          status.textContent = '请至少选择一个好友或群聊'
+          return
+        }
         start.disabled = true
-        status.textContent = '开始导出，进度会显示在「传输」里…'
+        status.textContent = '开始导出，进度会显示在「传输」和聊天里…'
         try {
           await ctx.api.friendsSharePack({
-            friendId: friend.uuid,
+            targets,
             instanceId: instanceSel.value,
             format: formatSel.value,
             includeSaves: saves.querySelector('input')?.checked === true,
             includeScreenshots: screenshots.querySelector('input')?.checked === true
           })
-          toast('已开始导出并上传；对方会在传输列表看到', 'ok')
+          toast(targets.length > 1 ? `已开始导出并群发给 ${targets.length} 个会话` : '已开始导出并上传', 'ok')
           modal.close()
           await refreshData(true)
         } catch (error) {
@@ -1279,10 +1774,11 @@ export function createFriendsView(ctx) {
       }
     })
     const modal = ctx.openModal({
-      title: `分享整合包 · ${friend.nickname || friend.mcName}`,
+      title: current ? `分享整合包 · ${current.type === 'group' ? groupLabel(current.id) : peerLabel(current.id)}` : '分享整合包',
       size: 'md',
       body: h('div', { class: 'lp-friends-modal' },
-        h('div', { class: 'lp-friends-modal-note' }, '导出后上传到好友服务器，对方下载完成后服务器自动清理文件。'),
+        h('div', { class: 'lp-friends-modal-note' }, '导出后上传到好友服务器；可以勾选多个好友和群聊一次群发。文件在聊天栏和传输面板都会显示进度，接收方全部下载后 10 分钟清理，最长缓存 12 小时。'),
+        field('发送给', picker.el, { hint: '可多选：好友、群聊可以一起发' }),
         field('实例', instanceSel),
         field('格式', formatSel),
         h('div', { class: 'lp-friends-toggles' },
@@ -1292,6 +1788,170 @@ export function createFriendsView(ctx) {
         status
       ),
       buttons: [{ label: '关闭', onClick: (api) => api.close() }, start]
+    })
+  }
+
+  function openCreateGroupModal() {
+    const friends = data?.friends || []
+    if (!friends.length) {
+      toast('先添加好友，才能拉群聊', 'warn')
+      return
+    }
+    const nameInput = input({ value: `群聊 · ${data?.profile?.nickname || data?.profile?.mcName || ''}`.trim(), placeholder: '群聊名称' })
+    const selected = new Set()
+    const rows = friends.map((friend) => {
+      const cb = h('input', { type: 'checkbox' })
+      cb.addEventListener('change', () => {
+        if (cb.checked) selected.add(friend.uuid)
+        else selected.delete(friend.uuid)
+      })
+      return h('label', { class: 'lp-share-target' }, cb, avatarFor(friend.nickname || friend.mcName),
+        h('div', { class: 'lp-share-target-main' },
+          h('b', {}, friend.nickname || friend.mcName),
+          h('span', { class: 'muted' }, friend.online ? '在线' : friend.mcName || '离线')))
+    })
+    const status = h('div', { class: 'lp-friends-modal-status' })
+    const create = btn('创建群聊', {
+      variant: 'primary',
+      iconName: 'add',
+      onClick: async () => {
+        create.disabled = true
+        try {
+          const result = await ctx.api.friendsCreateGroup(nameInput.value.trim() || '新群聊', [...selected])
+          toast('群聊已创建', 'ok')
+          modal.close()
+          ui.tab = 'groups'
+          await refreshData(true)
+          if (result?.group?.id) selectGroup(result.group.id)
+        } catch (error) {
+          status.textContent = '失败：' + error.message
+          create.disabled = false
+        }
+      }
+    })
+    const modal = ctx.openModal({
+      title: '新建群聊',
+      size: 'md',
+      body: h('div', { class: 'lp-friends-modal' },
+        h('div', { class: 'lp-friends-modal-note' }, '勾选好友加入群聊；创建后可以在群里聊天、发图片、分享整合包和群发文件。'),
+        field('群聊名称', nameInput),
+        field('邀请好友', h('div', { class: 'lp-share-targets' }, ...rows)),
+        status
+      ),
+      buttons: [{ label: '取消', onClick: (api) => api.close() }, create]
+    })
+  }
+
+  function openAddMemberModal(group) {
+    const memberIds = new Set(group.memberIds || (group.members || []).map((member) => member.uuid))
+    const candidates = (data?.friends || []).filter((friend) => !memberIds.has(friend.uuid))
+    if (!candidates.length) {
+      toast('所有好友都已经在群里了', 'info')
+      return
+    }
+    const selected = new Set()
+    const rows = candidates.map((friend) => {
+      const cb = h('input', { type: 'checkbox' })
+      cb.addEventListener('change', () => {
+        if (cb.checked) selected.add(friend.uuid)
+        else selected.delete(friend.uuid)
+      })
+      return h('label', { class: 'lp-share-target' }, cb, avatarFor(friend.nickname || friend.mcName),
+        h('div', { class: 'lp-share-target-main' }, h('b', {}, friend.nickname || friend.mcName), h('span', { class: 'muted' }, friend.mcName || '')))
+    })
+    const status = h('div', { class: 'lp-friends-modal-status' })
+    const add = btn('加入群聊', {
+      variant: 'primary',
+      iconName: 'user',
+      onClick: async () => {
+        const list = [...selected]
+        if (!list.length) {
+          status.textContent = '请先勾选要邀请的好友'
+          return
+        }
+        add.disabled = true
+        try {
+          for (const uuid of list) await ctx.api.friendsAddGroupMember(group.id, uuid)
+          toast(`已邀请 ${list.length} 位好友`, 'ok')
+          modal.close()
+          await refreshData(true)
+        } catch (error) {
+          status.textContent = '失败：' + error.message
+          add.disabled = false
+        }
+      }
+    })
+    const modal = ctx.openModal({
+      title: `邀请好友 · ${group.name}`,
+      size: 'md',
+      body: h('div', { class: 'lp-friends-modal' },
+        h('div', { class: 'lp-friends-modal-note' }, '好友加入后可以看到群里的历史消息、图片和文件。'),
+        h('div', { class: 'lp-share-targets' }, ...rows),
+        status
+      ),
+      buttons: [{ label: '取消', onClick: (api) => api.close() }, add]
+    })
+  }
+
+  async function leaveGroup(group) {
+    if (!(await ctx.confirm(`退出群聊「${group.name}」？退出后需要群主重新邀请才能回来。`, { title: '退出群聊', okText: '退出', danger: true }))) return
+    try {
+      await ctx.api.friendsLeaveGroup(group.id)
+      toast('已退出群聊', 'ok')
+      if (chat.kind === 'group' && chat.groupId === group.id) closeChat()
+      await refreshData(true)
+    } catch (error) {
+      toast(error.message, 'err')
+    }
+  }
+
+  /** 把本地文件发到当前会话，或勾选多个好友 / 群聊群发。 */
+  async function sendLocalFileToChat() {
+    if (!currentChat()) return
+    const current = chat.kind === 'group'
+      ? { type: 'group', id: chat.groupId }
+      : { type: 'friend', id: chat.friendId }
+    let filePath = ''
+    try {
+      filePath = await ctx.pickFile('', { title: '选择要发送的文件', exts: [] })
+    } catch (error) {
+      toast(error.message, 'err')
+      return
+    }
+    if (!filePath) return
+    const fileName = String(filePath).split(/[\\/]/).pop() || filePath
+    const picker = recipientPicker(current)
+    const status = h('div', { class: 'lp-friends-modal-status' })
+    const send = btn('发送文件', {
+      variant: 'primary',
+      iconName: 'upload',
+      onClick: async () => {
+        const targets = picker.values()
+        if (!targets.length) {
+          status.textContent = '请至少选择一个好友或群聊'
+          return
+        }
+        send.disabled = true
+        try {
+          await ctx.api.friendsSendFile({ targets, filePath })
+          toast(targets.length > 1 ? `已开始群发给 ${targets.length} 个会话` : '已开始发送，进度会显示在聊天栏和传输面板', 'ok')
+          modal.close()
+          await refreshData(true)
+        } catch (error) {
+          status.textContent = '失败：' + error.message
+          send.disabled = false
+        }
+      }
+    })
+    const modal = ctx.openModal({
+      title: `发送文件 · ${fileName}`,
+      size: 'md',
+      body: h('div', { class: 'lp-friends-modal' },
+        h('div', { class: 'lp-friends-modal-note' }, `${fileName} · 可一次发送给多个好友和群聊；最大 2 GB，通过好友服务器中转，最长缓存 12 小时。`),
+        field('发送给', picker.el, { hint: '已默认选中当前聊天，可继续勾选其他好友或群聊' }),
+        status
+      ),
+      buttons: [{ label: '取消', onClick: (api) => api.close() }, send]
     })
   }
 
@@ -1456,7 +2116,7 @@ export function createFriendsView(ctx) {
         buildLayout()
       } else if (mode === 'friends') {
         paintAll()
-        if (chat.friendId && Date.now() - chat.lastFetchAt > 1200) void loadChat()
+        if ((chat.kind === 'group' ? chat.groupId : chat.friendId) && Date.now() - chat.lastFetchAt > 1200) void loadChat()
       }
       // 好友页自己就能算出角标数字，直接同步，避免每 2 秒多打一次通知接口。
       refreshBadge()
