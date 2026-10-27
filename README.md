@@ -1,5 +1,15 @@
 # Minecraft 工具箱
 
+### v1.12.6 CurseForge 受限文件按内容分级处理
+
+- 安装 CurseForge 整合包时，作者把文件设置为「禁止第三方启动器自动下载」不再一律让整包作废，而是按缺失内容分级：
+  - 缺的只有光影 / 资源包 / 数据包：跳过并继续安装（这些内容不影响整合包启动），完成文案会注明缺了多少个；完整清单（文件名 + CurseForge 网页地址）写进任务日志和实例目录 `.mc-toolbox-missing-files.txt`，补齐后直接可用。
+  - 缺 `mods`：仍然中止（缺代码会让游戏崩溃），但**不再删除实例和已下载内容**；任务日志逐条列出缺失文件与链接，补齐后重新安装会复用缓存与实例文件，不会重新下载几十 GB。
+- 错误提示从一串裸编号改为「编号（文件名）」，最多列 5 个并不再塞 118 条网址；完整清单（文件名 + 项目网页地址 + 目标目录）写入任务日志和实例目录 `.mc-toolbox-missing-files.txt`；新增 `error.code = CF_RESTRICTED` 与结构化 `blocked` 列表供调用方判断。
+- 背景实测：`Epic Shaders - All The Shaders` 的 422 个文件中 118 个 `allowModDistribution=false`（用同一把 CurseForge API Key 逐个确认，JEI 为 `true` 作对照）；这类文件任何第三方启动器都拿不到，只能官方 App 安装或网页手动下载。
+- 回归与验证：`node --test tests/*.test.mjs` 293 项通过（新增 2 项：仅缺光影时跳过并返回清单、清单文案与网页地址格式）。
+- 构建与版本：`package.json` / `PRODUCT_VERSION` 更新为 1.12.6。
+
 ### v1.12.5 签名 Forge 安装器修复
 
 - 修复 Forge 1.20.1-47.4.0（以及其它带 JAR 签名的新版安装器）安装必定失败：任务只显示「安装加载器 · A problem installing was detected, install cannot continue」，1 秒后以「安装器返回非零退出码（退出码 1）」结束，换下载源、换网络都没有用。

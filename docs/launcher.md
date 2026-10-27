@@ -207,8 +207,10 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - 读取 `modrinth.index.json`、CurseForge `manifest.json`，或本工具导出的 `manifest.json`（`manifestType: mc-toolbox`），推断 MC、加载器与版本；`toolbox` 与 Modrinth 一样按 `files` 下载、复制 `overrides/`。
 - ZIP 读取器按 EOCD 记录的偏移单独读取中央目录（必要时跟随 Zip64），不再只扫文件末尾 2 MiB；2 万+ 条目的 overrides 大包也能正确读到根目录清单。
 - 安装基础版本/加载器后，解压 overrides/client-overrides 到实例游戏目录；Modrinth 按路径/哈希下载，CurseForge 按项目/文件 ID 补齐并校验 SHA-1。
-- CurseForge 文件被作者禁止自动下载时，先查缓存、`mods/`、`resourcepacks/`、`shaderpacks/` 中是否有 SHA-1 一致的文件；命中则复用，否则错误信息列出 `项目/文件（文件名）` 并提示用官方启动器或手动下载。
-- 记录 `.mc-toolbox-pack.json`；任务失败/取消时清理临时目录和上传文件。
+- CurseForge 文件被作者禁止自动下载时（`allowModDistribution=false`），先查缓存、`mods/`、`resourcepacks/`、`shaderpacks/` 中是否有 SHA-1 一致的文件；命中则复用。
+  - v1.12.6 起按缺失内容分别处理：只缺 `resourcepacks` / `shaderpacks` / `datapacks` 时跳过并继续安装（不影响启动），完成文案注明缺失数量，完整清单（文件名 + 项目网页地址）写入任务日志和实例目录 `.mc-toolbox-missing-files.txt`。
+  - 缺失里含 `mods` 时仍然中止：错误信息列前 5 个 `项目/文件（文件名）` 并指向任务日志，同时设置 `keepOnFailure` 保留实例与已下载内容（不再整包删除）；用户补齐后重装会复用缓存与实例文件。完整清单（含项目网页地址）写入 `.mc-toolbox-missing-files.txt`。
+- 记录 `.mc-toolbox-pack.json`；任务失败/取消时清理临时目录和上传文件（`keepOnFailure` 除外）。
 - 在线任务下载地址从 Modrinth `/version` 或 CurseForge `/download-url` 解析；未配置 CurseForge API Key 时返回 `CURSEFORGE_API_KEY` 中文引导，前端显示「设置 → 社区资源」入口或改用 Modrinth。
 
 ### 4.6 导出整合包
@@ -529,6 +531,16 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - 修复：`patchJarEntry` 构建新 JAR 时过滤签名条目，并在写盘前自检（补丁条目可原样读回、无残留签名），自检失败即抛错，由 `prepareInstallerMappings` 回退原始安装器；日志记录被移除的签名文件。安装器失败文案改为只在网络类失败时建议换源，静默中止时直接说明与下载源无关。
 - 验证：真实安装器 + Java 17，修复前 1 秒 `A problem installing…` 退出码 1；修复后完整安装，`--skipIfExists` 生效（日志 `Skipping as output file exists`），生成 `1.20.1-forge-47.4.0`，输出 `Successfully installed client into launcher.`。
 - 测试：`tests/launcher-install-recovery.test.mjs` 新增 3 项（签名剥离、非签名 JAR 不误删 `META-INF` 其它条目、静默中止文案），全量 `node --test tests/*.test.mjs` **291 项通过**。
+
+### 6.20 CurseForge 受限文件分级处理（v1.12.6）
+
+验证环境：Windows 10 x64、Node 22.18、有效 CurseForge Eternal Key；日期 2026-10-27。
+
+- 现场：安装 `Epic Shaders - All The Shaders`（CurseForge，422 个文件）时，任务在「下载模组」阶段失败，提示 118 个文件被作者设置为「禁止第三方启动器自动下载」，实例连同已下载内容一起被删除。
+- 核实：对 `1017185 / 1028104 / 1038016 / 1065471 / 855381` 逐个调用 `/v1/mods/{id}`，均返回 `allowModDistribution: false`；`238222`（JEI）为 `true`，同一把 Key 能拿到 `downloadUrl`。文件接口对这些项目返回 `downloadUrl: null`、`isAvailable: true`，说明是作者关闭了第三方分发，与下载源无关。
+- 处理规则：`OPTIONAL_FOLDERS = {resourcepacks, shaderpacks, datapacks}`。只缺这些时跳过并继续安装，`job.completionNote` 写入缺失数量，完成时前端在「完成」toast 之外再弹一条 warn（`detail` 含「缺 N 个」），清单写入任务日志与实例目录 `.mc-toolbox-missing-files.txt`；缺失里含 `mods` 时抛 `CF_RESTRICTED`，`job.keepOnFailure = true` 保留实例与内容。
+- 错误信息：`blockedFilesMessage()` 输出前 5 个 `编号（文件名）` 后接「等 N 个」，不把上百条网址塞进 toast；完整清单由任务日志逐条输出（含 `links.websiteUrl`），并写入实例目录 `.mc-toolbox-missing-files.txt`。项目名与地址来自 `/mods/{id}` 的 `name` / `links.websiteUrl`（非 jar 文件本来就要查 classId，不额外请求）。
+- 测试：新增 2 项（仅缺光影时跳过并返回结构化清单、清单文案最多 8 条并带地址），全量 `node --test tests/*.test.mjs` **293 项通过**。
 
 ## 7. 截图
 

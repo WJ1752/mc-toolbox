@@ -5,7 +5,7 @@ import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
 import http from 'node:http'
-import { hydrateCurseForgeFiles } from '../src/server/curseforge-pack.js'
+import { hydrateCurseForgeFiles, blockedFilesMessage } from '../src/server/curseforge-pack.js'
 import { downloadVerified } from '../src/server/verified-download.js'
 
 test('CurseForge pins export file IDs, verifies cached files and downloads every declared mod', async () => {
@@ -61,6 +61,11 @@ test('author-disabled downloads produce an actionable client-side message', asyn
         assert.match(error.message, /303\/404/)
         assert.match(error.message, /mods \/ resourcepacks \/ shaderpacks/)
         assert.doesNotMatch(error.message, /服务端/)
+        // 缺 mod 属于致命错误：调用方据此保留实例，等用户补齐，而不是删库重来。
+        assert.equal(error.code, 'CF_RESTRICTED')
+        assert.deepEqual(error.blocked.map((item) => item.id), ['303/404'])
+        assert.equal(error.blocked[0].fileName, 'blocked.jar')
+        assert.equal(error.blocked[0].folder, 'mods')
         return true
       }
     )
@@ -89,6 +94,74 @@ test('manually supplied files with matching SHA-1 satisfy blocked CurseForge dow
     assert.equal(downloads, 0)
     assert.deepEqual(await fs.readFile(path.join(root, 'mods/blocked.jar')), bytes)
   } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
+
+test('缺失的只有光影/资源包时跳过并返回清单，不中断整合包安装', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mc-cf-optional-'))
+  try {
+    const allowed = Buffer.from('allowed-mod')
+    const allowedSha = crypto.createHash('sha1').update(allowed).digest('hex')
+    const shader = Buffer.from('shader-zip')
+    const shaderSha = crypto.createHash('sha1').update(shader).digest('hex')
+    await fs.writeFile(path.join(root, 'manifest.json'), JSON.stringify({ manifestType: 'minecraftModpack', files: [
+      { projectID: 101, fileID: 202 },
+      { projectID: 303, fileID: 404 }
+    ] }))
+    const result = await hydrateCurseForgeFiles(root, null, null, {
+      cacheDir: path.join(root, 'cache'), apiKey: 'test-key',
+      fetcher: async (url) => {
+        if (url.endsWith('/mods/101/files/202')) {
+          return { ok: true, json: async () => ({ data: {
+            id: 202, modId: 101, fileName: 'allowed.jar', downloadUrl: 'https://example.invalid/a.jar',
+            hashes: [{ algo: 1, value: allowedSha }], fileLength: allowed.length
+          } }) }
+        }
+        if (url.endsWith('/mods/303')) {
+          return { ok: true, json: async () => ({ data: {
+            id: 303, name: 'Some Shader', classId: 6552,
+            links: { websiteUrl: 'https://www.curseforge.com/minecraft/shaders/some-shader' }
+          } }) }
+        }
+        return { ok: true, json: async () => ({ data: {
+          id: 404, modId: 303, fileName: 'some-shader.zip', downloadUrl: null,
+          hashes: [{ algo: 1, value: shaderSha }], fileLength: shader.length
+        } }) }
+      },
+      download: async (_url, file) => { await fs.writeFile(file, allowed) }
+    })
+    assert.equal(result.downloaded, 2)
+    assert.equal(result.blocked.length, 1)
+    assert.deepEqual(result.blocked[0], {
+      id: '303/404',
+      projectId: 303,
+      fileId: 404,
+      fileName: 'some-shader.zip',
+      folder: 'shaderpacks',
+      title: 'Some Shader',
+      url: 'https://www.curseforge.com/minecraft/shaders/some-shader'
+    })
+    assert.deepEqual(await fs.readdir(path.join(root, 'mods')), ['allowed.jar'])
+    assert.equal((await fs.readdir(root)).includes('shaderpacks'), false)
+  } finally { await fs.rm(root, { recursive: true, force: true }) }
+})
+
+test('blockedFilesMessage：错误提示保持简短，完整地址留给日志', () => {
+  const blocked = Array.from({ length: 10 }, (_, i) => ({
+    id: `${i}/1`, fileName: `f${i}.zip`, folder: 'shaderpacks',
+    title: `t${i}`, url: `https://example.invalid/${i}`
+  }))
+  const msg = blockedFilesMessage(blocked)
+  assert.match(msg, /10 个文件/)
+  assert.match(msg, /0\/1（f0\.zip）/)
+  assert.match(msg, /4\/1（f4\.zip）/)
+  assert.match(msg, /等 10 个/)
+  assert.doesNotMatch(msg, /f8\.zip/)
+  // toast 里不放 118 条网页地址，完整清单在任务日志和实例目录
+  assert.doesNotMatch(msg, /https:\/\/example\.invalid/)
+  assert.match(msg, /\.mc-toolbox-missing-files\.txt/)
+  assert.match(msg, /不会重复下载/)
+  const withErrors = blockedFilesMessage(blocked.slice(0, 1), ['1/2：下载失败'])
+  assert.match(withErrors, /下载失败/)
 })
 
 test('corrupt HTTP downloads fail hash validation and never publish partial files', async () => {

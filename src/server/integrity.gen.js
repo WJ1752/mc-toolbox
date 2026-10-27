@@ -33,7 +33,7 @@ export const SHELL_INTEGRITY = {
     "js/launcher/content.js": "9fe313fd7b9ef1f6c56792f1361232f39043a7e7908128695e15760575de4b3e",
     "js/launcher/downloads.js": "efb956ba94f6169760162ebc6f6ae5e244cec27f2a515e70ac0bbebc42a68779",
     "js/launcher/friends.js": "54f99273d057486a3adfc3dd6d847b78e1e836719f0f84b4433e2e0595447593",
-    "js/launcher/index.js": "a7114dfa82f71abbad64022bfd6f229d9304144cddb9ee78ff6682d850486aad",
+    "js/launcher/index.js": "17d279dbba6f10f56006154de14a29c12bf05b11feecb3771febd37525faf944",
     "js/launcher/install.js": "6aad364ce68d941197ec3d73ecc9fecfbb0a3483bf284b0b3a284c6db48d4010",
     "js/launcher/java.js": "d92270f9652b53d6cba4f9611868edcc1cacadb5520d8fb755ee0de016eaec91",
     "js/launcher/jvm.js": "93bef20d5c5bf7ed0e5fc362334132eef0c4ef5649455aac606e63e4dcf74ab5",

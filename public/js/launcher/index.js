@@ -2878,6 +2878,11 @@ function detectJobChanges() {
     if (finished.status === 'done') {
       const kind = finished.type === 'pack' ? '整合包' : finished.type === 'update' ? '模组更新' : finished.type === 'repair' ? '修复' : '实例'
       toast(`${kind}「${finished.name || finished.mc}」完成`, 'ok')
+      // 整合包可能「完成但缺内容」：CurseForge 作者禁止第三方下载的光影/资源包会被
+      // 跳过。完成 toast 之外再弹一条警告，避免用户以为已经装全了。
+      if (finished.type === 'pack' && /缺 \d+ 个/.test(String(finished.detail || ''))) {
+        toast(String(finished.detail), 'warn', 9000)
+      }
       refreshAll().then(() => {
         if (finished.instanceId && state.instances.some((item) => item.id === finished.instanceId)) {
           if (!state.selectedId) selectInstance(finished.instanceId)

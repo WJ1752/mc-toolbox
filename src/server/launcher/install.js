@@ -128,6 +128,9 @@ class InstallJob {
     // 前端 core/jobs.js 的 jobSpeedText 直接读这个字段。
     this.speed = 0
     this.speedTimer = null
+    // 完成文案补充（例如整合包缺光影）与「失败也保留实例」标记。
+    this.completionNote = ''
+    this.keepOnFailure = false
   }
 
   get signal() { return this.controller.signal }
@@ -299,7 +302,9 @@ function runJob(job, task) {
       if (job.committed && job.cancelRequested) job.log('安装已完成，忽略取消请求', 'warn')
       job.progress = 100
       job.indeterminate = false
-      job.detail = job.type === 'pack' ? '整合包安装完成' : job.type === 'update' ? '模组更新完成' : '安装完成'
+      job.detail = job.type === 'pack'
+        ? (job.completionNote || '整合包安装完成')
+        : job.type === 'update' ? '模组更新完成' : '安装完成'
       job.log(job.detail, 'ok')
       finishJob(job, 'done')
       // 整个任务成功后才让实例进列表：整合包装加载器只算完成一半。
@@ -322,7 +327,8 @@ function runJob(job, task) {
       try { await job.cleanup?.() } catch {}
       // 整合包安装失败 / 取消时，本次任务刚创建的实例没有任何可用文件，
       // 留在列表里只会变成「点不动的重复实例」。连同目录一起删掉，方便直接重装。
-      const unfinished = ['failed', 'cancelled'].includes(job.status) && !job.committed
+      // 例外：CurseForge 受限文件失败时已经下好大量内容，保留实例等用户补齐。
+      const unfinished = ['failed', 'cancelled'].includes(job.status) && !job.committed && !job.keepOnFailure
       if (unfinished && job.createdInstanceId && job.createdInstanceId === job.instanceId) {
         try {
           deleteInstance(job.instanceId)
@@ -1742,6 +1748,25 @@ async function downloadModrinthPackFiles(job, index, gameDir, { from, to, phase 
   return done
 }
 
+/** 把需要手动补齐的文件写进实例目录，重启后任务日志没了也还能查。 */
+async function writeMissingFilesList(gameDir, blocked) {
+  if (!Array.isArray(blocked) || !blocked.length) return
+  const file = path.join(gameDir, '.mc-toolbox-missing-files.txt')
+  const lines = [
+    '# 作者禁止第三方启动器自动下载的文件；补齐后可以删除本文件。',
+    '# 文件名\t目录\t项目/文件编号\t网页地址',
+    ...blocked.map((item) => `${item.fileName}\t${item.folder}\t${item.id}${item.url ? `\t${item.url}` : ''}`)
+  ]
+  await fsp.writeFile(file, lines.join('\n') + '\n', 'utf8').catch(() => {})
+}
+
+function logBlockedFiles(job, blocked) {
+  job.log(`以下 ${blocked.length} 个文件被作者禁止第三方启动器自动下载，需要手动补齐：`, 'warn')
+  for (const item of blocked) {
+    job.log(`  ${item.id}  ${item.fileName}${item.url ? `  → ${item.url}` : ''}`, 'warn')
+  }
+}
+
 async function downloadCurseForgePackFiles(job, meta, paths, { from, to, phase = '补齐 CurseForge 文件', apiKey = '' }) {
   job.phaseLabel(phase, '通过清单文件 ID 下载')
   job.set(from + (to - from) * 0.1, '正在按清单补齐 CurseForge 文件…')
@@ -1754,7 +1779,7 @@ async function downloadCurseForgePackFiles(job, meta, paths, { from, to, phase =
       await fsp.writeFile(manifestFile, JSON.stringify(meta.manifest, null, 2), 'utf8')
       manifestInstalled = true
     }
-    await hydrateCurseForgeFiles(paths.gameDir, ({ progress, detail }) => {
+    const result = await hydrateCurseForgeFiles(paths.gameDir, ({ progress, detail }) => {
       const raw = Number(progress)
       const ratio = Number.isFinite(raw) ? Math.max(0, Math.min(1, (raw - 28) / 15)) : null
       if (ratio !== null) progressIn(job, from, to, ratio, detail || '正在补齐 CurseForge 文件…')
@@ -1762,6 +1787,22 @@ async function downloadCurseForgePackFiles(job, meta, paths, { from, to, phase =
     }, job.signal, {
       apiKey: apiKey || store.get('settings', {})?.community?.cfApiKey || ''
     })
+    // 只缺光影 / 资源包时安装继续：把清单写进实例目录并在完成文案里点出来。
+    if (Array.isArray(result?.blocked) && result.blocked.length) {
+      logBlockedFiles(job, result.blocked)
+      await writeMissingFilesList(paths.gameDir, result.blocked)
+      job.completionNote = `整合包安装完成（缺 ${result.blocked.length} 个光影/资源包，清单见实例目录 .mc-toolbox-missing-files.txt）`
+      job.log(`已跳过 ${result.blocked.length} 个无法自动下载的光影/资源包；缺失清单已写入实例目录`, 'warn')
+    }
+  } catch (e) {
+    // 缺 mod 时不能继续装：保留实例与已下载文件，用户补齐后可直接复用，不白下一次。
+    if (Array.isArray(e?.blocked) && e.blocked.length) {
+      job.keepOnFailure = true
+      logBlockedFiles(job, e.blocked)
+      await writeMissingFilesList(paths.gameDir, e.blocked)
+      job.log('已保留实例与已下载文件；补齐上面这些文件后可重新安装，不会重复下载', 'warn')
+    }
+    throw e
   } finally {
     if (manifestInstalled) await fsp.rm(manifestFile, { force: true }).catch(() => {})
   }
