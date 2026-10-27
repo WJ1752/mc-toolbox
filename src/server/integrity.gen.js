@@ -25,7 +25,7 @@ export const SHELL_INTEGRITY = {
     "js/core/modal.js": "c10ad72bd558f5d4d0b14665aafee66414062f855187faaf1becb1ac346453ed",
     "js/core/pack-preview.js": "94b3162e3903b65fcc293a4619575c8738088579f3172fa730d9941e39026a82",
     "js/core/settings-kit.js": "c0ce0f93ff4a82e7725babaacdda29609bd8f899e04abc4996d84fca5a50640a",
-    "js/core/settings-launcher.js": "4eb2557dc3a4ea312a1738ef07eacafe4e855a73cf247b010efa5ed67e9c85c2",
+    "js/core/settings-launcher.js": "d0b5f2ecfaf072fa4a2c5a8103333bb3998f377b3e0833d2c46cd448bb2e35cc",
     "js/core/settings.js": "c097b73ff5c913a95c45a648b922700d7ec30961bae0cb609ea11fb55aa18b8d",
     "js/core/toast.js": "396d67949fa489dcf709d57785968f5caf7f6fd6e3c6fb7f2cf02ba9c7774493",
     "js/launcher/accounts.js": "451c798ee08f4ed4ad0a62d2e6870a1fae94479e5480f55c762b6f5de12a3114",

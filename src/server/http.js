@@ -4,9 +4,21 @@ import { parseProxy, makeProxyFetch } from './proxy.js'
 let activeFetch = globalThis.fetch
 let currentProxy = null
 
-/** 设置（或清除）代理。传入原始代理字符串，空串/无值 = 直连。 */
+function sameProxy(a, b) {
+  if (!a && !b) return true
+  if (!a || !b) return false
+  return a.protocol === b.protocol && a.host === b.host && a.port === b.port && a.auth === b.auth
+}
+
+/** 设置（或清除）代理。传入原始代理字符串，空串/无值 = 直连。
+ *  该函数会被每个 API 请求调用一次：配置没变时必须短路返回，
+ *  否则会反复销毁代理连接池，长连接就白做了。 */
 export function setProxy(raw) {
   const p = parseProxy(raw)
+  if (sameProxy(p, currentProxy)) return !!p
+  if (typeof activeFetch?.destroy === 'function') {
+    try { activeFetch.destroy() } catch {}
+  }
   currentProxy = p
   activeFetch = p ? makeProxyFetch(p) : globalThis.fetch
   return !!p

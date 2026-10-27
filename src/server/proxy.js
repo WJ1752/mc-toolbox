@@ -1,6 +1,7 @@
 // 零依赖 HTTP(S)/SOCKS5 代理客户端（供下载引擎使用，替代全局 fetch）
 // 全局 fetch（undici）不读系统代理，也不支持运行时注入代理，故用内置 net/tls/http 手写。
 import http from 'node:http'
+import https from 'node:https'
 import net from 'node:net'
 import tls from 'node:tls'
 import { Readable } from 'node:stream'
@@ -124,9 +125,46 @@ function buildResponse(res) {
   return new Response(body, { status: res.statusCode || 0, headers })
 }
 
-/** 生成一个 drop-in 的 fetch 替代（走代理），返回标准 Response */
+/** 生成一个 drop-in 的 fetch 替代（走代理），返回标准 Response。
+ *
+ * 连接复用：早期实现每次请求都新建 TCP + CONNECT + TLS，一个小文件付一次
+ * 完整握手 —— 3598 个素材文件在 200–400ms 高延迟线路上，握手开销能吃掉
+ * 大半时间。现在用 keep-alive 的 Agent 池化隧道连接：同一个目标 host 复用
+ * 最早的握手（普通 for-of 循环语义不变，调用方无感）。切换代理配置时调用
+ * `proxyFetch.destroy()` 归还旧池里的连接。
+ */
 export function makeProxyFetch(proxy) {
   const isSocks = proxy.protocol === 'socks5'
+  const agentOptions = { keepAlive: true, keepAliveMsecs: 15000, maxSockets: Infinity, maxFreeSockets: 64 }
+
+  // HTTPS 目标：Agent 负责接管 CONNECT / SOCKS 隧道，然后在其上包一层 TLS；
+  // TLSSocket 由 Agent 池化，同一目标的后续请求直接复用握手结果。
+  const httpsAgent = new https.Agent(agentOptions)
+  httpsAgent.createConnection = (options, callback) => {
+    const host = options.servername || options.host
+    const port = Number(options.port) || 443
+    ;(isSocks ? socks5Connect(proxy, host, port) : httpConnect(proxy, host, port)).then(
+      (socket) => callback(null, tls.connect({ socket, servername: host })),
+      (error) => callback(error)
+    )
+  }
+
+  // 明文 HTTP + HTTP 代理：请求直接发到代理端口（绝对 URI 形式），标准池化。
+  const plainAgent = new http.Agent(agentOptions)
+
+  // 明文 HTTP + SOCKS5：先把隧道拨到目标端口，请求目标 host 本身。
+  const tunnelAgent = isSocks
+    ? (() => {
+        const agent = new http.Agent(agentOptions)
+        agent.createConnection = (options, callback) => {
+          socks5Connect(proxy, options.host, Number(options.port) || 80).then(
+            (socket) => callback(null, socket),
+            (error) => callback(error)
+          )
+        }
+        return agent
+      })()
+    : null
 
   function singleRequest(urlStr, init) {
     return new Promise((resolve, reject) => {
@@ -144,53 +182,52 @@ export function makeProxyFetch(proxy) {
       let req
       const wireSignal = (r) => {
         if (!init.signal) return
-        if (init.signal.aborted) { r.destroy(new Error('请求已取消')); return }
-        init.signal.addEventListener('abort', () => r.destroy(new Error('请求已取消')), { once: true })
+        const onDestroy = () => r.destroy(new Error('请求已取消'))
+        if (init.signal.aborted) { onDestroy(); return }
+        // 数千个请求共用同一个任务 signal：请求结束（close）后必须摘掉监听，
+        // 否则监听数会一直涨到 MaxListeners 告警。
+        init.signal.addEventListener('abort', onDestroy, { once: true })
+        r.on('close', () => init.signal.removeEventListener('abort', onDestroy))
       }
 
-      const runPlain = (socket) => {
-        req = http.request({
-          createConnection: () => socket,
+      const finish = (r) => { req = r; wireSignal(r); r.on('error', reject); r.end() }
+
+      if (httpsTarget) {
+        finish(https.request({
           host: targetHost,
           port: targetPort,
           method,
           path: url.pathname + url.search,
-          headers
-        }, (res) => resolve(buildResponse(res)))
-        req.on('error', reject)
-        wireSignal(req)
-        req.end()
+          headers,
+          agent: httpsAgent
+        }, (res) => resolve(buildResponse(res))))
+        return
       }
-
-      const runTls = (tunnel) => {
-        const tlsSock = tls.connect({ socket: tunnel, servername: targetHost })
-        tlsSock.once('secureConnect', () => runPlain(tlsSock))
-        tlsSock.once('error', reject)
-      }
-
-      if (httpsTarget) {
-        const tunnelP = isSocks ? socks5Connect(proxy, targetHost, targetPort) : httpConnect(proxy, targetHost, targetPort)
-        tunnelP.then(runTls).catch(reject)
-      } else if (isSocks) {
-        socks5Connect(proxy, targetHost, targetPort).then(runPlain).catch(reject)
-      } else {
-        // 明文 HTTP 走 HTTP 代理的绝对 URI
-        const authHeader = proxy.auth ? { 'Proxy-Authorization': 'Basic ' + Buffer.from(proxy.auth).toString('base64') } : {}
-        req = http.request({
-          host: proxy.host,
-          port: proxy.port,
+      if (isSocks && tunnelAgent) {
+        finish(http.request({
+          host: targetHost,
+          port: targetPort,
           method,
-          path: urlStr,
-          headers: { ...headers, Host: url.host, ...authHeader }
-        }, (res) => resolve(buildResponse(res)))
-        req.on('error', reject)
-        wireSignal(req)
-        req.end()
+          path: url.pathname + url.search,
+          headers,
+          agent: tunnelAgent
+        }, (res) => resolve(buildResponse(res))))
+        return
       }
+      // 明文 HTTP 走 HTTP 代理的绝对 URI
+      const authHeader = proxy.auth ? { 'Proxy-Authorization': 'Basic ' + Buffer.from(proxy.auth).toString('base64') } : {}
+      finish(http.request({
+        host: proxy.host,
+        port: proxy.port,
+        method,
+        path: urlStr,
+        headers: { ...headers, Host: url.host, ...authHeader },
+        agent: plainAgent
+      }, (res) => resolve(buildResponse(res))))
     })
   }
 
-  return async function proxyFetch(input, init = {}) {
+  async function proxyFetch(input, init = {}) {
     let current = String(input)
     for (let i = 0; i <= 10; i++) {
       const res = await singleRequest(current, init)
@@ -205,4 +242,12 @@ export function makeProxyFetch(proxy) {
     }
     throw new Error('重定向次数过多')
   }
+  proxyFetch.destroy = () => {
+    // destroy 会关闭池内所有空闲连接；正在使用的连接归 Node 的
+    // “使用中不复用”语义，等响应结束后自然销毁。
+    httpsAgent.destroy()
+    plainAgent.destroy()
+    tunnelAgent?.destroy()
+  }
+  return proxyFetch
 }

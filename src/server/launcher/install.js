@@ -40,8 +40,8 @@ import {
   BMCL_MAVEN
 } from './meta.js'
 import { collectLibraries, normalizeOs, requiredJavaMajor } from './launch-plan.js'
-import { downloadFromMirrors, fetchToFile, pickFastestSource, runPool, sha1File } from './download.js'
-import { hostOf } from './source-select.js'
+import { downloadFromMirrors, fetchToFile, pickFastestSource, runPool, runPoolAdaptive, sha1File } from './download.js'
+import { hostOf, knownSpeed } from './source-select.js'
 import { nextSpeed } from './speed-meter.js'
 import { pickJava } from './java.js'
 import {
@@ -936,7 +936,13 @@ async function downloadLibraries(job, effective, paths, { source, from, to }) {
     done++
     if (done % 40 === 0 || done === list.length) job.log(`依赖库 ${done}/${list.length}`)
     if (!total) progressIn(job, from, to, done / list.length, `依赖库 ${done}/${list.length}`)
-  }, Math.max(8, Math.min(32, (Number(getSettings().concurrency) || 8) * 2)), job.signal)
+  }, {
+    // 库文件单条连接也常常被限速，慢时同样按 2.5 MB/s 目标自动加连接（最多 64 条）。
+    start: Math.max(8, Math.min(32, (Number(getSettings().concurrency) || 8) * 2)),
+    max: 64,
+    counter,
+    signal: job.signal
+  })
   job.log(`依赖库准备完成（${list.length} 个）`, 'ok')
 }
 
@@ -1011,11 +1017,21 @@ async function downloadAssets(job, root, inst, effective, { source, from, to }) 
   let done = 0
   let lastLog = 0
   job.phaseLabel('下载资源文件', `${entries.length} 个资源，约 ${Math.round(total / 1048576)} MB`)
-  // 素材大多是几十 KB 的小文件，瓶颈是请求延迟而不是单连接带宽：
-  // 并发开到 16–64，大文件再叠加分段线程，才能跑满线路。
-  const concurrency = Math.max(16, Math.min(64, (Number(getSettings().concurrency) || 8) * 4))
+  // 素材是几十 KB 的小文件，瓶颈是「每条连接的吞吐 × 连接数」，不是单文件带宽：
+  // 起并发 = 用户并发 ×4（16–64），整体速度低于 2.5 MB/s 时自动加到 96 条；
+  // 镜像限流（429）期间暂停加连接并小幅回退，避免越压越限流。
+  const settings = getSettings()
+  const startConcurrency = Math.max(16, Math.min(64, (Number(settings.concurrency) || 8) * 4))
+  // 限流感知：按素材候选的主镜像判断 —— knownSpeed 返回 0 表示该线路被 429 短暂封禁。
+  const sampleHash = String(entries[0]?.[1]?.hash || '')
+  const mirrorHold = (source || settings.source) === 'auto' && sampleHash
+    ? () => {
+        const urls = assetObjectUrls(sampleHash, { source })
+        return urls.length > 0 && !urls.every((url) => knownSpeed(url) !== 0)
+      }
+    : null
   await probeAssetSource(job, entries, { source })
-  await runPool(entries, async ([name, value]) => {
+  await runPoolAdaptive(entries, async ([name, value]) => {
     const hash = String(value.hash || '')
     const dest = path.join(root, 'assets', 'objects', hash.slice(0, 2), hash)
     let last = 0
@@ -1040,7 +1056,13 @@ async function downloadAssets(job, root, inst, effective, { source, from, to }) 
       lastLog = now
       job.log(`资源文件 ${done}/${entries.length}`)
     }
-  }, concurrency, job.signal)
+  }, {
+    start: startConcurrency,
+    max: 96,
+    counter,
+    signal: job.signal,
+    canGrow: mirrorHold || undefined
+  })
   job.log(`资源文件准备完成（${entries.length} 个）`, 'ok')
 
   // Legacy asset layouts.
@@ -1685,7 +1707,7 @@ async function downloadModrinthPackFiles(job, index, gameDir, { from, to, phase 
   }
   const total = files.reduce((sum, item) => sum + (Number(item.fileSize) || 0), 0)
   let done = 0
-  let bytes = 0
+  const counter = { received: 0 }
   await runPool(files, async (item) => {
     job.signal.throwIfAborted()
     const rel = String(item.path || '').replace(/\\/g, '/').replace(/^\/+/, '')
@@ -1719,9 +1741,9 @@ async function downloadModrinthPackFiles(job, index, gameDir, { from, to, phase 
             onProgress: ({ received }) => {
               const delta = Math.max(0, received - last)
               last = received
-              bytes += delta
-              if (total) progressIn(job, from, to, bytes / total, `${noun} ${done + 1}/${files.length} · ${path.basename(rel)}`)
-              job.bytes(bytes, total)
+              counter.received += delta
+              if (total) progressIn(job, from, to, counter.received / total, `${noun} ${done + 1}/${files.length} · ${path.basename(rel)}`)
+              job.bytes(counter.received, total)
             }
           })
           const digest = crypto.createHash(algorithm)
@@ -1746,7 +1768,13 @@ async function downloadModrinthPackFiles(job, index, gameDir, { from, to, phase 
     if (lastError) throw new Error(`整合包文件 ${rel} 下载失败：${lastError.message}`)
     done++
     if (done % 10 === 0 || done === files.length) job.log(`${noun} ${done}/${files.length}`)
-  }, getSettings().concurrency, job.signal)
+  }, {
+    // Modrinth 整合包动辄几百个小文件：起并发 8–24，整体慢时自动加到 64 条。
+    start: Math.max(8, Math.min(24, Number(getSettings().concurrency) || 8)),
+    max: 64,
+    counter,
+    signal: job.signal
+  })
   job.log(`${noun}下载完成（${files.length} 个）`, 'ok')
   return done
 }
@@ -1793,7 +1821,7 @@ async function downloadCurseForgePackFiles(job, meta, paths, { from, to, phase =
       apiKey: apiKey || store.get('settings', {})?.community?.cfApiKey || '',
       threads: Math.max(1, Math.min(16, Number(settings.threads) || 4)),
       retries: Number(settings.retries) || 0,
-      concurrency: Math.max(4, Math.min(12, Number(settings.concurrency) || 8))
+      concurrency: Math.max(4, Math.min(16, Number(settings.concurrency) || 8))
     })
     // 只缺光影 / 资源包时安装继续：把清单写进实例目录并在完成文案里点出来。
     if (Array.isArray(result?.blocked) && result.blocked.length) {

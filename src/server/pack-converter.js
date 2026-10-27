@@ -10,6 +10,7 @@ import { applyServerCompatibility, serverRemovalReason } from './server-compatib
 import { resolveDownload, listLoaderVersions } from './servercore.js'
 import * as community from './community.js'
 import { downloadVerified } from './verified-download.js'
+import { runPoolAdaptive } from './launcher/download.js'
 import { detectPackRuntime, mergeRuntime, findPackRoot } from './pack-runtime.js'
 export { detectPackRuntime } from './pack-runtime.js'
 import { promisify } from 'node:util'
@@ -261,12 +262,21 @@ async function hydrateModrinthFiles(root, onProgress, signal) {
   const indexPath = path.join(root, 'modrinth.index.json')
   const index = await readJson(indexPath)
   if (!index || !Array.isArray(index.files) || !index.files.length) return { downloaded: 0, skipped: 0 }
-  let downloaded = 0
+  // 并行下载：整合包动辄几百个 mod 文件，串行逐个下载在按连接限速的 CDN 上
+  // 非常慢；起并发 8，整体慢时自动加到 48 条。
+  const files = index.files
+  const count = files.length
+  const counter = { received: 0 }
+  let done = 0
   let skipped = 0
-  for (let i = 0; i < index.files.length; i++) {
+  const reportOne = (received, totalRel, label) => {
+    // 进度按「已完成文件数 + 当前文件字节数」折算，避免并行阶段进度条来回跳。
+    const itemProgress = Number.isFinite(totalRel) && totalRel > 0 ? Math.min(1, received / totalRel) : 0
+    report(onProgress, 'mods-download', 28 + Math.min(count, done) / count * 15 + itemProgress * (15 / count), label)
+  }
+  await runPoolAdaptive(files, async (item, i) => {
     signal?.throwIfAborted()
-    const item = index.files[i]
-    if (item.env?.server === 'unsupported') { skipped++; continue }
+    if (item.env?.server === 'unsupported') { skipped++; return }
     const rel = safeRelativeName(item.path)
     if (!rel) throw new Error(`Modrinth 索引包含非法文件路径：${item.path}`)
     const target = path.join(root, ...rel.split('/'))
@@ -276,7 +286,7 @@ async function hydrateModrinthFiles(root, onProgress, signal) {
     if (fs.existsSync(target)) {
       const digest = crypto.createHash(algorithm)
       for await (const chunk of fs.createReadStream(target)) { signal?.throwIfAborted(); digest.update(chunk) }
-      if (digest.digest('hex').toLowerCase() === String(hashes[algorithm]).toLowerCase()) { skipped++; continue }
+      if (digest.digest('hex').toLowerCase() === String(hashes[algorithm]).toLowerCase()) { skipped++; return }
     }
     const urls = Array.isArray(item.downloads) ? item.downloads : []
     if (!urls.length) throw new Error(`Modrinth 索引缺少下载地址：${rel}`)
@@ -285,16 +295,16 @@ async function hydrateModrinthFiles(root, onProgress, signal) {
     for (const url of urls) {
       try {
         await downloadVerified(url, target, { signal, size: item.fileSize, hash: hashes[algorithm], algorithm, maxBytes: 512 * 1024 ** 2,
-          onProgress: ({ received, total }) => report(onProgress, 'mods-download', 28 + i / index.files.length * 15,
-            `Modrinth ${i + 1}/${index.files.length}：${path.basename(rel)} · 已下载 ${Math.round(received / 1024)} KB${total ? ` / ${Math.round(total / 1024)} KB` : ''}`) })
+          onProgress: ({ received, total }) => reportOne(Number(received), Number(total) || Number(item.fileSize) || 0,
+            `Modrinth ${Math.min(count, done + 1)}/${count}：${path.basename(rel)} · 已下载 ${Math.round(received / 1024)} KB${total ? ` / ${Math.round(total / 1024)} KB` : ''}`) })
         complete = true; break
       } catch (e) { signal?.throwIfAborted(); lastError = e }
     }
     if (!complete) throw new Error(`下载 Modrinth 文件失败：${rel}${lastError ? `（${lastError.message}）` : ''}`)
-    downloaded++
-    report(onProgress, 'mods-download', 28 + ((i + 1) / index.files.length) * 15, `正在下载 mod ${i + 1}/${index.files.length}：${path.basename(rel)}`)
-  }
-  return { downloaded, skipped }
+    done++
+    report(onProgress, 'mods-download', 28 + Math.min(count, done) / count * 15, `正在下载 mod ${Math.min(count, done + 1)}/${count}：${path.basename(rel)}`)
+  }, { start: 8, max: 48, counter, signal })
+  return { downloaded: done, skipped }
 }
 
 async function findFile(root, predicate, depth = 0) {

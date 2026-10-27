@@ -22,7 +22,6 @@ const MAX_THREADS = 16
 // 很多 CDN 会按单条连接限速（实测 Modrinth CDN 单连接约 50 KB/s）。
 // 用户设置的是“起始连接数”，下载过程中会在慢速时自动加连接，最多到这里。
 const MAX_ADAPTIVE_THREADS = 32
-const MAX_GLOBAL_RANGE_REQUESTS = 64
 const ADAPTIVE_GROW_MS = 2500
 const ADAPTIVE_TARGET_BPS = 1.5 * 1024 * 1024
 const PROBE_BYTES = 256 * 1024
@@ -30,6 +29,8 @@ const PROBE_TIMEOUT = 6000
 const RANGE_PROBE_TIMEOUT = 15000
 
 // 全局分段连接闸门：多个文件同时自适应加速时，不至于一次打开几百条连接。
+// 素材池的小文件不走这条闸门（它们是单连接），只有大文件的 Range 分段计入。
+const MAX_GLOBAL_RANGE_REQUESTS = 96
 let activeRangeRequests = 0
 const rangeWaiters = []
 
@@ -536,6 +537,87 @@ export async function runPool(items, worker, concurrency = 8, signal) {
   const rejected = settled.find((item) => item.status === 'rejected')
   if (rejected) throw rejected.reason
   if (failed) throw failed
+}
+
+/**
+ * 自适应并发池：和 runPool 一样逐个领取任务，但并发数不是固定的 ——
+ *
+ * 启动器里成千上万个小文件（素材 / 依赖库 / 整合包文件）的瓶颈是
+ * 「每条连接的吞吐 × 连接数」。固定 32 条连接在按连接限速的 CDN 上
+ * 只能跑到 300 KB/s，但继续开到 64 / 96 条又可能触发镜像的 429 限流。
+ * 所以这里照搬大文件分段下载的思路：每 `sampleMs` 采样一次总吞吐，
+ * 低于 `targetBps` 就按 1.5× 加连接；调用方发现限流（429）时返回 false，
+ * 池子会暂停加连接并向下回退，避免越压越限流。
+ *
+ * 失败语义与 runPool 一致：第一个抛错的任务会让整个池子尽快失败。
+ * `counter.received` 由调用方在自己的进度回调里累加（字节单调递增）。
+ */
+export async function runPoolAdaptive(items, worker, {
+  start = 8,
+  max = 32,
+  counter = null,
+  targetBps = 2.5 * 1024 ** 2,
+  sampleMs = 2500,
+  signal,
+  canGrow = null
+} = {}) {
+  const list = Array.isArray(items) ? [...items] : [...items]
+  if (!list.length) return
+  const cap = Math.max(1, Math.round(Number(max) || 32))
+  let wanted = Math.max(1, Math.min(cap, Math.round(Number(start) || 8)))
+  const floor = wanted
+  let index = 0
+  let live = 0
+  let failed = null
+  let finishPool = null
+  const settled = new Promise((resolve) => { finishPool = resolve })
+  const settleIfIdle = () => { if (failed || live === 0) finishPool() }
+  const launch = () => {
+    if (failed) return
+    while (live < wanted && index < list.length) {
+      const item = list[index++]
+      live++
+      Promise.resolve().then(() => worker(item, index - 1)).then(() => {
+        live--
+        settleIfIdle()
+        launch()
+      }, (error) => {
+        live--
+        if (!failed) failed = error || new Error('任务失败')
+        settleIfIdle()
+        launch()
+      })
+    }
+    settleIfIdle()
+  }
+  let sampleBytes = 0
+  let sampleAt = Date.now()
+  const grow = setInterval(() => {
+    if (failed || index >= list.length) return
+    const nowAt = Date.now()
+    const elapsed = Math.max(0.5, (nowAt - sampleAt) / 1000)
+    const bytes = Number(counter?.received)
+    const known = Number.isFinite(bytes)
+    const speed = known ? Math.max(0, (bytes - sampleBytes) / elapsed) : 0
+    sampleBytes = known ? bytes : 0
+    sampleAt = nowAt
+    // 限流（比如 BMCLAPI 的短暂 429）期间不加连接，并小幅回退；
+    // 上面的下载逻辑自己会按已知速度换线路。
+    if (typeof canGrow === 'function' && !canGrow()) {
+      wanted = Math.max(floor, Math.floor(wanted * 0.8))
+      return
+    }
+    if (!known || speed >= targetBps || wanted >= cap) return
+    wanted = Math.min(cap, wanted + Math.max(2, Math.ceil(wanted / 2)))
+  }, Math.max(500, Number(sampleMs) || 2500))
+  grow.unref?.()
+  try {
+    launch()
+    await settled
+    if (failed) throw failed
+  } finally {
+    clearInterval(grow)
+  }
 }
 
 /** Best-effort directory size (used for instance summaries). */
