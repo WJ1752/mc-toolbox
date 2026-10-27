@@ -19,9 +19,46 @@ const SEGMENT_MIN_BYTES = 4 * 1024 * 1024
 const CHUNK_MIN = 1024 * 1024
 const CHUNK_MAX = 8 * 1024 * 1024
 const MAX_THREADS = 16
+// 很多 CDN 会按单条连接限速（实测 Modrinth CDN 单连接约 50 KB/s）。
+// 用户设置的是“起始连接数”，下载过程中会在慢速时自动加连接，最多到这里。
+const MAX_ADAPTIVE_THREADS = 32
+const MAX_GLOBAL_RANGE_REQUESTS = 64
+const ADAPTIVE_GROW_MS = 2500
+const ADAPTIVE_TARGET_BPS = 1.5 * 1024 * 1024
 const PROBE_BYTES = 256 * 1024
 const PROBE_TIMEOUT = 6000
 const RANGE_PROBE_TIMEOUT = 15000
+
+// 全局分段连接闸门：多个文件同时自适应加速时，不至于一次打开几百条连接。
+let activeRangeRequests = 0
+const rangeWaiters = []
+
+function releaseRangeSlot() {
+  activeRangeRequests = Math.max(0, activeRangeRequests - 1)
+  const next = rangeWaiters.shift()
+  if (!next) return
+  next.signal?.removeEventListener?.('abort', next.onAbort)
+  activeRangeRequests++
+  next.resolve(releaseRangeSlot)
+}
+
+function acquireRangeSlot(signal) {
+  if (signal?.aborted) return Promise.reject(signal.reason || new Error('已取消'))
+  if (activeRangeRequests < MAX_GLOBAL_RANGE_REQUESTS) {
+    activeRangeRequests++
+    return Promise.resolve(releaseRangeSlot)
+  }
+  return new Promise((resolve, reject) => {
+    const waiter = { resolve, reject, signal, onAbort: null }
+    waiter.onAbort = () => {
+      const index = rangeWaiters.indexOf(waiter)
+      if (index >= 0) rangeWaiters.splice(index, 1)
+      reject(signal.reason || new Error('已取消'))
+    }
+    signal?.addEventListener?.('abort', waiter.onAbort, { once: true })
+    rangeWaiters.push(waiter)
+  })
+}
 
 export async function sha1File(file) {
   const hash = crypto.createHash('sha1')
@@ -186,9 +223,18 @@ async function writeAll(handle, buffer, position) {
 /**
  * 分段下载：把文件切成 1–8 MB 的块，用 N 个连接并行取块并写入指定偏移。
  * 块是动态领取的（谁先完成谁拿下一块），慢连接不会拖住整条尾巴。
+ *
+ * 很多 CDN 按“单连接”限速，固定 4 条连接仍然只有 200 KB/s。这里在下载
+ * 过程中按 2.5 秒采样：总吞吐低于 1.5 MB/s 就逐步加连接，最多 32 条；
+ * 同时用全局闸门把整个进程的 Range 请求限制在 64 条以内。
  */
 async function downloadRanged({ url, partial, total, threads, signal, headers = {}, onProgress, maxBytes }) {
-  const chunkSize = Math.max(CHUNK_MIN, Math.min(CHUNK_MAX, Math.ceil(total / (threads * 2))))
+  const initial = Math.max(1, Math.min(MAX_THREADS, Number(threads) || 1))
+  const cap = initial <= 1
+    ? 1
+    : Math.max(initial, Math.min(MAX_ADAPTIVE_THREADS, Math.ceil(total / CHUNK_MIN)))
+  // 块数至少 32 个，给后续增加连接留出余量；大文件仍用 8 MB 块控制请求数。
+  const chunkSize = Math.max(CHUNK_MIN, Math.min(CHUNK_MAX, Math.ceil(total / Math.max(32, initial * 4))))
   const chunks = []
   for (let start = 0; start < total; start += chunkSize) {
     chunks.push({ start, end: Math.min(total - 1, start + chunkSize - 1) })
@@ -199,16 +245,28 @@ async function downloadRanged({ url, partial, total, threads, signal, headers = 
   let received = 0
   let lastAt = Date.now()
   let nextIndex = 0
+  let active = 0
+  let workersWanted = initial
+  let failure = null
+  let settled = false
+  let finishDownload = null
+  const finished = new Promise((resolve) => { finishDownload = resolve })
   const watchdog = setInterval(() => {
     if (Date.now() - lastAt > STALL_MS) abort.abort(new Error('下载超时：30 秒没有收到数据'))
   }, 1000)
-  const worker = async () => {
-    for (;;) {
-      if (combined.aborted) throw combined.reason || new Error('已取消')
-      const index = nextIndex++
-      if (index >= chunks.length) return
-      const { start, end } = chunks[index]
-      const expected = end - start + 1
+
+  const finishIfIdle = () => {
+    if (!settled && active === 0 && (failure || nextIndex >= chunks.length)) {
+      settled = true
+      finishDownload()
+    }
+  }
+
+  const runChunk = async ({ start, end }) => {
+    const expected = end - start + 1
+    let release = null
+    try {
+      release = await acquireRangeSlot(combined)
       const response = await httpFetch(url, {
         headers: { ...headers, Range: `bytes=${start}-${end}` },
         signal: combined,
@@ -239,10 +297,53 @@ async function downloadRanged({ url, partial, total, threads, signal, headers = 
         onProgress?.({ received, total })
       }
       if (pos !== end + 1) throw new Error(`分段下载不完整（${pos - start} / ${expected} 字节）`)
+    } finally {
+      release?.()
     }
   }
+
+  const launch = () => {
+    if (failure) return
+    while (active < workersWanted && nextIndex < chunks.length) {
+      const chunk = chunks[nextIndex++]
+      active++
+      runChunk(chunk).then(() => {
+        active--
+        lastAt = Date.now()
+        launch()
+        finishIfIdle()
+      }, (error) => {
+        active--
+        if (!failure) {
+          failure = error
+          abort.abort(error)
+        }
+        finishIfIdle()
+      })
+    }
+    finishIfIdle()
+  }
+
+  let sampleBytes = 0
+  let sampleAt = Date.now()
+  const grow = setInterval(() => {
+    if (failure || nextIndex >= chunks.length) return
+    const nowAt = Date.now()
+    const elapsed = Math.max(0.5, (nowAt - sampleAt) / 1000)
+    const speed = (received - sampleBytes) / elapsed
+    sampleBytes = received
+    sampleAt = nowAt
+    if (speed >= ADAPTIVE_TARGET_BPS || workersWanted >= cap) return
+    workersWanted = Math.min(cap, workersWanted + Math.max(2, Math.ceil(workersWanted / 2)))
+    lastAt = nowAt
+    launch()
+  }, ADAPTIVE_GROW_MS)
+  grow.unref?.()
+
   try {
-    await Promise.all(Array.from({ length: Math.min(threads, chunks.length) }, () => worker()))
+    launch()
+    await finished
+    if (failure) throw failure
     if (received !== total) throw new Error(`分段下载不完整（${received} / ${total} 字节）`)
     return received
   } catch (error) {
@@ -252,6 +353,7 @@ async function downloadRanged({ url, partial, total, threads, signal, headers = 
     throw error
   } finally {
     clearInterval(watchdog)
+    clearInterval(grow)
     await handle.close().catch(() => {})
   }
 }

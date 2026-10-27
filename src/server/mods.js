@@ -4,6 +4,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { readJarEntries } from './zip.js'
 import { classAnnotations } from './class-annotations.js'
+import { DATA_DIR } from './paths.js'
 
 const META_FILES = [
   'fabric.mod.json',
@@ -12,6 +13,103 @@ const META_FILES = [
   'META-INF/neoforge.mods.toml',
   'mcmod.info'
 ]
+// 一次打开 jar 需要读取的固定条目：元数据、Manifest 与 jar-in-jar 清单。
+// 过去 readModMeta 先读元数据、再读 Manifest/内嵌清单，每个模组要解析两遍
+// ZIP 中央目录；模组一多（300+）光是重复索引就要好几秒。
+const TOP_LEVEL_FILES = [
+  ...META_FILES,
+  'META-INF/MANIFEST.MF',
+  'META-INF/jarjar/metadata.json',
+  'META-INF/jars/metadata.json',
+  'META-INF/services/cpw.mods.modlauncher.api.ITransformationService'
+]
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i
+const META_CACHE_LIMIT = 5000
+const META_CACHE_VERSION = 2
+
+/** 模组图标字段可能是字符串，也可能是 Fabric 的 { small, large } 对象。 */
+function iconPathOf(value) {
+  let raw = ''
+  if (typeof value === 'string') raw = value
+  else if (value && typeof value === 'object') raw = value.large || value.small || value.icon || ''
+  const text = String(raw || '').trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '')
+  if (!text || text.includes('..') || /^[a-z][a-z0-9+.-]*:/i.test(text) || !IMAGE_EXT.test(text)) return ''
+  return text
+}
+
+/** 文件名/元数据缓存键：内容没变就不重新解压 JAR。 */
+function metaCacheKey(filePath, stat, runtime = {}) {
+  const rt = `${runtime.mc || ''}|${runtime.loader || ''}|${runtime.loaderVersion || ''}`
+  return `${process.platform === 'win32' ? path.resolve(filePath).toLowerCase() : path.resolve(filePath)}|${stat.size}|${stat.mtimeMs}|${rt}`
+}
+
+const metaCache = new Map()
+let diskMeta = null
+let diskMetaPath = ''
+let diskMetaTimer = null
+
+function metaCacheFile() {
+  return path.join(DATA_DIR, 'cache', 'mod-meta-v2.json')
+}
+
+/** 磁盘缓存让启动器重启后也不必重新解压 300+ 个 JAR，键里带大小/mtime。 */
+function loadDiskMeta() {
+  const file = metaCacheFile()
+  if (diskMeta && diskMetaPath === file) return diskMeta
+  diskMetaPath = file
+  diskMeta = new Map()
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+    if (raw?.version !== META_CACHE_VERSION) return diskMeta
+    for (const [key, value] of Object.entries(raw.items || {})) {
+      if (value && typeof value === 'object') diskMeta.set(key, value)
+    }
+  } catch { /* 第一次运行 / 缓存损坏 */ }
+  return diskMeta
+}
+
+function scheduleDiskMetaSave() {
+  if (diskMetaTimer) return
+  diskMetaTimer = setTimeout(() => {
+    diskMetaTimer = null
+    const map = diskMeta || new Map()
+    // 只保留最近使用的条目，避免临时目录 / 测试路径无限堆积。
+    const entries = [...map.entries()].slice(-META_CACHE_LIMIT)
+    const items = Object.fromEntries(entries)
+    const file = diskMetaPath || metaCacheFile()
+    fsp.mkdir(path.dirname(file), { recursive: true })
+      .then(() => fsp.writeFile(file + '.tmp', JSON.stringify({ version: META_CACHE_VERSION, items }), 'utf8'))
+      .then(() => fsp.rename(file + '.tmp', file))
+      .catch(() => {})
+  }, 1500)
+  diskMetaTimer.unref?.()
+}
+
+export function clearModMetaCache() {
+  metaCache.clear()
+  diskMeta = null
+  diskMetaPath = ''
+  if (diskMetaTimer) clearTimeout(diskMetaTimer)
+  diskMetaTimer = null
+}
+
+function cacheMeta(key, meta) {
+  if (metaCache.size >= META_CACHE_LIMIT) {
+    // Map 按插入顺序迭代：删掉最早的一批，保留最近扫描过的模组。
+    let drop = Math.max(1, Math.floor(META_CACHE_LIMIT / 10))
+    for (const old of metaCache.keys()) {
+      metaCache.delete(old)
+      if (--drop <= 0) break
+    }
+  }
+  metaCache.set(key, meta)
+  if (meta) {
+    const disk = loadDiskMeta()
+    disk.set(key, meta)
+    scheduleDiskMetaSave()
+  }
+  return meta
+}
 
 function jsonParseLoose(text) {
   try {
@@ -108,6 +206,7 @@ function parseFabricMeta(buf) {
     version: obj.version || null,
     loader: 'fabric',
     environment: obj.environment || '*',
+    icon: iconPathOf(obj.icon),
     dependencies: uniqueDependencies(dependencies)
   }
 }
@@ -136,6 +235,7 @@ function parseQuiltMeta(buf) {
     version: ql.version || null,
     loader: 'quilt',
     environment: obj.minecraft?.environment || '*',
+    icon: iconPathOf(meta.icon || ql.icon || obj.icon),
     dependencies: uniqueDependencies(dependencies)
   }
 }
@@ -163,7 +263,8 @@ function parseModsToml(buf, { neo = false } = {}) {
     mods.push({
       modid: id,
       name: tomlString(block, 'displayName') || id,
-      version: tomlString(block, 'version').replace(/\$\{[^}]+\}/g, '')
+      version: tomlString(block, 'version').replace(/\$\{[^}]+\}/g, ''),
+      logo: tomlString(block, 'logoFile')
     })
   }
   if (!mods.length) return null
@@ -196,6 +297,7 @@ function parseModsToml(buf, { neo = false } = {}) {
     version: mods[0].version || null,
     loader: isNeo ? 'neoforge' : 'forge',
     environment: '*',
+    icon: iconPathOf(mods.find((item) => item.logo)?.logo || ''),
     dependencies: uniqueDependencies(dependencies)
   }
 }
@@ -226,6 +328,7 @@ function parseMcmodInfo(buf) {
     version: first.version || null,
     loader: 'legacy-forge',
     environment: '*',
+    icon: iconPathOf(first.logoFile || first.logo || ''),
     modids: entries.map((item) => item?.modid || item?.modId).filter(Boolean),
     dependencies: uniqueDependencies(dependencies)
   }
@@ -295,12 +398,16 @@ function metaRank(file, runtime = {}) {
   return 9
 }
 
-async function readPrimaryModMeta(filePath, runtime = {}) {
-  const entries = await readJarEntries(filePath, META_FILES)
+async function readPrimaryModMeta(filePath, runtime = {}, prepared = null) {
+  // readModMeta 已经为 MANIFEST / 内嵌清单打开过同一个 jar 一次，这里复用
+  // 已读到的条目，避免每个模组重复解析 ZIP 中央目录。
+  const entries = prepared || await readJarEntries(filePath, META_FILES)
   // 同一个 jar 可能同时带 fabric.mod.json 与 META-INF/mods.toml（多加载器构建）。
   // 必须按当前实例的加载器选元数据；Forge 实例读 Fabric 的 depends 会凭空
   // 产生 fabric-api / fabric-lifecycle-events 等假依赖。
-  const ordered = Object.entries(entries).sort(([a], [b]) => metaRank(a, runtime) - metaRank(b, runtime))
+  const ordered = META_FILES
+    .map((name) => [name, entries[name]])
+    .sort(([a], [b]) => metaRank(a, runtime) - metaRank(b, runtime))
   for (const [file, buf] of ordered) {
     if (!buf) continue
     try {
@@ -334,7 +441,9 @@ async function readPrimaryModMeta(filePath, runtime = {}) {
 }
 
 export async function readModMeta(filePath, runtime = {}, depth = 0) {
-  let meta = await readPrimaryModMeta(filePath, runtime)
+  // 一次读取元数据 + MANIFEST + 内嵌清单；后续解析都复用这份 entries。
+  const entries = await readJarEntries(filePath, TOP_LEVEL_FILES)
+  let meta = await readPrimaryModMeta(filePath, runtime, entries)
   if (depth >= 3) return meta
   // 有些 fat jar（如 kotlinforforge-*-all.jar）本身没有 mods.toml，真正声明
   // modId 的是 META-INF/jarjar/ 下的子 jar；不能因为没有主元数据就跳过内嵌扫描。
@@ -352,14 +461,6 @@ export async function readModMeta(filePath, runtime = {}, depth = 0) {
       providedVersions: {}
     }
   }
-  const entries = await readJarEntries(filePath, [
-    'META-INF/MANIFEST.MF',
-    'fabric.mod.json',
-    'quilt.mod.json',
-    'META-INF/jarjar/metadata.json',
-    'META-INF/jars/metadata.json',
-    'META-INF/services/cpw.mods.modlauncher.api.ITransformationService'
-  ])
   const manifest = entries['META-INF/MANIFEST.MF']?.toString().replace(/\r?\n /g, '') || ''
   const loaderHints = []
   if (/^FMLCorePlugin:/im.test(manifest) || /^TweakClass:/im.test(manifest) || /^ContainedDeps:/im.test(manifest) || /^FMLModType:/im.test(manifest)) loaderHints.push('forge')
@@ -434,17 +535,37 @@ export async function readModMeta(filePath, runtime = {}, depth = 0) {
   return meta
 }
 
+async function mapLimit(items, limit, worker) {
+  const list = Array.isArray(items) ? items : [...items]
+  const out = new Array(list.length)
+  let next = 0
+  const width = Math.max(1, Math.min(list.length || 1, Number(limit) || 1))
+  const run = async () => {
+    for (;;) {
+      const index = next++
+      if (index >= list.length) return
+      out[index] = await worker(list[index], index)
+    }
+  }
+  await Promise.all(Array.from({ length: width }, run))
+  return out
+}
+
 export async function scanModsDir(dir, opts = {}) {
   const { recursive = true, includeDisabled = true } = opts
   // 整合包常把实例、.minecraft、mods 和分类子目录层层嵌套。
   // 保留上限避免误选用户目录时无限遍历，但默认深度足够覆盖常见启动器结构。
   const requestedDepth = Number(opts.maxDepth)
   const maxDepth = Number.isFinite(requestedDepth) ? Math.max(0, Math.min(64, requestedDepth)) : 24
-  if (!dir || !fs.existsSync(dir)) throw new Error('目录不存在：' + dir)
+  // 目录不存在时返回空列表，而不是把整个游戏目录当成“缺目录”重建出来：
+  // 模组页/共置页面触发的扫描是读操作，不应该在桌面上凭空创下文件夹。
+  if (!dir || !fs.existsSync(dir)) return []
   const stat = await fsp.stat(dir)
   if (!stat.isDirectory()) throw new Error('不是目录：' + dir)
 
-  const results = []
+  // 先收集文件，再按固定并发解析。旧实现边遍历边逐个 await readModMeta：
+  // 300+ 个模组时每个 JAR 都要等上一个读完，磁盘和 CPU 大部分时间在空转。
+  const files = []
   const walk = async (current, depth) => {
     const items = await fsp.readdir(current, { withFileTypes: true })
     for (const it of items) {
@@ -461,47 +582,83 @@ export async function scanModsDir(dir, opts = {}) {
       const isJar = lower.endsWith('.jar')
       const isDisabled = lower.endsWith('.jar.disabled')
       if (!isJar && !(includeDisabled && isDisabled)) continue
-
       const st = await fsp.stat(full).catch(() => null)
-      const meta = await readModMeta(full, opts.runtime).catch(() => null)
-      const stem = it.name.replace(/\.jar(?:\.disabled)?$/i, '')
-      const filenameModIds = [...new Set([
-        stem,
-        stem.split(/[-_ ](?=\d|mc\d|v?\d)/i)[0]
-      ].filter((value) => /^[A-Za-z][A-Za-z0-9_.-]{1,63}$/.test(value)).map((value) => value.toLowerCase()))]
-      const actualIds = [...new Set([
-        ...(meta?.modids || []),
-        ...(meta?.modid ? [meta.modid] : [])
-      ].filter(Boolean))]
-      const nestedIds = [...new Set(meta?.nestedModIds || [])]
-      // 依赖是否满足只看真实元数据（含内嵌 jar）。文件名推断只在完全没有元数据时兜底：
-      // xaerominimap-forge-... 这种文件名不是可靠的 modid，拿来当「已提供」会掩盖缺失。
-      const providedIds = [...new Set([...actualIds, ...nestedIds])]
-      results.push({
-        file: it.name,
+      files.push({
+        name: it.name,
         path: full,
         relPath: path.relative(dir, full),
         size: st ? st.size : 0,
         mtime: st ? st.mtimeMs : 0,
-        disabled: isDisabled,
-        modid: meta?.modid || null,
-        modids: actualIds.length ? actualIds : filenameModIds,
-        nestedModIds: nestedIds,
-        modIdHints: filenameModIds,
-        providedModIds: providedIds.length ? providedIds : filenameModIds,
-        name: meta?.name || it.name.replace(/\.jar(\.disabled)?$/i, ''),
-        version: meta?.version || null,
-        providedVersions: meta?.providedVersions || {},
-        loader: meta?.loader || null,
-        loaderHints: meta?.loaderHints || [],
-        environment: meta?.environment || '*',
-        dependencies: meta?.dependencies || [],
-        hasMeta: !!meta
+        disabled: isDisabled
       })
-      opts.onProgress?.({ done: results.length, file: it.name })
     }
   }
   await walk(dir, 0)
+  files.sort((a, b) => a.relPath.localeCompare(b.relPath))
+
+  const runtime = opts.runtime || {}
+  let done = 0
+  const requestedConcurrency = Number(opts.concurrency)
+  const concurrency = Number.isFinite(requestedConcurrency)
+    ? Math.max(1, Math.min(32, requestedConcurrency))
+    : 8
+  const parsed = await mapLimit(files, concurrency, async (entry) => {
+    opts.signal?.throwIfAborted()
+    const key = metaCacheKey(entry.path, { size: entry.size, mtimeMs: entry.mtime }, runtime)
+    let meta
+    if (metaCache.has(key)) {
+      meta = metaCache.get(key)
+    } else {
+      const persisted = loadDiskMeta().get(key)
+      if (persisted) {
+        meta = cacheMeta(key, persisted)
+      } else {
+        meta = await readModMeta(entry.path, runtime).catch(() => null)
+        cacheMeta(key, meta)
+      }
+    }
+    done++
+    opts.onProgress?.({ done, file: entry.name })
+    return { ...entry, meta }
+  })
+
+  const results = parsed.map(({ name, path: full, relPath, size, mtime, disabled, meta }) => {
+    const stem = name.replace(/\.jar(?:\.disabled)?$/i, '')
+    const filenameModIds = [...new Set([
+      stem,
+      stem.split(/[-_ ](?=\d|mc\d|v?\d)/i)[0]
+    ].filter((value) => /^[A-Za-z][A-Za-z0-9_.-]{1,63}$/.test(value)).map((value) => value.toLowerCase()))]
+    const actualIds = [...new Set([
+      ...(meta?.modids || []),
+      ...(meta?.modid ? [meta.modid] : [])
+    ].filter(Boolean))]
+    const nestedIds = [...new Set(meta?.nestedModIds || [])]
+    // 依赖是否满足只看真实元数据（含内嵌 jar）。文件名推断只在完全没有元数据时兜底：
+    // xaerominimap-forge-... 这种文件名不是可靠的 modid，拿来当「已提供」会掩盖缺失。
+    const providedIds = [...new Set([...actualIds, ...nestedIds])]
+    return {
+      file: name,
+      path: full,
+      relPath,
+      size,
+      mtime,
+      disabled,
+      modid: meta?.modid || null,
+      modids: actualIds.length ? actualIds : filenameModIds,
+      nestedModIds: nestedIds,
+      modIdHints: filenameModIds,
+      providedModIds: providedIds.length ? providedIds : filenameModIds,
+      name: meta?.name || name.replace(/\.jar(\.disabled)?$/i, ''),
+      version: meta?.version || null,
+      providedVersions: meta?.providedVersions || {},
+      loader: meta?.loader || null,
+      loaderHints: meta?.loaderHints || [],
+      environment: meta?.environment || '*',
+      dependencies: meta?.dependencies || [],
+      icon: meta?.icon || '',
+      hasMeta: !!meta
+    }
+  })
   results.sort((a, b) => a.relPath.localeCompare(b.relPath))
   return results
 }

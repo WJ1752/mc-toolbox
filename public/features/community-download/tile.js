@@ -582,6 +582,7 @@ function openDetail(item, { gameVersion = '', loader = '', onDownloaded = null }
           loader: (v.loaders || [])[0] || '',
           gameVersion: (v.gameVersions || [])[0] || '',
           type: item.type || projType || '',
+          icon: item.icon || '',
           source: item.source
         }
       })
@@ -1135,6 +1136,7 @@ function buildExpanded(container, ctx) {
             loader: (v.loaders || [])[0] || '',
             gameVersion: (v.gameVersions || [])[0] || '',
             type: item.type || '',
+            icon: item.icon || '',
             source: item.source
           }
         })

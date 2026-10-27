@@ -4,6 +4,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { instancePaths, findInstance } from './state.js'
 import { scanModsDir } from '../mods.js'
+import { readJarEntries } from '../zip.js'
 import { groupModDuplicates, analyzeModDuplicates, cleanupDuplicateMods } from './mod-dedupe.js'
 import { listWorlds } from '../saveeditor.js'
 import { inspectCrash } from './launch.js'
@@ -11,6 +12,17 @@ import { parse as nbtParse, write as nbtWrite, NbtNum } from '../nbt.js'
 import { dirSize } from './download.js'
 
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i
+const ICON_MAX_BYTES = 2 * 1024 * 1024
+const ICON_CACHE_LIMIT = 600
+const iconCache = new Map()
+
+const ICON_MIME = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif'
+}
 
 function pathIn(base, rel) {
   const raw = String(rel || '').replace(/\\/g, '/')
@@ -117,7 +129,6 @@ function modLoaderMatches(instanceLoader, modLoader) {
 
 export async function listMods(inst, { signal } = {}) {
   const paths = instancePaths(inst)
-  await fsp.mkdir(paths.modsDir, { recursive: true })
   const items = await scanModsDir(paths.modsDir, {
     recursive: true,
     includeDisabled: true,
@@ -185,6 +196,7 @@ export async function listMods(inst, { signal } = {}) {
         loaderMismatch: item.loaderMismatch === true,
         environment: item.environment,
         hasMeta: item.hasMeta,
+        icon: item.icon || '',
         duplicateGroup: hit?.group.id || '',
         duplicateKeep: hit?.member.keep === true,
         duplicateOf: hit && !hit.member.keep ? hit.group.keep : '',
@@ -197,7 +209,6 @@ export async function listMods(inst, { signal } = {}) {
 /** 完整扫描并计算重复模组报告（含同大小文件的内容哈希）。 */
 export async function findDuplicateMods(inst, { signal } = {}) {
   const paths = instancePaths(inst)
-  await fsp.mkdir(paths.modsDir, { recursive: true })
   const items = await scanModsDir(paths.modsDir, {
     recursive: true,
     includeDisabled: true,
@@ -238,6 +249,103 @@ export async function deleteMod(inst, relPath) {
   if (!fs.existsSync(file)) throw new Error('文件不存在')
   await fsp.rm(file, { recursive: false, force: true })
   return { ok: true }
+}
+
+/* ------------------------------------------------------------------ */
+/* Content icons                                                       */
+/* ------------------------------------------------------------------ */
+
+/** 图标条目只接受 jar/zip 内的相对路径；远程地址和 ../ 一律丢弃。 */
+function cleanIconEntry(value) {
+  const text = String(value || '').trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '')
+  if (!text || text.includes('..') || /^[a-z][a-z0-9+.-]*:/i.test(text) || !IMAGE_EXT.test(text)) return ''
+  return text
+}
+
+function iconMime(entry, data = null) {
+  // 很多模组把 JPEG 存成 logo.png。X-Content-Type-Options: nosniff 下
+  // 按扩展名返回 image/png 会让浏览器直接拒绝显示，所以优先看文件头。
+  if (Buffer.isBuffer(data)) {
+    if (data.length >= 8 && data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47) return 'image/png'
+    if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return 'image/jpeg'
+    if (data.length >= 6 && data.toString('ascii', 0, 4) === 'GIF8') return 'image/gif'
+    if (data.length >= 12 && data.toString('ascii', 0, 4) === 'RIFF' && data.toString('ascii', 8, 12) === 'WEBP') return 'image/webp'
+  }
+  return ICON_MIME[extType(entry)] || 'application/octet-stream'
+}
+
+function rememberIcon(key, value) {
+  if (iconCache.size >= ICON_CACHE_LIMIT) {
+    let drop = Math.max(1, Math.floor(ICON_CACHE_LIMIT / 10))
+    for (const old of iconCache.keys()) {
+      iconCache.delete(old)
+      if (--drop <= 0) break
+    }
+  }
+  iconCache.set(key, { at: Date.now(), value })
+  return value
+}
+
+/**
+ * 读取实例内容的封面图。
+ * - 模组：优先 metadata 里的 icon/logoFile，再尝试常见文件名；
+ * - 资源包：pack.png；
+ * - 光影：shaderpack.png / pack.png 等（不同光影包约定不一）。
+ * 找不到返回 null，由前端回退到类型图标，不影响列表本身。
+ */
+export async function readContentIcon(inst, type, name, { entry = '', modid = '' } = {}) {
+  const paths = instancePaths(inst)
+  const dirs = {
+    mods: paths.modsDir,
+    resourcepacks: paths.resourcePacksDir,
+    shaderpacks: paths.shaderPacksDir
+  }
+  const dir = dirs[type]
+  if (!dir) throw new Error('不支持的内容类型')
+  let target
+  try { target = pathIn(dir, name) } catch { return null }
+  const stat = await fsp.stat(target).catch(() => null)
+  if (!stat) return null
+  const safeModid = String(modid || '').toLowerCase().replace(/[^a-z0-9_.-]/g, '')
+  const preferred = cleanIconEntry(entry)
+  const candidates = []
+  if (preferred) candidates.push(preferred)
+  if (type === 'mods') {
+    if (safeModid) {
+      candidates.push(`assets/${safeModid}/icon.png`, `assets/${safeModid}/logo.png`)
+    }
+    candidates.push('icon.png', 'logo.png', 'pack.png')
+  } else if (type === 'resourcepacks') {
+    candidates.push('pack.png')
+  } else {
+    candidates.push('shaderpack.png', 'pack.png', 'icon.png', 'logo.png', 'shaders/shaderpack.png')
+  }
+  const unique = [...new Set(candidates.filter(Boolean))]
+  if (!unique.length) return null
+
+  const key = `${process.platform === 'win32' ? target.toLowerCase() : target}|${stat.size}|${stat.mtimeMs}|${type}|${unique.join('|')}`
+  const hit = iconCache.get(key)
+  if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.value
+
+  if (stat.isDirectory()) {
+    for (const candidate of unique) {
+      try {
+        const file = pathIn(target, candidate)
+        const fileStat = await fsp.stat(file).catch(() => null)
+        if (!fileStat?.isFile() || fileStat.size > ICON_MAX_BYTES) continue
+        const data = await fsp.readFile(file)
+        return rememberIcon(key, { data, mime: iconMime(candidate, data), entry: candidate })
+      } catch { /* 尝试下一个候选名称 */ }
+    }
+    return rememberIcon(key, null)
+  }
+
+  const found = await readJarEntries(target, unique, { maxBytes: ICON_MAX_BYTES * 2, maxEntries: unique.length })
+  for (const candidate of unique) {
+    const data = found[candidate]
+    if (data?.length) return rememberIcon(key, { data, mime: iconMime(candidate, data), entry: candidate })
+  }
+  return rememberIcon(key, null)
 }
 
 export async function writeUpload(inst, type, filename, buffer) {

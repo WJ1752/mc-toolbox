@@ -436,6 +436,26 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
     if (!buffer.length) throw new Error('没有收到文件内容')
     return await content.writeUpload(inst, type, name, buffer)
   })
+  on('GET', '/api/launcher/instances/:id/icon', async (_req, params, query, res) => {
+    const inst = instanceOf(params.id)
+    const icon = await content.readContentIcon(inst, String(query.type || 'mods'), String(query.name || ''), {
+      entry: query.entry || '',
+      modid: query.modid || ''
+    })
+    if (!icon) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end('icon not found')
+      return null
+    }
+    res.writeHead(200, {
+      'Content-Type': icon.mime,
+      'Content-Length': icon.data.length,
+      'Cache-Control': 'private, max-age=86400',
+      'X-Content-Type-Options': 'nosniff'
+    })
+    res.end(icon.data)
+    return null
+  })
   on('GET', '/api/launcher/instances/:id/file', async (_req, params, query, res) => {
     const inst = instanceOf(params.id)
     const scope = String(query.scope || 'screenshots')

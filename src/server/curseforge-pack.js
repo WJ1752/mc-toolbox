@@ -4,7 +4,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { RUNTIME_DIR } from './paths.js'
 import { httpFetch } from './http.js'
-import { downloadVerified } from './verified-download.js'
+import { fetchToFile } from './launcher/download.js'
 
 // CurseForge 清单里的 classId → 实例内目录。只列客户端整合包会用到的类型；
 // 未知类型跳过并记录，而不是让整个整合包安装失败。
@@ -21,7 +21,17 @@ const CLASS_FOLDERS = {
 const OPTIONAL_FOLDERS = new Set(['resourcepacks', 'shaderpacks', 'datapacks'])
 
 // Pin every download to the export's file ID; never substitute a newer mod.
-export async function hydrateCurseForgeFiles(root, onProgress, signal, { apiKey = '', cacheDir, fetcher = httpFetch, download = downloadVerified } = {}) {
+export async function hydrateCurseForgeFiles(root, onProgress, signal, {
+  apiKey = '',
+  cacheDir,
+  fetcher = httpFetch,
+  // 测试可替换下载器；生产默认走分段下载器。CurseForge 的 CDN 同样按连接限速，
+  // 旧的 downloadVerified 只有一条连接，大文件会长时间停在几十 KB/s。
+  download = null,
+  threads = 4,
+  retries = 0,
+  concurrency = 4
+} = {}) {
   const manifestPath = path.join(root, 'manifest.json')
   let raw
   try {
@@ -89,10 +99,12 @@ export async function hydrateCurseForgeFiles(root, onProgress, signal, { apiKey 
     return info
   }
 
-  const looksValid = async (file, sha) => {
+  const looksValid = async (file, sha, expectedSize = 0) => {
     try {
       const stat = await fsp.stat(file)
       if (!stat.isFile() || !stat.size) return false
+      // 大小不符时根本不用再算一遍 SHA-1；缓存文件与实例里的同名旧文件都能快速排除。
+      if (expectedSize > 0 && stat.size !== expectedSize) return false
       const digest = crypto.createHash('sha1')
       for await (const chunk of fsSync.createReadStream(file)) {
         signal?.throwIfAborted()
@@ -103,6 +115,21 @@ export async function hydrateCurseForgeFiles(root, onProgress, signal, { apiKey 
       return false
     }
   }
+
+  const downloadFile = download || (async (url, target, options) => {
+    await fetchToFile(url, target, {
+      sha1: options.hash || '',
+      expectedSize: Number(options.size) || 0,
+      threads: Math.max(1, Math.min(16, Number(threads) || 1)),
+      retries: Math.max(0, Number(retries) || 0),
+      signal: options.signal,
+      verify: true,
+      // CurseForge 单个文件通常不超过 1 GB；保持旧下载器的上限。
+      maxBytes: 1024 ** 3,
+      onProgress: options.onProgress
+    })
+    return target
+  })
 
   const worker = async () => {
     while (next < files.length) {
@@ -164,7 +191,7 @@ export async function hydrateCurseForgeFiles(root, onProgress, signal, { apiKey 
         ]
         let cached = ''
         for (const candidate of localCandidates) {
-          if (await looksValid(candidate, sha)) { cached = candidate; break }
+          if (await looksValid(candidate, sha, Number(meta.fileLength) || 0)) { cached = candidate; break }
         }
         if (!cached && !meta.downloadUrl) {
           // 作者禁止第三方启动器自动下载。用户若已手动放入同 SHA-1 的文件，
@@ -182,11 +209,18 @@ export async function hydrateCurseForgeFiles(root, onProgress, signal, { apiKey 
         }
         if (!cached) {
           cached = cacheFile
-          await download(meta.downloadUrl, cached, {
+          await downloadFile(meta.downloadUrl, cached, {
             signal,
             hash: sha,
             algorithm: 'sha1',
-            onProgress: ({ received, total }) => onProgress?.({ stage: 'mods-download', progress: 28 + done / files.length * 15, detail: `CurseForge ${done}/${files.length}：${meta.fileName} · ${Math.round(received / 1024)} / ${Math.round(total / 1024)} KB` })
+            size: Number(meta.fileLength) || 0,
+            onProgress: ({ received, total }) => onProgress?.({
+              stage: 'mods-download',
+              progress: 28 + done / files.length * 15,
+              detail: `CurseForge ${done}/${files.length}：${meta.fileName} · ${Math.round(received / 1024)} / ${Math.round((total || meta.fileLength) / 1024)} KB`,
+              received,
+              total
+            })
           })
         }
         await fsp.mkdir(path.join(root, folder), { recursive: true })
@@ -200,7 +234,7 @@ export async function hydrateCurseForgeFiles(root, onProgress, signal, { apiKey 
       onProgress?.({ stage: 'mods-download', progress: 28 + done / files.length * 15, detail: `已处理 CurseForge 文件 ${done}/${files.length}` })
     }
   }
-  const settled = await Promise.allSettled(Array.from({ length: 4 }, worker))
+  const settled = await Promise.allSettled(Array.from({ length: Math.max(1, Math.min(12, Number(concurrency) || 4)) }, worker))
   signal?.throwIfAborted()
   for (const r of settled) if (r.status === 'rejected') throw r.reason
   if (skipped.length) onProgress?.({ stage: 'mods-download', progress: 43, detail: `已跳过 ${skipped.length} 个未知类型文件：${skipped.slice(0, 3).join('、')}` })

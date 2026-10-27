@@ -25,6 +25,25 @@ const LAUNCHER_TYPE = {
 }
 const EXPORT_FORMAT = { mrpack: 'Modrinth · .mrpack', zip: '通用 · .zip' }
 const COMMUNITY_TYPE = { mod: '模组', resourcepack: '资源包', shader: '光影', modpack: '整合包', datapack: '数据包', servercore: '服务端核心' }
+const LAUNCHER_ICON = { install: 'package-down', pack: 'archive', repair: 'shield', update: 'refresh', export: 'save' }
+const COMMUNITY_ICON = { mod: 'puzzle', resourcepack: 'grid', shader: 'wand', modpack: 'archive', datapack: 'cube', servercore: 'chip' }
+
+/** 下载任务行图标：有项目封面就显示封面，否则显示任务/内容类型图标。 */
+function jobIcon(src, fallback, size = 15) {
+  const tile = h('span', { class: 'lp-mod-icon' }, icon(fallback, { size }))
+  const url = String(src || '').trim()
+  if (!url) return tile
+  const img = h('img', {
+    src: url,
+    alt: '',
+    loading: 'lazy',
+    decoding: 'async',
+    referrerpolicy: 'no-referrer'
+  })
+  img.addEventListener('error', () => img.remove(), { once: true })
+  tile.appendChild(img)
+  return tile
+}
 
 /** 任务类型 → 中文标签（导出任务由服务端 pack-export 提供 type: 'export'）。 */
 export function launcherTypeLabel(type) {
@@ -326,10 +345,10 @@ function buildView(ctx, container) {
     if (instanceVisible) actions.appendChild(btn('打开实例', { size: 'xs', variant: job.status === 'done' ? 'primary' : 'ghost', iconName: 'arrow-right', onClick: () => ctx.showInstance?.(job.instanceId) }))
     actions.appendChild(iconBtn('terminal', { size: 13, label: '查看任务日志', onClick: () => openLauncherLog(job) }))
     const sub = [job.phase, job.detail].filter(Boolean).join(' · ')
-    const iconName = job.type === 'update' ? 'refresh' : job.type === 'pack' ? 'archive' : job.type === 'export' ? 'save' : 'download'
+    const iconName = LAUNCHER_ICON[job.type] || 'download'
     const summary = [jobRowSummary(job), exportJobSummary(job)].filter(Boolean).join(' · ')
     return h('div', { class: 'lp-row lp-download-row' },
-      h('span', { class: 'lp-mod-icon' }, icon(iconName, { size: 15 })),
+      jobIcon(job.icon, iconName),
       h('div', { class: 'lp-mod-main' },
         h('div', { class: 'lp-mod-title' },
           h('b', { title: job.file || job.name || job.id }, job.name || job.id),
@@ -359,7 +378,7 @@ function buildView(ctx, container) {
     if (job.status === 'done') actions.appendChild(btn('打开文件夹', { size: 'xs', variant: installPath ? 'ghost' : 'primary', iconName: 'folder-open', onClick: () => openFolder(job) }))
     actions.appendChild(iconBtn('info', { size: 13, label: '下载详情', onClick: () => openCommunityLog(job) }))
     return h('div', { class: 'lp-row lp-download-row' },
-      h('span', { class: 'lp-mod-icon' }, icon('download', { size: 15 })),
+      jobIcon(job.meta?.icon, COMMUNITY_ICON[job.meta?.type] || 'download'),
       h('div', { class: 'lp-mod-main' },
         h('div', { class: 'lp-mod-title' },
           h('b', { title: job.title || job.filename || job.id }, job.title || job.filename || job.id),

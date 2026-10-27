@@ -174,3 +174,61 @@ test('corrupt HTTP downloads fail hash validation and never publish partial file
     assert.deepEqual(await fs.readdir(root), [])
   } finally { await new Promise(resolve => server.close(resolve)); await fs.rm(root, { recursive: true, force: true }) }
 })
+
+test('CurseForge 默认下载器会分段请求 CDN，而不是单连接硬扛', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'mc-cf-range-'))
+  const bytes = Buffer.alloc(5 * 1024 * 1024, 7)
+  const sha = crypto.createHash('sha1').update(bytes).digest('hex')
+  const ranges = []
+  const server = http.createServer((req, res) => {
+    const match = /^bytes=(\d+)-(\d+)$/.exec(req.headers.range || '')
+    if (!match) {
+      res.writeHead(200, { 'Content-Length': String(bytes.length) })
+      res.end(bytes)
+      return
+    }
+    const start = Number(match[1])
+    const end = Math.min(Number(match[2]), bytes.length - 1)
+    ranges.push([start, end])
+    res.writeHead(206, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': String(end - start + 1),
+      'Content-Range': `bytes ${start}-${end}/${bytes.length}`,
+      'Accept-Ranges': 'bytes'
+    })
+    res.end(bytes.subarray(start, end + 1))
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  const base = `http://127.0.0.1:${server.address().port}`
+  try {
+    await fs.writeFile(path.join(root, 'manifest.json'), JSON.stringify({
+      manifestType: 'minecraftModpack',
+      files: [{ projectID: 101, fileID: 202 }]
+    }))
+    const result = await hydrateCurseForgeFiles(root, null, null, {
+      cacheDir: path.join(root, 'cache'),
+      apiKey: 'test-key',
+      threads: 4,
+      concurrency: 1,
+      fetcher: async () => ({
+        ok: true,
+        json: async () => ({ data: {
+          id: 202,
+          modId: 101,
+          fileName: 'big.jar',
+          downloadUrl: `${base}/big.jar`,
+          hashes: [{ algo: 1, value: sha }],
+          fileLength: bytes.length
+        } })
+      })
+    })
+    assert.equal(result.downloaded, 1)
+    assert.deepEqual(await fs.readFile(path.join(root, 'mods/big.jar')), bytes)
+    assert.ok(ranges.length > 1, '应发出多个 Range 请求')
+    assert.ok(ranges.some(([start]) => start > 0), '应真正分段，而不是只探测 0-0')
+  } finally {
+    server.closeAllConnections?.()
+    await new Promise(resolve => server.close(resolve))
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})

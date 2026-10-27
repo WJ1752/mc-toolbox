@@ -22,7 +22,31 @@ const mainEl = (...kids) => h('div', { class: 'lp-mod-main' }, ...kids)
 const titleEl = (...kids) => h('div', { class: 'lp-mod-title' }, ...kids)
 const actEl = (...kids) => h('div', { class: 'lp-mod-actions' }, ...kids)
 const metaEl = (parts, cls = 'lp-mod-meta mono') => h('div', { class: cls }, parts.filter(Boolean).join(' · '))
-const iconTile = (name) => h('span', { class: 'lp-mod-icon' }, icon(name, { size: 15 }))
+
+/**
+ * 内容封面：能读到真实封面就显示图片，读不到时保留类型图标。
+ * 图片由本地 /icon 接口按需从 JAR/ZIP 里取，失败只移除 img，不影响整行。
+ */
+function contentIcon(t, type, item, fallback, size = 15) {
+  const tile = h('span', { class: 'lp-mod-icon' }, icon(fallback, { size }))
+  const name = item?.relPath || item?.name || ''
+  // 模组只有元数据明确声明了 icon 才发请求；否则会为没有封面的模组额外制造
+  // 几百个 404。资源包 / 光影按标准文件名探测，通常一次就能命中。
+  if (!name || (type === 'mods' && !item?.icon)) return tile
+  const params = new URLSearchParams({ type, name })
+  if (item?.icon) params.set('entry', item.icon)
+  if (item?.modid) params.set('modid', item.modid)
+  if (item?.mtime) params.set('v', String(Math.round(item.mtime)))
+  const img = h('img', {
+    src: `/api/launcher/instances/${encodeURIComponent(t.id)}/icon?${params.toString()}`,
+    alt: '',
+    loading: 'lazy',
+    decoding: 'async'
+  })
+  img.addEventListener('error', () => img.remove(), { once: true })
+  tile.appendChild(img)
+  return tile
+}
 const barEl = (...kids) => h('div', { class: 'lp-toolbar' }, ...kids)
 const tabEl = (...kids) => h('div', { class: 'lp-tab' }, ...kids)
 const tip = (text, cls = 'lp-hint') => h('div', { class: cls }, text)
@@ -329,7 +353,7 @@ async function mountMods(container, t) {
     }, item.disabled ? '启用模组' : '禁用模组')
     return rowEl('lp-mod-row' + (item.disabled ? ' is-disabled' : ''),
       toggle.el,
-      iconTile('puzzle'),
+      contentIcon(t, 'mods', item, 'puzzle'),
       mainEl(
         titleEl(h('b', { title: label }, label), badge(env[0], env[1]),
           item.version ? chip('v' + item.version, 'lp-chip mono') : null,
@@ -1336,7 +1360,7 @@ async function mountPacks(container, t, kind) {
       : null
     return rowEl('lp-pack-row' + (isResource ? '' : ' no-toggle') + (isResource && item.enabled ? ' is-enabled' : ''),
       toggle?.el,
-      iconTile(isResource ? 'grid' : 'wand'),
+      contentIcon(t, kind, item, isResource ? 'grid' : 'wand'),
       mainEl(
         titleEl(h('b', { title: item.name }, item.name),
           isResource ? (item.enabled ? badge('已启用', 'ok') : badge('未启用')) : null),

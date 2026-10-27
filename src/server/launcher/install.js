@@ -115,6 +115,8 @@ class InstallJob {
     this.mc = opts.mc || ''
     this.loader = opts.loader || 'vanilla'
     this.loaderVersion = opts.loaderVersion || ''
+    // 在线整合包的项目封面 URL；界面有图就显示封面，没有则回退到类型图标。
+    this.icon = opts.icon || ''
     this.logs = []
     this.logSeq = 0
     this.controller = new AbortController()
@@ -237,6 +239,7 @@ class InstallJob {
       mc: this.mc,
       loader: this.loader,
       loaderVersion: this.loaderVersion,
+      icon: this.icon || '',
       openWhenDone: this.openWhenDone === true,
       logSeq: this.logSeq,
       // 供前端在再次拖入同一个整合包时先做本地判断，避免重新上传 1 GB 才被拒绝。
@@ -1779,13 +1782,18 @@ async function downloadCurseForgePackFiles(job, meta, paths, { from, to, phase =
       await fsp.writeFile(manifestFile, JSON.stringify(meta.manifest, null, 2), 'utf8')
       manifestInstalled = true
     }
-    const result = await hydrateCurseForgeFiles(paths.gameDir, ({ progress, detail }) => {
+    const settings = getSettings()
+    const result = await hydrateCurseForgeFiles(paths.gameDir, ({ progress, detail, received, total }) => {
       const raw = Number(progress)
       const ratio = Number.isFinite(raw) ? Math.max(0, Math.min(1, (raw - 28) / 15)) : null
       if (ratio !== null) progressIn(job, from, to, ratio, detail || '正在补齐 CurseForge 文件…')
       else job.set(null, detail || '正在补齐 CurseForge 文件…', { indeterminate: true })
+      if (Number.isFinite(Number(received)) && Number(received) >= 0) job.bytes(Number(received), Number(total) || 0)
     }, job.signal, {
-      apiKey: apiKey || store.get('settings', {})?.community?.cfApiKey || ''
+      apiKey: apiKey || store.get('settings', {})?.community?.cfApiKey || '',
+      threads: Math.max(1, Math.min(16, Number(settings.threads) || 4)),
+      retries: Number(settings.retries) || 0,
+      concurrency: Math.max(4, Math.min(12, Number(settings.concurrency) || 8))
     })
     // 只缺光影 / 资源包时安装继续：把清单写进实例目录并在完成文案里点出来。
     if (Array.isArray(result?.blocked) && result.blocked.length) {
@@ -2070,6 +2078,7 @@ export function startOnlinePackInstall({
             fetcher: fetchImpl,
             signal: task.signal
           })
+          task.icon = pack.project?.icon || task.icon || ''
           task.signal.throwIfAborted()
           const filename = safePackFilename(pack.filename)
           task.log(`已解析在线整合包：${pack.project.title || pack.project.slug || project} · ${pack.version.name || pack.version.number || versionId || ''}`)

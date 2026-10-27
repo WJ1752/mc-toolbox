@@ -1055,7 +1055,9 @@
 }
 .lp-mod-row.is-disabled, .lp-mod-row.disabled { opacity: .62; }
 .lp-mod-row .lp-mod-actions { justify-self: end; }
-.lp-mod-icon { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 2px; background: var(--bg-3); color: var(--accent); }
+.lp-mod-icon { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 2px; background: var(--bg-3); color: var(--accent); position: relative; overflow: hidden; }
+.lp-mod-icon img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: var(--bg-3); }
+.lp-mod-icon:has(img) { color: transparent; }
 .lp-mod-main { min-width: 0; display: flex; flex-direction: column; gap: 0; }
 .lp-mod-name { display: flex; align-items: center; gap: 5px; min-width: 0; }
 .lp-mod-name b { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
