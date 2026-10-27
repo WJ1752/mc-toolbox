@@ -685,7 +685,14 @@ export function isTransientInstallerError(output) {
   return TRANSIENT_INSTALLER_ERROR.test(String(output || ''))
 }
 
-/** 安装器失败的可见原因：优先给出网络判断和最后一条错误行，而不是只报退出码。 */
+// Forge 安装器把异常吞掉后只留下这一句，用户因此看不到任何具体原因。
+const INSTALLER_SILENT_ABORT = /A problem installing was detected/i
+
+/**
+ * 安装器失败的可见原因：优先给出网络判断和最后一条错误行，而不是只报退出码。
+ * 只有网络类失败才建议换下载源 —— 签名校验、Java 版本、磁盘权限这类失败换源
+ * 没有任何帮助，旧文案一律让用户「切换为 BMCLAPI」只会让人以为换源无效。
+ */
 export function installerFailureMessage(code, output, attempts = 1) {
   const text = String(output || '')
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
@@ -694,10 +701,17 @@ export function installerFailureMessage(code, output, attempts = 1) {
   const last = [...lines].reverse().find((line) =>
     /(Exception|Error:|Failed to run processor|Unable to|Could not|Unsupported|错误|失败)/i.test(line)) || ''
   const network = isTransientInstallerError(text)
-  const cause = network ? '安装器访问 Mojang / Forge 服务器时网络中断' : '安装器返回非零退出码'
   const retried = attempts > 1 ? `，已自动重试 ${attempts - 1} 次` : ''
   const detail = last ? `：${last.slice(0, 220)}` : ''
-  return `${cause}（退出码 ${code}）${retried}${detail}。请检查网络，或在设置中把下载源切换为 BMCLAPI 后重试。`
+  if (network) {
+    return `安装器访问 Mojang / Forge 服务器时网络中断（退出码 ${code}）${retried}${detail}。请检查网络后重试；国内线路可在设置里把下载源切换为 BMCLAPI 镜像。`
+  }
+  if (INSTALLER_SILENT_ABORT.test(text)) {
+    return `安装器在启动阶段中止，没有给出具体异常（退出码 ${code}）${retried}。` +
+      'Forge 安装器会吞掉这里的原因，多半是安装器 JAR 被改动后签名校验失败，或 Java 版本不匹配；' +
+      '与下载源无关，换源不会有帮助。请重试；仍失败请把任务日志发给作者。'
+  }
+  return `安装器返回非零退出码（退出码 ${code}）${retried}${detail}。请查看任务日志里的安装器输出后重试。`
 }
 
 /**
@@ -760,6 +774,12 @@ async function prepareInstallerMappings(job, installerFile, root, meta, { source
     return Buffer.from(JSON.stringify(next))
   }, patched)
   if (!result.changed) return ''
+  if (result.signatureRemoved) {
+    // 新版 Forge 安装器是签名 JAR：改过 install_profile.json 后 Java 会以
+    // 「SHA-384 digest error」拒绝读取，安装器随后只说一句「A problem installing
+    // was detected」就退出。补丁必然破坏签名，因此把签名文件一并移除。
+    job.log(`安装器带 JAR 签名，已移除签名文件（${result.removedSignatures.join('、')}）`, 'warn')
+  }
   job.log('安装器已配置为复用预取的映射表，跳过 DOWNLOAD_MOJMAPS 直连', 'ok')
   return patched
 }

@@ -56,6 +56,21 @@ test('installerFailureMessage：网络失败给出原因与重试次数，非网
   assert.match(javaMsg, /非零退出码/)
   assert.doesNotMatch(javaMsg, /已自动重试/)
   assert.match(javaMsg, /Unsupported class file/)
+  // 非网络失败不该建议换下载源：换源对 Java 版本 / 签名问题没有任何帮助。
+  assert.doesNotMatch(javaMsg, /BMCLAPI/)
+})
+
+test('installerFailureMessage：安装器静默中止时直接说明与下载源无关', () => {
+  const output = [
+    'JVM info: Oracle Corporation - 17.0.2',
+    'Target Directory: C:\\Users\\HP\\Desktop\\1222\\.minecraft',
+    'A problem installing was detected, install cannot continue'
+  ].join('\n')
+  const msg = installerFailureMessage(1, output, 1)
+  assert.match(msg, /启动阶段/)
+  assert.match(msg, /签名/)
+  assert.match(msg, /与下载源无关/)
+  assert.doesNotMatch(msg, /切换为 BMCLAPI/)
 })
 
 test('isSeedableMojmapsProfile：只对原样复制 TSRG 的安装器预取', () => {
@@ -107,6 +122,65 @@ test('patchJarEntry：只替换 install_profile.json，其他条目字节不变'
     const entries = await readJarEntries(target, ['version.json', 'data/client.lzma'])
     assert.equal(entries['version.json'].toString('utf8'), 'version-json-content')
     assert.deepEqual([...entries['data/client.lzma']], [1, 2, 3, 4])
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('patchJarEntry：签名安装器打补丁时移除签名，否则安装器会静默退出', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mc-jar-signed-'))
+  try {
+    const source = path.join(dir, 'signed-installer.jar')
+    const target = path.join(dir, 'signed-installer.patched.jar')
+    const manifest = Buffer.from('Manifest-Version: 1.0\n', 'utf8')
+    await fs.writeFile(source, makeZip([
+      ['META-INF/MANIFEST.MF', manifest],
+      ['META-INF/FORGE.SF', Buffer.from('Signature-Version: 1.0\n', 'utf8')],
+      ['META-INF/FORGE.RSA', Buffer.from([0x30, 0x82, 0x01, 0x02])],
+      ['install_profile.json', Buffer.from(JSON.stringify(FORGE_PROFILE), 'utf8')]
+    ]))
+    const result = await patchJarEntry(source, 'install_profile.json', (raw) => {
+      const next = JSON.parse(raw.toString('utf8'))
+      if (!patchMojmapsProcessor(next)) return null
+      return Buffer.from(JSON.stringify(next))
+    }, target)
+    assert.equal(result.changed, true)
+    assert.equal(result.signatureRemoved, true)
+    assert.deepEqual([...result.removedSignatures].sort(), ['META-INF/FORGE.RSA', 'META-INF/FORGE.SF'])
+    // 补丁条目可读，签名条目必须消失（残留 .SF 会让 JVM 拿摘要校验被改过的条目，
+    // 抛 SecurityException 后 Forge 安装器只打印一句「A problem installing…」）。
+    const patched = await readJarJson(target, 'install_profile.json')
+    assert.ok(patched.processors[0].args.includes('--skipIfExists'))
+    const entries = await readJarEntries(target, ['META-INF/MANIFEST.MF', 'META-INF/FORGE.SF', 'META-INF/FORGE.RSA'])
+    assert.deepEqual(entries['META-INF/MANIFEST.MF'], manifest)
+    // readJarEntries 对缺失的条目返回 null
+    assert.equal(entries['META-INF/FORGE.SF'], null)
+    assert.equal(entries['META-INF/FORGE.RSA'], null)
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('patchJarEntry：未签名安装器保持原样，不误删 META-INF 其它条目', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mc-jar-unsigned-'))
+  try {
+    const source = path.join(dir, 'installer.jar')
+    const target = path.join(dir, 'installer.patched.jar')
+    const extra = Buffer.from('extra', 'utf8')
+    await fs.writeFile(source, makeZip([
+      ['META-INF/MANIFEST.MF', Buffer.from('Manifest-Version: 1.0\n', 'utf8')],
+      ['META-INF/services/foo', extra],
+      ['install_profile.json', Buffer.from(JSON.stringify(FORGE_PROFILE), 'utf8')]
+    ]))
+    const result = await patchJarEntry(source, 'install_profile.json', (raw) => {
+      const next = JSON.parse(raw.toString('utf8'))
+      if (!patchMojmapsProcessor(next)) return null
+      return Buffer.from(JSON.stringify(next))
+    }, target)
+    assert.equal(result.signatureRemoved, false)
+    assert.deepEqual(result.removedSignatures, [])
+    const entries = await readJarEntries(target, ['META-INF/services/foo'])
+    assert.deepEqual(entries['META-INF/services/foo'], extra)
   } finally {
     await fs.rm(dir, { recursive: true, force: true })
   }

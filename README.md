@@ -1,5 +1,15 @@
 # Minecraft 工具箱
 
+### v1.12.5 签名 Forge 安装器修复
+
+- 修复 Forge 1.20.1-47.4.0（以及其它带 JAR 签名的新版安装器）安装必定失败：任务只显示「安装加载器 · A problem installing was detected, install cannot continue」，1 秒后以「安装器返回非零退出码（退出码 1）」结束，换下载源、换网络都没有用。
+- 根因与下载源无关：为了跳过 `DOWNLOAD_MOJMAPS` 直连 Mojang，启动器会修改安装器 JAR 里的 `install_profile.json`。新版 Forge 安装器是**签名 JAR**（`META-INF/FORGE.SF` + `FORGE.RSA`），改动后 Java 读取该条目直接抛 `SecurityException: SHA-384 digest error for install_profile.json`；Forge 的 `SimpleInstaller` 把异常吞掉，只留下那句没有信息量的提示。
+- 现在 `patchJarEntry` 重写 JAR 时会一并移除 `META-INF/*.SF`、`*.RSA`、`*.DSA`、`*.EC` 签名文件（补丁必然破坏签名，留着只会让安装器读不了配置），并在写盘前自检「补丁条目能原样读回、没有残留签名」，自检失败就回退原始安装器；任务日志会写明移除了哪些签名文件。
+- 安装器错误文案不再劝所有失败都「切换为 BMCLAPI」：只有网络类失败才建议换源；安装器静默中止时明确说明「与下载源无关，多半是安装器签名或 Java 版本」，并指向任务日志。
+- 下载源默认仍是「自动」（先测速再选 BMCL 镜像 / 官方线路），设置项与持久化里的默认值都没有变。
+- 回归与验证：用真实 `forge-1.20.1-47.4.0-installer.jar` + Java 17 复现——补丁后的签名 JAR 读取 `install_profile.json` 抛 `SHA-384 digest error`，安装器秒退；修复后同一安装器完整跑完，日志出现 `--skipIfExists` / `Skipping as output file exists` 并输出 `Successfully installed client into launcher.`，生成 `1.20.1-forge-47.4.0`。`node --test tests/*.test.mjs` 291 项通过（新增 3 项：签名剥离、非签名 JAR 不误删 `META-INF` 其它条目、静默中止文案）。
+- 构建与版本：`package.json` / `PRODUCT_VERSION` 更新为 1.12.5。
+
 ### v1.12.4 首页资讯加载修复
 
 - 修复启动器首页「Mojang 资讯」一直停在「正在读取 Mojang 资讯…」：页面在请求返回前重绘了一次，结果被画到已经移除的旧节点，新页面只剩转圈。

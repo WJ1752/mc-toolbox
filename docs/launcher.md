@@ -153,6 +153,7 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
    - NeoForge 1.20.1 发布在 `net.neoforged:forge` 坐标（版本形如 `1.20.1-47.1.106`）；1.20.2+ 才使用 `net.neoforged:neoforge`；`forgeInstaller()` 会按 MC 版本选择正确坐标与 `expectedId`。
    - 非官方源时安装器本身从 BMCLAPI 下载，并预取 `version.json` / `install_profile.json` 中声明的库与 processor 的 `jar`/`classpath`；`mirrorUrl()` 同时把 `maven.neoforged.net` / `maven.minecraftforge.net` 映射到 BMCLAPI。`MOJMAPS` / `MERGED_MAPPINGS` / `MC_UNPACKED` 等 processor 生成物不再被误当成 Maven 包预取。
    - `DOWNLOAD_MOJMAPS` 会直连 Mojang，不受下载源设置影响。v1.9.4 起先用镜像链预取 `client_mappings`（校验 SHA-1/长度），再用 `jar-patch.js` 给安装器 profile 补 `--skipIfExists` 并生成 `*.patched.jar`，安装器日志会显示 `Skipping as output file exists`。
+   - 新版 Forge 安装器（如 `1.20.1-47.4.0`）带 JAR 签名。修改 `install_profile.json` 后，Java 读取该条目会抛 `SecurityException: SHA-384 digest error`；`SimpleInstaller` 把异常吞掉，只打印「A problem installing was detected, install cannot continue」并以退出码 1 结束。v1.12.5 起 `patchJarEntry` 重写 JAR 时移除 `META-INF/*.SF|*.RSA|*.DSA|*.EC` 签名条目，写盘前自检补丁条目可读回且无残留签名（失败则不使用补丁 JAR）；任务日志会记录移除了哪些签名文件。
    - 安装器网络类失败（Connection reset / Connect timed out / HTTP 5xx）自动重试 3 次；最终错误会带上最后的异常行，而不是只有「退出码 1」。
 3. `loadVersionChain` 合并继承链，按当前 OS 规则下载全部 libraries（含 natives）；asset index 与 objects 按 SHA-1 校验，支持镜像回退。
 4. 写 `.mc-toolbox-installed` 标记并更新实例 `installedAt`；修复任务复用同一套文件检查/下载逻辑。
@@ -517,6 +518,17 @@ v1.9.0 在 v1.8 启动器的基础上完成四项改造：PCL 风格 MC 版本�
 - 修复：自动源先测速再排序；429 先降为单连接、再短暂封禁并换源；≥4 MB 文件按 Range 分段（默认 4 线程）；素材并发 8 → 32（上限 64）；`InstallJob.speed` 每 500 ms 采样并在下载中心 / 安装卡片显示速度与剩余时间。
 - 测试：新增 `tests/launcher-download-segments.test.mjs`（7 项：Range 分段、无 Range 回退、只支持 0-0、截断、expectedSize、429 降速、取消清理）、`tests/launcher-source-select.test.mjs`（8 项）、`tests/launcher-speed-meter.test.mjs`（5 项）。全量 `node --test tests/*.test.mjs` **288 项通过**。
 - 说明：BMCLAPI 的限流与重定向是服务端行为，实际速度仍取决于用户线路；自动源会在两者之间选当下更快的，并写一条「线路测速」日志便于排查。
+
+### 6.19 签名 Forge 安装器修复（v1.12.5）
+
+验证环境：Windows 10 x64、Node 22.18、Oracle Java 17.0.2、真实 `forge-1.20.1-47.4.0-installer.jar`；日期 2026-10-27。
+
+- 现场：安装整合包（Forge `1.20.1-47.4.0`）时任务停在「安装加载器」，约 1 秒失败；安装器输出只有 `A problem installing was detected, install cannot continue`，任务错误为「安装器返回非零退出码（退出码 1）」。切换 BMCLAPI / 官方源均无效（默认本来就是自动源）。
+- 定位：安装器缓存里的 `forge-1.20.1-47.4.0-installer.jar` 含 `META-INF/FORGE.SF` / `FORGE.RSA`，`install_profile.json` 在签名清单内。启动器为 `--skipIfExists` 补丁重写了该条目，`jarsigner -verify` 报 `SHA-384 digest error for install_profile.json`；`JarFile` 与 `ClassLoader.getResourceAsStream` 读取同样抛 `SecurityException`。`SimpleInstaller.main` 的 `catch (Throwable)` 只调用 `ProgressCallback.stage("A problem installing was detected, install cannot continue")` 再 `System.exit(1)`，所以 stdout 与 `installer.log` 都没有堆栈。
+- 对照：把同一补丁 JAR 的 `FORGE.SF` / `FORGE.RSA` 去掉后，安装器正常读取配置并开始下载；说明失败与网络、下载源、Maven 镜像都无关。旧版 `47.4.22` 安装器未签名，所以此前没有复现。
+- 修复：`patchJarEntry` 构建新 JAR 时过滤签名条目，并在写盘前自检（补丁条目可原样读回、无残留签名），自检失败即抛错，由 `prepareInstallerMappings` 回退原始安装器；日志记录被移除的签名文件。安装器失败文案改为只在网络类失败时建议换源，静默中止时直接说明与下载源无关。
+- 验证：真实安装器 + Java 17，修复前 1 秒 `A problem installing…` 退出码 1；修复后完整安装，`--skipIfExists` 生效（日志 `Skipping as output file exists`），生成 `1.20.1-forge-47.4.0`，输出 `Successfully installed client into launcher.`。
+- 测试：`tests/launcher-install-recovery.test.mjs` 新增 3 项（签名剥离、非签名 JAR 不误删 `META-INF` 其它条目、静默中止文案），全量 `node --test tests/*.test.mjs` **291 项通过**。
 
 ## 7. 截图
 

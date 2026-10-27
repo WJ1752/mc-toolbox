@@ -20,6 +20,14 @@ const EOCD_BYTES = 22
 const EOCD_SEARCH = EOCD_BYTES + 0xffff
 const ZIP64_MARK = 0xffffffff
 
+// JAR 签名文件：META-INF/XXX.SF + XXX.RSA / .DSA / .EC，或 META-INF/SIG-XXX。
+// 新版 Forge 安装器（如 1.20.1-47.4.0）是带签名的，见 stripSignatures 的说明。
+const SIGNATURE_ENTRY = /^META-INF\/(?:[^/]+\.(?:SF|RSA|DSA|EC)|SIG-[^/]+)$/i
+
+function isSignatureEntry(name) {
+  return SIGNATURE_ENTRY.test(String(name || ''))
+}
+
 function findEocd(buf) {
   const start = Math.max(0, buf.length - EOCD_SEARCH)
   for (let i = buf.length - EOCD_BYTES; i >= start; i--) {
@@ -147,8 +155,27 @@ function buildZip(entries) {
 }
 
 /**
+ * 移除 JAR 签名条目。安装器 JAR 一旦带签名，改动 install_profile.json 就会让
+ * Java 在读回该条目时抛 `SecurityException: SHA-384 digest error for
+ * install_profile.json`：Forge 的 SimpleInstaller 把异常吞掉，只打印一句
+ * 「A problem installing was detected, install cannot continue」然后退出码 1，
+ * 表现为「安装器返回非零退出码」，和网络、下载源毫无关系。
+ *
+ * 补丁必然破坏签名，所以签名为「已失效的装饰」：把 .SF/.RSA 一并去掉，安装器
+ * 按普通 JAR 运行。实测（1.20.1-47.4.0）去掉签名后补丁 JAR 可正常安装。
+ */
+function stripSignatures(entries) {
+  const signatures = entries.filter((item) => isSignatureEntry(item.name))
+  if (!signatures.length) return { entries, removed: [] }
+  return {
+    entries: entries.filter((item) => !isSignatureEntry(item.name)),
+    removed: signatures.map((item) => item.name)
+  }
+}
+
+/**
  * 替换 JAR 中的单个文本条目。transform 返回 null / 相同 Buffer 时不写文件。
- * @returns {Promise<{changed:boolean, target?:string}>}
+ * @returns {Promise<{changed:boolean, target?:string, signatureRemoved?:boolean, removedSignatures?:string[]}>}
  */
 export async function patchJarEntry(source, entryName, transform, target = source) {
   const buf = await fsp.readFile(source)
@@ -158,18 +185,33 @@ export async function patchJarEntry(source, entryName, transform, target = sourc
   const original = decodeEntry(entry)
   const next = transform(Buffer.from(original))
   if (!next || next.equals(original)) return { changed: false }
-  // 统一用 deflate 重新压缩被修改的条目；安装器 JAR 没有签名，不影响 -jar 启动。
+  // 统一用 deflate 重新压缩被修改的条目；其余条目按原始压缩数据复制。
   entry.method = 8
   entry.size = next.length
   entry.data = zlib.deflateRawSync(next, { level: 9 })
   entry.compSize = entry.data.length
   entry.crc = zlib.crc32(next) >>> 0
-  const out = buildZip(entries)
+  const stripped = stripSignatures(entries)
+  const out = buildZip(stripped.entries)
+  // 写盘前自检：补丁条目必须能原样读回，且不能残留签名（否则安装器会静默退出）。
+  const written = readEntries(out)
+  const check = written.entries.find((item) => item.name === entryName)
+  if (!check || !decodeEntry(check).equals(next)) {
+    throw new Error('安装器 JAR 自检失败：补丁条目无法读回')
+  }
+  if (written.entries.some((item) => isSignatureEntry(item.name))) {
+    throw new Error('安装器 JAR 仍带签名，无法安全打补丁')
+  }
   const part = `${target}.part-${process.pid}`
   await fsp.writeFile(part, out)
   await fsp.rm(target, { force: true }).catch(() => {})
   await fsp.rename(part, target)
-  return { changed: true, target }
+  return {
+    changed: true,
+    target,
+    signatureRemoved: stripped.removed.length > 0,
+    removedSignatures: stripped.removed
+  }
 }
 
 /** 给安装器 profile 的 DOWNLOAD_MOJMAPS 参数追加 --skipIfExists（原地修改）。 */
