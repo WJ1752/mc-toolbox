@@ -549,7 +549,7 @@ export async function runPool(items, worker, concurrency = 8, signal) {
  * 低于 `targetBps` 就按 1.5× 加连接；调用方发现限流（429）时返回 false，
  * 池子会暂停加连接并向下回退，避免越压越限流。
  *
- * 失败语义与 runPool 一致：第一个抛错的任务会让整个池子尽快失败。
+ * 首个失败中止派发；worker 的第三个参数可中断在途请求，全部收尾后抛错。
  * `counter.received` 由调用方在自己的进度回调里累加（字节单调递增）。
  */
 export async function runPoolAdaptive(items, worker, {
@@ -561,39 +561,37 @@ export async function runPoolAdaptive(items, worker, {
   signal,
   canGrow = null
 } = {}) {
-  const list = Array.isArray(items) ? [...items] : [...items]
+  const list = [...items]
   if (!list.length) return
+  const controller = new AbortController()
+  const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
   const cap = Math.max(1, Math.round(Number(max) || 32))
   let wanted = Math.max(1, Math.min(cap, Math.round(Number(start) || 8)))
   const floor = wanted
   let index = 0
   let live = 0
-  let failed = null
   let finishPool = null
   const settled = new Promise((resolve) => { finishPool = resolve })
-  const settleIfIdle = () => { if (failed || live === 0) finishPool() }
   const launch = () => {
-    if (failed) return
-    while (live < wanted && index < list.length) {
-      const item = list[index++]
+    while (!combined.aborted && live < wanted && index < list.length) {
+      const current = index++
       live++
-      Promise.resolve().then(() => worker(item, index - 1)).then(() => {
+      Promise.resolve().then(() => {
+        combined.throwIfAborted()
+        return worker(list[current], current, combined)
+      }).catch((error) => {
+        controller.abort(error || new Error('任务失败'))
+      }).finally(() => {
         live--
-        settleIfIdle()
-        launch()
-      }, (error) => {
-        live--
-        if (!failed) failed = error || new Error('任务失败')
-        settleIfIdle()
         launch()
       })
     }
-    settleIfIdle()
+    if (!live) finishPool()
   }
   let sampleBytes = 0
   let sampleAt = Date.now()
   const grow = setInterval(() => {
-    if (failed || index >= list.length) return
+    if (combined.aborted || index >= list.length) return
     const nowAt = Date.now()
     const elapsed = Math.max(0.5, (nowAt - sampleAt) / 1000)
     const bytes = Number(counter?.received)
@@ -609,12 +607,13 @@ export async function runPoolAdaptive(items, worker, {
     }
     if (!known || speed >= targetBps || wanted >= cap) return
     wanted = Math.min(cap, wanted + Math.max(2, Math.ceil(wanted / 2)))
+    launch()
   }, Math.max(500, Number(sampleMs) || 2500))
   grow.unref?.()
   try {
     launch()
     await settled
-    if (failed) throw failed
+    combined.throwIfAborted()
   } finally {
     clearInterval(grow)
   }

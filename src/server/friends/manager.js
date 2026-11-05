@@ -1252,7 +1252,7 @@ export async function sendModsToFriend({ friendId, instanceId } = {}) {
   const peer = await instance.request('GET', '/api/mods?uuid=' + encodeURIComponent(friendId))
   const chosen = pickPeerInstance(peer.instances, inst)
   if (!chosen) throw new Error('对方还没有上传相同 MC/加载器的清单')
-  const diff = diffManifests(mine.items, { items: chosen.items || [] })
+  const diff = diffManifests(mine.items, chosen.items || [])
   const plan = fillPlan(diff, 'send')
   if (!plan.acquire.length) throw new Error('没有需要发给对方的模组')
   const modsDir = instancePaths(inst).modsDir

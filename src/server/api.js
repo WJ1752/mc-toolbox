@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { PUBLIC_DIR, FEATURES_DIR, DATA_DIR, CONFIG_DIR, CLIENT_MODS_DIR, ROOT, safeJoin, getDirs } from './paths.js'
 import { store } from './store.js'
-import { upgradeClientModLibrary, DEFAULT_SETTINGS, DEFAULT_CLIENT_MODS } from './defaults.js'
+import { deepMerge, upgradeClientModLibrary, DEFAULT_SETTINGS, DEFAULT_CLIENT_MODS } from './defaults.js'
 import { scanFeatures, removeFeature } from './features.js'
 import { pingServer } from './mc-ping.js'
 import * as monitor from './monitor.js'
@@ -44,19 +44,6 @@ function sendJson(res, code, data) {
   const body = JSON.stringify(data)
   res.writeHead(code, { 'Content-Type': MIME['.json'], 'Cache-Control': 'no-store' })
   res.end(body)
-}
-
-function deepMerge(base, patch) {
-  const out = Array.isArray(base) ? base.slice() : { ...base }
-  if (!patch || typeof patch !== 'object') return out
-  for (const [k, v] of Object.entries(patch)) {
-    if (v && typeof v === 'object' && !Array.isArray(v) && base && typeof base[k] === 'object' && !Array.isArray(base[k])) {
-      out[k] = deepMerge(base[k], v)
-    } else if (v !== undefined) {
-      out[k] = v
-    }
-  }
-  return out
 }
 
 function readBody(req) {
@@ -1050,11 +1037,23 @@ async function serveStatic(req, res, urlPath) {
 }
 
 export async function requestHandler(req, res) {
+  // 服务只监听回环地址。核对实际端口与 Host，防止外部域名重绑定到本机。
+  const port = req.socket.localPort
+  const host = (req.headers.host || '').toLowerCase()
+  const localHost = ['127.0.0.1', 'localhost'].some(name =>
+    host === name + ':' + port || (port === 80 && host === name))
+  if (!localHost) return sendJson(res, 403, { error: '仅允许通过本机地址访问启动器' })
+
   const url = new URL(req.url, 'http://localhost')
   const pathname = url.pathname
   const query = Object.fromEntries(url.searchParams.entries())
 
   if (pathname.startsWith('/api/')) {
+    const { origin, 'sec-fetch-site': site } = req.headers
+    const localOrigin = 'http://' + (port === 80 ? host.split(':')[0] : host)
+    if ((origin !== undefined && origin !== localOrigin) || site === 'cross-site' || site === 'same-site') {
+      return sendJson(res, 403, { error: '启动器接口仅接受同源请求' })
+    }
     try {
       // 每次 API 请求前同步代理配置（供下载引擎/服务端核心的 httpFetch 使用）
       setProxy((store.get('settings', DEFAULT_SETTINGS).network || {}).proxy || '')

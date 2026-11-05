@@ -10,14 +10,13 @@ import https from 'node:https'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { URL } from 'node:url'
+import { normalizeFingerprint } from './config.js'
 
 const MAX_JSON = 4 * 1024 * 1024
 const JSON_TIMEOUT = 20000
 const IDLE_TIMEOUT = 60000
 
-export function normalizeFingerprint(value) {
-  return String(value || '').replace(/[^0-9a-fA-F]/g, '').toUpperCase()
-}
+export { normalizeFingerprint }
 
 function isLocalHost(hostname) {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1'
@@ -39,17 +38,9 @@ function parseBase(url) {
   return parsed
 }
 
-function fingerprintOf(response) {
-  try {
-    return response.socket?.getPeerCertificate?.()?.fingerprint256 || ''
-  } catch {
-    return ''
-  }
-}
-
-function checkFingerprint(response, expected) {
-  if (!response.socket?.encrypted) return ''
-  const actual = fingerprintOf(response)
+function checkFingerprint(socket, expected) {
+  if (!socket.encrypted) return ''
+  const actual = socket.getPeerCertificate()?.fingerprint256
   if (!actual) throw Object.assign(new Error('无法读取服务器证书'), { code: 'TLS_NO_CERT' })
   if (expected && normalizeFingerprint(actual) !== normalizeFingerprint(expected)) {
     throw Object.assign(new Error('服务器证书指纹不匹配，可能被中间人替换或服务器换了证书'), { code: 'TLS_FINGERPRINT_MISMATCH' })
@@ -57,7 +48,7 @@ function checkFingerprint(response, expected) {
   return actual
 }
 
-function requestRaw({ base, method, pathname, headers = {}, body = null, timeoutMs = JSON_TIMEOUT, expectedFingerprint = '', signal = null }) {
+function requestRaw({ base, method, pathname, headers = {}, body = null, timeoutMs = JSON_TIMEOUT, expectedFingerprint = '', probe = false, signal = null }) {
   return new Promise((resolve, reject) => {
     const parsed = base instanceof URL ? base : parseBase(base)
     const isHttps = parsed.protocol === 'https:'
@@ -69,19 +60,15 @@ function requestRaw({ base, method, pathname, headers = {}, body = null, timeout
       path: pathname,
       method,
       headers: { ...headers },
-      rejectUnauthorized: false,
+      rejectUnauthorized: !expectedFingerprint && !probe,
       agent: false
     }
-    const req = transport.request(options, (res) => {
-      try {
-        checkFingerprint(res, expectedFingerprint)
-      } catch (error) {
-        res.destroy()
-        reject(error)
-        return
-      }
-      resolve(res)
-    })
+    const req = transport.request(options, resolve)
+    if (body?.pipe) {
+      body.pause()
+      body.once('error', error => req.destroy(error))
+      req.once('close', () => body.destroy())
+    }
     req.setTimeout(timeoutMs, () => {
       req.destroy(Object.assign(new Error('服务器响应超时'), { code: 'TIMEOUT' }))
     })
@@ -92,12 +79,20 @@ function requestRaw({ base, method, pathname, headers = {}, body = null, timeout
       signal.addEventListener('abort', abort, { once: true })
       req.on('close', () => signal.removeEventListener('abort', abort))
     }
-    if (body) {
-      if (Buffer.isBuffer(body) || typeof body === 'string') req.end(body)
-      else body.pipe(req)
-    } else {
-      req.end()
+    function send() {
+      if (req.destroyed) return
+      if (body?.pipe) body.pipe(req)
+      else req.end(body)
     }
+    // 收到 HTTP 响应才校验证书会把登录令牌或文件先发给错误的对端。
+    // agent:false 为每个请求建立新连接，在写入任何请求字节前完成固定指纹校验。
+    if (isHttps && expectedFingerprint) {
+      req.once('socket', socket => socket.once('secureConnect', () => {
+        try { checkFingerprint(socket, expectedFingerprint) }
+        catch (error) { req.destroy(error); return }
+        send()
+      }))
+    } else send()
   })
 }
 
@@ -164,10 +159,10 @@ export class FriendsServerClient {
       method: 'GET',
       pathname: '/api/health',
       headers: { Accept: 'application/json' },
-      expectedFingerprint: '',
+      probe: true,
       timeoutMs: 8000
     })
-    const fingerprint = checkFingerprint(res, '')
+    const fingerprint = checkFingerprint(res.socket, '')
     const health = await readJsonResponse(res)
     if (health?.name !== 'mc-toolbox-friends') {
       throw Object.assign(new Error('这个地址不是 MC Toolbox 好友服务器'), { code: 'NOT_FRIENDS_SERVER' })
@@ -212,8 +207,7 @@ export class FriendsServerClient {
       timeoutMs: 0
     })
     if (res.statusCode < 200 || res.statusCode >= 300) {
-      const error = await readJsonResponse(res).catch(() => null)
-      throw Object.assign(new Error(error?.error || `服务器返回 HTTP ${res.statusCode}`), { code: 'SERVER_ERROR', status: res.statusCode })
+      await readJsonResponse(res)
     }
     const chunks = []
     let total = 0
@@ -241,6 +235,7 @@ export class FriendsServerClient {
       timeoutMs: 0,
       signal
     })
+    if (res.statusCode < 200 || res.statusCode >= 300) await readJsonResponse(res)
     const total = Number(res.headers['content-length']) || 0
     const expectedSha1 = String(res.headers['x-file-sha1'] || '').toLowerCase()
     const encodedName = String(res.headers['x-file-name'] || '')

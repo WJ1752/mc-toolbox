@@ -22,14 +22,15 @@ function makeTracker() {
 test('runPoolAdaptive：吞吐达标时不加连接，并发保持起始值', async () => {
   const { stats, enter, leave } = makeTracker()
   const counter = { received: 0 }
-  const items = Array.from({ length: 40 }, (_, i) => i)
+  // 至少跨过一次 500ms 的采样窗口，确保确实计算过吞吐。
+  const items = Array.from({ length: 100 }, (_, i) => i)
   await runPoolAdaptive(items, async (item) => {
     enter()
     await sleep(20)
     counter.received += item + 1
     leave()
   }, { start: 3, max: 9, counter, targetBps: 1, sampleMs: 500 })
-  assert.equal(stats.completed, 40)
+  assert.equal(stats.completed, items.length)
   assert.ok(stats.peak <= 3, `高吞吐不应加连接（peak=${stats.peak}）`)
 })
 
@@ -62,19 +63,21 @@ test('runPoolAdaptive：canGrow 返回 false（限流）时保持起始并发', 
   assert.ok(stats.peak <= 2, `限流期间不应加连接（peak=${stats.peak}）`)
 })
 
-test('runPoolAdaptive：第一个失败的任务让整个池子尽快失败', async () => {
-  const { stats } = makeTracker()
-  let started = 0
+test('runPoolAdaptive：首个失败中止在途请求，等待清理完成后才允许重试', async () => {
+  const started = []
+  let cleaned = false
   await assert.rejects(
-    runPoolAdaptive(Array.from({ length: 50 }, (_, i) => i), async (item) => {
-      started++
-      await sleep(5)
-      if (item === 2) throw new Error('boom-' + item)
-    }, { start: 4, max: 4, sampleMs: 600 }),
-    /boom-2/
+    runPoolAdaptive(['失败的文件', '在途文件', '排队文件'], async (item, index, signal) => {
+      started.push([item, index])
+      if (index === 0) throw new Error('下载失败')
+      await assert.rejects(sleepWith(1000, signal), /下载失败/)
+      await new Promise((resolve) => setImmediate(resolve))
+      cleaned = true
+    }, { start: 2, max: 2 }),
+    /下载失败/
   )
-  assert.ok(started > 0 && started < 50, `失败后不应跑完全部任务（started=${started}）`)
-  assert.ok(stats.completed <= 50)
+  assert.deepEqual(started, [['失败的文件', 0], ['在途文件', 1]])
+  assert.ok(cleaned)
 })
 
 test('runPoolAdaptive：取消后池子立刻结束并抛出取消原因', async () => {

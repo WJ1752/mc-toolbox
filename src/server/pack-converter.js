@@ -282,8 +282,7 @@ async function hydrateModrinthFiles(root, onProgress, signal) {
     const itemProgress = Number.isFinite(totalRel) && totalRel > 0 ? Math.min(1, received / totalRel) : 0
     report(onProgress, 'mods-download', 28 + Math.min(count, done) / count * 15 + itemProgress * (15 / count), label)
   }
-  await runPoolAdaptive(files, async (item, i) => {
-    signal?.throwIfAborted()
+  await runPoolAdaptive(files, async (item, _index, downloadSignal) => {
     if (item.env?.server === 'unsupported') { skipped++; return }
     const rel = safeRelativeName(item.path)
     if (!rel) throw new Error(`Modrinth 索引包含非法文件路径：${item.path}`)
@@ -293,7 +292,7 @@ async function hydrateModrinthFiles(root, onProgress, signal) {
     if (!algorithm) throw new Error(`Modrinth 索引缺少文件校验值：${rel}`)
     if (fs.existsSync(target)) {
       const digest = crypto.createHash(algorithm)
-      for await (const chunk of fs.createReadStream(target)) { signal?.throwIfAborted(); digest.update(chunk) }
+      for await (const chunk of fs.createReadStream(target, { signal: downloadSignal })) digest.update(chunk)
       if (digest.digest('hex').toLowerCase() === String(hashes[algorithm]).toLowerCase()) { skipped++; return }
     }
     const urls = Array.isArray(item.downloads) ? item.downloads : []
@@ -302,11 +301,16 @@ async function hydrateModrinthFiles(root, onProgress, signal) {
     let lastError = null
     for (const url of urls) {
       try {
-        await downloadVerified(url, target, { signal, size: item.fileSize, hash: hashes[algorithm], algorithm, maxBytes: 512 * 1024 ** 2,
-          onProgress: ({ received, total }) => reportOne(Number(received), Number(total) || Number(item.fileSize) || 0,
-            `Modrinth ${Math.min(count, done + 1)}/${count}：${path.basename(rel)} · 已下载 ${Math.round(received / 1024)} KB${total ? ` / ${Math.round(total / 1024)} KB` : ''}`) })
+        let lastReceived = 0
+        await downloadVerified(url, target, { signal: downloadSignal, size: item.fileSize, hash: hashes[algorithm], algorithm, maxBytes: 512 * 1024 ** 2,
+          onProgress: ({ received, total }) => {
+            counter.received += received - lastReceived
+            lastReceived = received
+            reportOne(received, total || item.fileSize || 0,
+              `Modrinth ${Math.min(count, done + 1)}/${count}：${path.basename(rel)} · 已下载 ${Math.round(received / 1024)} KB${total ? ` / ${Math.round(total / 1024)} KB` : ''}`)
+          } })
         complete = true; break
-      } catch (e) { signal?.throwIfAborted(); lastError = e }
+      } catch (e) { downloadSignal.throwIfAborted(); lastError = e }
     }
     if (!complete) throw new Error(`下载 Modrinth 文件失败：${rel}${lastError ? `（${lastError.message}）` : ''}`)
     done++

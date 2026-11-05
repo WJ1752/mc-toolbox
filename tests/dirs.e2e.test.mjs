@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
+import http from 'node:http'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
@@ -23,6 +24,9 @@ fs.rmSync(TMP, { recursive: true, force: true })
 fs.mkdirSync(TMP, { recursive: true })
 // 幂等：清掉上次运行遗留的自定义目录记录，让测试从「全默认」状态开始
 fs.rmSync(path.join(ROOT, 'data', 'dirs.json'), { force: true })
+// 旧配置可能只有一段设置；保留已有选项，同时补齐监测引擎启动所需的项。
+fs.mkdirSync(path.join(ROOT, 'data'), { recursive: true })
+fs.writeFileSync(path.join(ROOT, 'data', 'settings.json'), JSON.stringify({ general: { tileColumns: 4 } }))
 
 let child = spawn(process.execPath, ['server.js', '--no-open', '--port=' + PORT], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] })
 let log = ''
@@ -36,9 +40,32 @@ for (let i = 0; i < 60; i++) {
 const post = (u, b) => fetch(BASE + u, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) }).then(J)
 
 try {
+  // 外部页面即便能发简单 POST，也不能更改目录或清空本地数据。
+  for (const headers of [
+    { Origin: 'https://example.org' },
+    { Origin: 'null' },
+    { Origin: 'http://127.0.0.1:8792' },
+    { 'Sec-Fetch-Site': 'cross-site' },
+    { 'Sec-Fetch-Site': 'same-site' }
+  ]) {
+    const res = await fetch(BASE + '/api/heartbeat', { method: 'POST', headers })
+    assert(res.status === 403, '跨源请求被拒绝 ' + JSON.stringify(headers))
+  }
+  const foreignHost = await new Promise((resolve, reject) => {
+    http.get(BASE + '/api/dirs', { headers: { Host: 'example.org:' + PORT } }, res => {
+      res.resume()
+      resolve(res.statusCode)
+    }).on('error', reject)
+  })
+  assert(foreignHost === 403, '外部 Host 无法读取本地 API')
+  const heartbeat = await fetch(BASE + '/api/heartbeat', { method: 'POST', headers: { Origin: BASE } })
+  assert(heartbeat.ok, '同源请求正常')
+
   // 初始状态：全部默认
   const d0 = await fetch(BASE + '/api/dirs').then(J)
   assert(d0.configDir && d0.defaults.configDir, 'GET /api/dirs 返回当前+默认')
+  const restored = JSON.parse(fs.readFileSync(path.join(d0.configDir, 'settings.json'), 'utf8'))
+  assert(restored.general.tileColumns === 4 && restored.monitor.autoStart === false && restored.network.concurrency > 0, '启动时补齐旧配置并保留自定义项')
   assert(!d0.custom.configDir && !d0.custom.dataDir && !d0.custom.clientModsDir, '初始全部为默认目录')
   const defCfg = d0.defaults.configDir
 

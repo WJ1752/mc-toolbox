@@ -7,6 +7,7 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
+import { freeDisabledName } from '../launcher/mod-dedupe.js'
 import { sanitizeFileName } from './transfer.js'
 
 const SHA1_RE = /^[0-9a-f]{40}$/
@@ -150,30 +151,35 @@ export async function sha1File(file) {
  */
 export async function applyJar({ sourceFile, targetDir, filename, sha1, enabled = true }) {
   if (!SHA1_RE.test(String(sha1 || ''))) throw new Error('缺少有效的 SHA-1')
-  const actual = await sha1File(sourceFile)
-  if (actual !== sha1) throw new Error(`模组校验失败：${path.basename(sourceFile)}`)
   await fsp.mkdir(targetDir, { recursive: true })
   // 对端清单里的 file 可能带 .disabled 后缀；启停状态以 enabled 字段为准，
   // 否则会写出 x.jar.disabled.disabled 这种双重后缀。
   const base = sanitizeFileName(filename, { fallback: 'mod.jar', maxLength: 160 }).replace(/\.disabled$/i, '')
   const safe = enabled ? base : base + '.disabled'
   const target = path.join(targetDir, safe)
-  let disabledExisting = ''
-  if (fs.existsSync(target)) {
-    const existing = await sha1File(target)
-    if (existing === sha1) return { file: target, skipped: true, disabledExisting: '' }
-    const backup = target + '.disabled'
-    if (fs.existsSync(backup)) {
-      disabledExisting = backup
-    } else {
-      await fsp.rename(target, backup)
-      disabledExisting = backup
+  const tmp = path.join(targetDir, `.${crypto.randomUUID()}.part`)
+  try {
+    await fsp.copyFile(sourceFile, tmp, fs.constants.COPYFILE_EXCL)
+    if (await sha1File(tmp) !== sha1) throw new Error(`模组校验失败：${path.basename(sourceFile)}`)
+    if (fs.existsSync(target) && await sha1File(target) === sha1) {
+      return { file: target, skipped: true, disabledExisting: '' }
     }
+    // 文件已就绪，只同步执行重命名，避免两个接收任务交错覆盖同一份备份。
+    let disabledExisting = ''
+    if (fs.existsSync(target)) {
+      disabledExisting = freeDisabledName(path.join(targetDir, base))
+      fs.renameSync(target, disabledExisting)
+    }
+    try {
+      fs.renameSync(tmp, target)
+    } catch (error) {
+      if (disabledExisting) fs.renameSync(disabledExisting, target)
+      throw error
+    }
+    return { file: target, skipped: false, disabledExisting }
+  } finally {
+    await fsp.rm(tmp, { force: true })
   }
-  const tmp = target + '.part'
-  await fsp.copyFile(sourceFile, tmp)
-  await fsp.rename(tmp, target)
-  return { file: target, skipped: false, disabledExisting }
 }
 
 /** 按 SHA-1 在暂存目录里找已经收到的文件（不递归太深，避免误扫用户目录）。 */

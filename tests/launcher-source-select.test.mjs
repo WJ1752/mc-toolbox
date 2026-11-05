@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  knownSpeed, markRateLimited, orderByStats, pickFastestSource, rankCandidates, recordSample, resetSourceStats
+  canGrowConcurrency, knownSpeed, markRateLimited, orderByStats, pickFastestSource, rankCandidates, recordSample, resetSourceStats
 } from '../src/server/launcher/source-select.js'
 
 const BMCL = 'https://bmclapi2.bangbang93.com/assets/00/aaaa'
@@ -46,9 +46,12 @@ test('4xx 不降级线路，连接失败才降级；成功样本会清掉失败�
 
 test('429 只短暂降级：30 秒后恢复为「未知」，不会永久拉黑线路', () => {
   const now = 1_800_000_000_000
+  assert.equal(canGrowConcurrency([BMCL, MOJANG], now), true)
   markRateLimited(BMCL, { now })
   assert.equal(knownSpeed(BMCL, now + 1000), 0)
+  assert.equal(canGrowConcurrency([BMCL, MOJANG], now + 1000), false)
   assert.equal(knownSpeed(BMCL, now + 31_000), null)
+  assert.equal(canGrowConcurrency([BMCL, MOJANG], now + 31_000), true)
   // 限流期间排序把它放最后
   assert.deepEqual(orderByStats([BMCL, MOJANG], { now: now + 1000 }), [MOJANG, BMCL])
 })

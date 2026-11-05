@@ -114,6 +114,43 @@ test('补齐计划（发送方向）只挑我独有的文件，不做任何停�
   assert.equal(plan.disable.length, 0)
 })
 
+test('好友发送仅上传版本不同的本地 JAR，完全相同时跳过', async (t) => {
+  const { store } = await import('../src/server/store.js')
+  const { ClientStore } = await import('../src/server/friends/client-store.js')
+  const { resolveFriendsServer } = await import('../src/server/friends/config.js')
+  const { FriendsServerClient } = await import('../src/server/friends/server-client.js')
+  const { sendModsToFriend } = await import('../src/server/friends/manager.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mctb-send-mods-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const inst = { id: 'mc', name: '实例', mc: '1.20.1', loader: 'fabric', gameDir: dir, root: dir }
+  t.mock.method(store, 'get', () => ({ layoutVersion: 2, instances: [inst] }))
+  t.mock.method(store, 'set', () => {})
+  t.mock.method(ClientStore.prototype, 'get', () => ({ server: resolveFriendsServer(), session: {} }))
+  const mods = path.join(dir, 'mods')
+  fs.mkdirSync(mods)
+  fs.writeFileSync(path.join(mods, 'one.jar'), 'same')
+  fs.writeFileSync(path.join(mods, 'two.jar'), 'new')
+
+  let peerItems = []
+  const uploaded = []
+  t.mock.method(FriendsServerClient.prototype, 'request', async (method, url, options) => {
+    if (method === 'PUT') {
+      if (!peerItems.length) peerItems = options.body.items.map((item) => ({ ...item }))
+      return {}
+    }
+    if (method === 'GET') return { instances: { mc: { instance: inst, items: peerItems } } }
+    assert.equal(url, '/api/files')
+    return { file: { id: options.body.name } }
+  })
+  t.mock.method(FriendsServerClient.prototype, 'uploadFile', async (id) => { uploaded.push(id) })
+  const request = { friendId: 'bob', instanceId: inst.id }
+  await assert.rejects(() => sendModsToFriend(request), /没有需要发给对方的模组/)
+  assert.deepEqual(uploaded, [])
+  peerItems.find((item) => item.file === 'two.jar').sha1 = sha('old')
+  assert.deepEqual(await sendModsToFriend(request), { ok: true, count: 1 })
+  assert.deepEqual(uploaded, ['two.jar'])
+})
+
 test('同一个 jar 只是启用状态不同：只切换，不传文件', () => {
   const mine = [mod({ file: 'jei.jar', enabled: true })]
   const peer = [mod({ file: 'jei.jar', enabled: false })]
@@ -153,6 +190,13 @@ test('applyJar：写入、跳过相同文件、冲突时停用旧文件', async 
   assert.equal(next.skipped, false)
   assert.equal(fs.readFileSync(path.join(modsDir, 'example.jar'), 'utf8'), 'jar-content-v2')
   assert.equal(fs.readFileSync(path.join(modsDir, 'example.jar.disabled'), 'utf8'), 'jar-content-v1')
+
+  fs.writeFileSync(source, 'jar-content-v3')
+  const third = await applyJar({ sourceFile: source, targetDir: modsDir, filename: 'example.jar', sha1: sha('jar-content-v3') })
+  assert.equal(fs.readFileSync(third.file, 'utf8'), 'jar-content-v3')
+  assert.equal(fs.readFileSync(third.disabledExisting, 'utf8'), 'jar-content-v2')
+  assert.equal(fs.readFileSync(next.disabledExisting, 'utf8'), 'jar-content-v1')
+  assert.match(third.disabledExisting, /\.jar\.disabled$/)
 })
 
 test('applyJar：哈希不符拒绝落盘，文件名穿越被消毒', async () => {

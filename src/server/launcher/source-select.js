@@ -90,6 +90,11 @@ export function knownSpeed(url, now = Date.now()) {
   return null
 }
 
+/** 候选线路近期出现故障或限流时，暂缓增加素材下载连接数。 */
+export function canGrowConcurrency(urls, now = Date.now()) {
+  return urls.every((url) => knownSpeed(url, now) !== 0)
+}
+
 /** 按实测吞吐排序；未知线路保持调用方给的顺序，确认失败的排到最后。 */
 export function orderByStats(urls, { now = Date.now() } = {}) {
   const scored = (Array.isArray(urls) ? urls : []).map((url, index) => {

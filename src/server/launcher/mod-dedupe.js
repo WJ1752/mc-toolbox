@@ -270,12 +270,12 @@ export function resolveModPath(modsDir, relPath) {
   return target
 }
 
-async function freeDisabledName(file) {
-  if (!/\.jar$/i.test(file)) return file + '.disabled'
-  const base = file.slice(0, -4)
+export function freeDisabledName(file) {
+  const ext = path.extname(file)
+  const base = file.slice(0, file.length - ext.length)
   let target = file + '.disabled'
   let index = 1
-  while (fs.existsSync(target)) target = `${base}.${index++}.jar.disabled`
+  while (fs.existsSync(target)) target = `${base}.${index++}${ext}.disabled`
   return target
 }
 
@@ -318,7 +318,7 @@ export async function cleanupDuplicateMods(modsDir, { mode = 'delete', groups = 
             skipped.push({ relPath, reason: '已经是禁用状态' })
             continue
           }
-          const target = await freeDisabledName(file)
+          const target = freeDisabledName(file)
           await fsp.rename(file, target)
           done.push({ relPath, action: 'disable', to: path.relative(path.resolve(modsDir), target).split(path.sep).join('/') })
         } else {

@@ -6,7 +6,7 @@ import { ROOT, PUBLIC_DIR, DATA_DIR, CLIENT_MODS_DIR, CONFIG_DIR, HOST_EXE, init
 import { requestHandler, clientHeartbeat } from './src/server/api.js'
 import { startEngine, stopEngine, persistHistory } from './src/server/monitor.js'
 import { store } from './src/server/store.js'
-import { DEFAULT_SETTINGS } from './src/server/defaults.js'
+import { deepMerge, DEFAULT_SETTINGS } from './src/server/defaults.js'
 import { stopSync as stopI18n } from './src/server/i18n.js'
 import { shutdownServers } from './src/server/server-manager.js'
 import { pruneUnfinishedInstances } from './src/server/launcher/install.js'
@@ -106,34 +106,33 @@ async function main() {
     if (dir && !fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
   }
 
-  // 预热存储（首次运行写入默认配置）
-  store.get('settings', DEFAULT_SETTINGS)
-
   // 一次性迁移：v1 → v2（监测引擎默认改为不自动启动）；v2 → v3（默认处理方式改为「禁用（改后缀名）」）
   {
-    const s = store.get('settings', DEFAULT_SETTINGS)
-    let migrated = false
-    if ((s.version || 1) < 2) {
+    const saved = store.get('settings', DEFAULT_SETTINGS)
+    const oldVersion = saved?.version || 1
+    const s = deepMerge(DEFAULT_SETTINGS, saved)
+    let migrated = JSON.stringify(saved) !== JSON.stringify(s)
+    if (oldVersion < 2) {
       if (s.monitor && s.monitor.autoStart === true) s.monitor.autoStart = false
       migrated = true
       console.log('[迁移] 设置已升级到 v2：监测引擎默认不自动启动')
     }
-    if ((s.version || 1) < 3) {
+    if (oldVersion < 3) {
       if (s.client2server && s.client2server.defaultAction === 'backup') {
         s.client2server.defaultAction = 'disable'
         console.log('[迁移] 设置已升级到 v3：默认处理方式改为「禁用（改后缀名）」')
       }
       migrated = true
     }
-    if (migrated) {
-      s.version = 3
-      store.set('settings', s)
-    }
     // 「账号与启动」功能已移除：清掉旧版残留的 launcher 设置段
     if (s.launcher) {
       delete s.launcher
-      store.set('settings', s)
+      migrated = true
       console.log('[迁移] 已移除「账号与启动」残留设置（launcher）')
+    }
+    if (migrated) {
+      s.version = Math.max(s.version || 1, DEFAULT_SETTINGS.version)
+      store.set('settings', s)
     }
   }
 

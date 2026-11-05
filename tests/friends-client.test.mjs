@@ -59,14 +59,18 @@ test('探测自签服务器并固定指纹', async (t) => {
   assert.equal(health.ok, true)
 })
 
-test('指纹不匹配时拒绝请求', async (t) => {
+test('指纹不匹配时拒绝请求，对端收不到令牌和请求体', async (t) => {
   const ctx = await startTlsServer()
   t.after(() => ctx.close())
+  let requests = 0
+  ctx.server.on('request', () => { requests++ })
   const client = new FriendsServerClient({
     url: ctx.url,
+    token: 'test-session',
     fingerprint: 'AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99'
   })
-  await assert.rejects(() => client.request('GET', '/api/health'), /证书指纹不匹配/)
+  await assert.rejects(() => client.request('POST', '/api/auth/minecraft', { body: { accessToken: 'token-alice' } }), /证书指纹不匹配/)
+  assert.equal(requests, 0)
 })
 
 test('公网 HTTP 被拒绝，localhost 允许（测试/本机）', () => {
@@ -127,5 +131,7 @@ test('HTTPS 上传与下载文件并按 SHA-1 校验', async (t) => {
   const result = await b.downloadFile(created.file.id, target, { onProgress: ({ loaded }) => { downloaded = loaded } })
   assert.equal(result.sha1, sha1)
   assert.equal(downloaded, content.length)
+  assert.deepEqual(await fsp.readFile(target), content)
+  await assert.rejects(() => b.downloadFile('missing', target), { status: 404 })
   assert.deepEqual(await fsp.readFile(target), content)
 })

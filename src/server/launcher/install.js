@@ -41,7 +41,7 @@ import {
 } from './meta.js'
 import { collectLibraries, normalizeOs, requiredJavaMajor } from './launch-plan.js'
 import { downloadFromMirrors, fetchToFile, pickFastestSource, runPool, runPoolAdaptive, sha1File } from './download.js'
-import { hostOf, knownSpeed } from './source-select.js'
+import { canGrowConcurrency, hostOf } from './source-select.js'
 import { nextSpeed } from './speed-meter.js'
 import { pickJava } from './java.js'
 import {
@@ -1022,16 +1022,11 @@ async function downloadAssets(job, root, inst, effective, { source, from, to }) 
   // 镜像限流（429）期间暂停加连接并小幅回退，避免越压越限流。
   const settings = getSettings()
   const startConcurrency = Math.max(16, Math.min(64, (Number(settings.concurrency) || 8) * 4))
-  // 限流感知：按素材候选的主镜像判断 —— knownSpeed 返回 0 表示该线路被 429 短暂封禁。
+  // 整批素材共享同一组主机；采样时读取最新的线路状态。
   const sampleHash = String(entries[0]?.[1]?.hash || '')
-  const mirrorHold = (source || settings.source) === 'auto' && sampleHash
-    ? () => {
-        const urls = assetObjectUrls(sampleHash, { source })
-        return urls.length > 0 && !urls.every((url) => knownSpeed(url) !== 0)
-      }
-    : null
+  const sampleUrls = sampleHash ? assetObjectUrls(sampleHash, { source }) : []
   await probeAssetSource(job, entries, { source })
-  await runPoolAdaptive(entries, async ([name, value]) => {
+  await runPoolAdaptive(entries, async ([name, value], _index, signal) => {
     const hash = String(value.hash || '')
     const dest = path.join(root, 'assets', 'objects', hash.slice(0, 2), hash)
     let last = 0
@@ -1039,7 +1034,7 @@ async function downloadAssets(job, root, inst, effective, { source, from, to }) 
       ...netOptions(source),
       sha1: hash,
       size: Number(value.size) || 0,
-      signal: job.signal,
+      signal,
       verify: getSettings().verify !== false,
       retries: getSettings().retries || 0,
       onProgress: ({ received }) => {
@@ -1061,7 +1056,7 @@ async function downloadAssets(job, root, inst, effective, { source, from, to }) 
     max: 96,
     counter,
     signal: job.signal,
-    canGrow: mirrorHold || undefined
+    canGrow: () => canGrowConcurrency(sampleUrls)
   })
   job.log(`资源文件准备完成（${entries.length} 个）`, 'ok')
 

@@ -579,6 +579,8 @@ function syncInstanceFolder(current, next) {
     if (fs.existsSync(from)) fs.renameSync(from, to)
     else fs.mkdirSync(to, { recursive: true })
     next.folder = folder
+    // 导入实例的副本使用 ownDir/game；重命名后启动仍需指向随目录搬走的存档。
+    if (samePath(current.gameDir, path.join(from, 'game'))) next.gameDir = path.join(to, 'game')
     writeInstanceMarker(to, next)
   } catch {
     next.folder = current.folder
@@ -621,7 +623,6 @@ export function deleteInstance(id) {
 }
 
 export async function duplicateInstance(id, { name = '' } = {}) {
-  const data = getState()
   const source = findInstance(id)
   if (!source) throw new Error('实例不存在')
   const copy = normalizeInstance({
@@ -629,6 +630,7 @@ export async function duplicateInstance(id, { name = '' } = {}) {
     id: randomId(),
     // 拷贝要用自己的目录，不能继承源实例的 folder。
     folder: '',
+    gameDir: '',
     name: name || `${source.name} 副本`,
     created: Date.now(),
     updated: Date.now(),
@@ -642,29 +644,31 @@ export async function duplicateInstance(id, { name = '' } = {}) {
     `${copy.mc}-${copy.loader}`
   ])
   const sourcePaths = instancePaths(source)
-  const copyPaths = instancePaths(copy)
-  if (!source.external && fs.existsSync(sourcePaths.gameDir)) {
-    await fsp.mkdir(path.dirname(copyPaths.gameDir), { recursive: true })
-    await fsp.cp(sourcePaths.gameDir, copyPaths.gameDir, { recursive: true, force: true })
-  }
-  if (source.external) {
-    // 外部实例的版本/库还在原 .minecraft（baseDir 保持共享），但副本必须有
-    // 自己的游戏目录，否则在副本里改模组/存档会直接改到导入目录。
-    copy.baseDir = source.baseDir
-    copy.external = true
-    copy.gameDir = path.join(path.resolve(copy.root), 'versions', copy.folder, 'game')
-    copy.versionId = source.versionId
-    copy.jarVersion = source.jarVersion
-    copy.mcSource = source.mcSource
-    ensureInstanceDirs(copy)
-    // 只复制实例内容，不复制整个 .minecraft（libraries / assets 可能有几个 GB）。
-    const keep = ['mods', 'config', 'defaultconfigs', 'saves', 'resourcepacks', 'shaderpacks', 'options.txt', 'servers.dat', 'screenshots']
-    for (const name of keep) {
-      const from = path.join(sourcePaths.gameDir, name)
-      if (!fs.existsSync(from)) continue
-      await fsp.cp(from, path.join(copy.gameDir, name), { recursive: true, force: true }).catch(() => {})
+  const { ownDir } = instancePaths(copy)
+  // 第一次 await 前独占目标目录，两个同名复制任务就不会写进同一个副本。
+  fs.mkdirSync(path.dirname(ownDir), { recursive: true })
+  fs.mkdirSync(ownDir)
+  try {
+    if (source.external) {
+      // 版本与库继续共享；只将实例内容复制到副本自己的游戏目录。
+      copy.gameDir = path.join(ownDir, 'game')
+      await fsp.mkdir(copy.gameDir)
+      const keep = ['mods', 'config', 'defaultconfigs', 'saves', 'resourcepacks', 'shaderpacks', 'options.txt', 'servers.dat', 'screenshots']
+      // 源目录可能是已拔出的移动盘，必须区分“目录不可读”和“没有该可选内容”。
+      const entries = new Set(await fsp.readdir(sourcePaths.gameDir))
+      for (const name of keep) {
+        if (entries.has(name)) await fsp.cp(path.join(sourcePaths.gameDir, name), path.join(copy.gameDir, name), { recursive: true })
+      }
+    } else {
+      const sourceMarker = path.join(sourcePaths.gameDir, INSTANCE_MARKER)
+      await fsp.cp(sourcePaths.gameDir, ownDir, { recursive: true, filter: (file) => file !== sourceMarker })
     }
+    ensureInstanceDirs(copy)
+  } catch (error) {
+    await fsp.rm(ownDir, { recursive: true, force: true })
+    throw error
   }
+  const data = getState()
   data.instances.push(copy)
   saveState(data)
   return publicInstance(copy)

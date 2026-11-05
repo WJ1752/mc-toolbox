@@ -8,11 +8,15 @@ import os from 'node:os'
 
 import {
   allocateInstanceFolder,
+  createInstance,
+  duplicateInstance,
   filterVisibleInstances,
   instancePaths,
   migrateInstanceLayout,
-  safeInstanceFolderName
+  safeInstanceFolderName,
+  updateInstance
 } from '../src/server/launcher/state.js'
+import { store } from '../src/server/store.js'
 
 let tmp = ''
 
@@ -103,6 +107,43 @@ test('filterVisibleInstances：安装中的实例不进列表，完成后才出�
     ['a', 'b', 'c']
   )
   assert.deepEqual(filterVisibleInstances(null), [])
+})
+
+test('并发复制同名实例时独立保存存档和目录归属', async (t) => {
+  const root = path.join(tmp, 'parallel-copies')
+  const state = { layoutVersion: 2, settings: { root }, instances: [] }
+  t.mock.method(store, 'get', () => state)
+  t.mock.method(store, 'set', () => {})
+  const original = createInstance({ name: '原实例', mc: '1.21', root })
+  await fs.writeFile(path.join(original.paths.savesDir, 'world.txt'), 'world')
+  const copies = await Promise.all([duplicateInstance(original.id), duplicateInstance(original.id)])
+  assert.notEqual(copies[0].paths.gameDir, copies[1].paths.gameDir)
+  for (const copy of copies) {
+    assert.equal(await fs.readFile(path.join(copy.paths.savesDir, 'world.txt'), 'utf8'), 'world')
+    const marker = JSON.parse(await fs.readFile(path.join(copy.paths.gameDir, '.mc-toolbox-instance.json'), 'utf8'))
+    assert.equal(marker.id, copy.id)
+  }
+})
+
+test('外部副本改名仍能读取存档，复制出错不登记半成品', async (t) => {
+  const root = path.join(tmp, 'external-copies')
+  const baseDir = path.join(tmp, 'original-game')
+  const state = { layoutVersion: 2, settings: { root }, instances: [] }
+  t.mock.method(store, 'get', () => state)
+  t.mock.method(store, 'set', () => {})
+  await fs.mkdir(path.join(baseDir, 'saves'), { recursive: true })
+  await fs.writeFile(path.join(baseDir, 'saves', 'world.txt'), 'original')
+  const source = createInstance({ root, baseDir, mc: '1.21', name: '外部实例' })
+  const copy = await duplicateInstance(source.id)
+  await fs.writeFile(path.join(copy.paths.savesDir, 'world.txt'), 'copy')
+  const renamed = updateInstance(copy.id, { name: '改名后的副本' })
+  assert.equal(await fs.readFile(path.join(renamed.paths.savesDir, 'world.txt'), 'utf8'), 'copy')
+  assert.equal(await fs.readFile(path.join(baseDir, 'saves', 'world.txt'), 'utf8'), 'original')
+
+  t.mock.method(fs, 'cp', async () => { throw new Error('存档复制失败') })
+  await assert.rejects(duplicateInstance(source.id, { name: '未完成' }), /存档复制失败/)
+  assert.equal(state.instances.length, 2)
+  await assert.rejects(fs.stat(path.join(root, 'versions', '未完成')), { code: 'ENOENT' })
 })
 
 test('migrateInstanceLayout：旧 instances/<id> 目录搬到 versions/<实例名> 并写归属标记', async () => {

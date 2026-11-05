@@ -1,3 +1,18 @@
+// 合并设置补丁时保留未提供的默认项；数组（例如磁贴布局）整体替换。
+export function deepMerge(base, patch) {
+  const out = Array.isArray(base) ? base.slice() : { ...base }
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return out
+  for (const [k, v] of Object.entries(patch)) {
+    if (k === '__proto__') continue
+    if (Object.hasOwn(base, k) && base[k] && typeof base[k] === 'object' && !Array.isArray(base[k])) {
+      out[k] = deepMerge(base[k], v)
+    } else if (v !== undefined) {
+      out[k] = v
+    }
+  }
+  return out
+}
+
 // 全局默认设置（前后端共用，前端通过 /api/bootstrap 拉取）
 export const DEFAULT_SETTINGS = {
   version: 3,
