@@ -247,7 +247,7 @@ async function mountMods(container, t) {
   const dedupeBtn = btn(dedupeLabel, { size: 'sm', iconName: 'copy', onClick: () => openDedupe() })
   container.appendChild(tabEl(
     barEl(searchInput, seg([['all', '全部'], ['enabled', '已启用'], ['disabled', '已禁用'], ['duplicate', '重复']], 'all', (value) => { filter = value; paint() }), spacer(), count,
-      checkBtn, updateAllBtn, dedupeBtn,
+      checkBtn, updateAllBtn, btn('更新记录', { size: 'sm', onClick: openUpdateBackup }), dedupeBtn,
       btn('打开 mods 文件夹', { size: 'sm', iconName: 'folder-open', onClick: openFolder }),
       btn('导入 JAR', { size: 'sm', iconName: 'upload', onClick: importOne }),
       btn('安装模组', { size: 'sm', variant: 'primary', iconName: 'package-down', onClick: () => openInstall() })),
@@ -641,16 +641,75 @@ async function mountMods(container, t) {
       paint()
     }
   }
+  function previewUpdates(items) {
+    const selected = new Set(items)
+    const summary = tip('')
+    const submit = btn('开始更新', { variant: 'primary', onClick: () => {
+      modal.close()
+      void submitUpdates(items.filter(item => selected.has(item)))
+    } })
+    function summarize() {
+      const bytes = [...selected].reduce((sum, item) => sum + (item.latest?.file?.size || 0), 0)
+      summary.textContent = `已选 ${selected.size} 个 · 下载 ${fmtBytes(bytes)} · 可撤销最近一次成功的更新`
+      submit.disabled = selected.size === 0
+    }
+    const rows = items.map(item => {
+      const box = h('input', { type: 'checkbox', checked: true, onchange: () => {
+        if (box.checked) selected.add(item)
+        else selected.delete(item)
+        summarize()
+      } })
+      return h('label', { class: 'lp-row' }, box, mainEl(
+        titleEl(h('b', {}, item.name || item.file), item.disabled ? badge('已禁用') : null),
+        metaEl([item.current?.number || item.file, '→', item.latest?.number || item.latest?.file?.filename, fmtBytes(item.latest?.file?.size || 0)])))
+    })
+    const modal = t.modal({
+      title: '预览模组更新', size: 'lg',
+      body: h('div', {}, summary, h('div', { class: 'lp-list' }, rows)),
+      buttons: [{ label: '取消' }, submit]
+    })
+    summarize()
+  }
+  async function openUpdateBackup() {
+    try {
+      const { backup } = await t.api.modUpdateBackup(t.id)
+      if (t.life.dead) return
+      if (!backup) { t.toast('此实例暂无可撤销的更新'); return }
+      const undo = btn('撤销这次更新', { variant: 'danger', onClick: async () => {
+        undo.disabled = true
+        try {
+          await t.api.undoModUpdate(t.id, backup.id)
+          modal.close()
+          updateState.data = null
+          t.toast('已恢复更新前的模组和启停状态', 'ok')
+          await refresh()
+        } catch (error) {
+          t.toast('撤销失败：' + error.message, 'err')
+          undo.disabled = false
+        }
+      } })
+      const modal = t.modal({
+        title: '最近一次模组更新', size: 'lg',
+        body: h('div', {}, tip(`${fmtDateTime(backup.createdAt)} · ${backup.items.length} 个模组 · 撤销后恢复左侧文件`),
+          h('div', { class: 'lp-list' }, backup.items.map(item => rowEl('', metaEl([item.before, '→', item.after]))))),
+        buttons: [{ label: '关闭' }, undo]
+      })
+    } catch (error) { t.toast('读取更新记录失败：' + error.message, 'err') }
+  }
   async function submitUpdates(items) {
     const payload = items.map((upd) => ({
       relPath: upd.relPath,
+      oldSha1: upd.oldSha1,
       name: upd.name,
       url: upd.latest?.file?.url || '',
       filename: upd.latest?.file?.filename || '',
       sha1: upd.latest?.file?.sha1 || '',
       size: upd.latest?.file?.size || 0
-    })).filter((item) => item.relPath && item.url && item.sha1)
-    if (!payload.length) { t.toast('没有可用的更新文件', 'warn'); return }
+    }))
+    if (!payload.length || payload.some(item => !item.relPath || !item.url || !item.sha1)) {
+      t.toast('更新信息不完整，请重新检查更新', 'warn')
+      return
+    }
     try {
       const result = await t.api.updateMods(t.id, payload)
       t.toast(`已开始更新 ${payload.length} 个模组`, 'ok')
@@ -667,12 +726,12 @@ async function mountMods(container, t) {
   function updateOne(item) {
     const upd = updateMap().get(item.relPath)
     if (!upd) return
-    void submitUpdates([upd])
+    previewUpdates([upd])
   }
   function updateAll() {
     const updates = updateState.data?.updates || []
     if (!updates.length) return
-    void submitUpdates(updates)
+    previewUpdates(updates)
   }
 
   /* ---------------- 缺失前置 ---------------- */

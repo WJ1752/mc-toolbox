@@ -45,6 +45,7 @@ import {
   defaultExportDir
 } from './pack-export.js'
 import { findModUpdates, resolveMissingDependencies } from './updates.js'
+import { getModUpdateBackup, undoModUpdate, withModUpdateLock } from './mod-update-transaction.js'
 import { store } from '../store.js'
 import {
   prepareLaunch,
@@ -57,6 +58,7 @@ import {
   readLog,
   readSavedLog,
   listSessions,
+  isInstanceStarting,
   hasRunningGame,
   refreshRunningGames,
   getRunningDetectionStatus
@@ -66,6 +68,7 @@ import { requiredJavaMajor } from './launch-plan.js'
 import * as accounts from './accounts.js'
 import * as content from './content.js'
 import { scanExisting, importExisting, defaultMinecraftDirs } from './import.js'
+import { registerPrismMigrationApi } from './prism-migration.js'
 import { getNews } from './news.js'
 import { receiveUploadedPack } from '../pack-converter.js'
 import { RUNTIME_DIR, isSEA } from '../paths.js'
@@ -100,7 +103,7 @@ function instanceOf(id) {
 async function assertInstanceIdle(id, action = '操作') {
   await refreshRunningGames()
   const busy = listSessions().find((item) => item.instanceId === id && ['starting', 'running', 'stopping'].includes(item.status))
-  if (busy) throw new Error(`实例正在运行，无法${action}；请先退出游戏`)
+  if (busy || isInstanceStarting(id)) throw new Error(`实例正在运行，无法${action}；请先退出游戏`)
 }
 
 function safeInt(value, fallback = 0) {
@@ -272,17 +275,18 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
     const allowed = ['name', 'group', 'memory', 'javaPath', 'jvmArgs', 'gameArgs', 'width', 'height', 'fullscreen', 'server', 'autoConnect', 'checkFiles', 'notes', 'icon']
     const patch = {}
     for (const key of allowed) if (body[key] !== undefined) patch[key] = body[key]
-    return publicInstance(updateInstance(params.id, patch))
+    const apply = () => publicInstance(updateInstance(params.id, patch))
+    return patch.name === undefined ? apply() : withModUpdateLock(instanceOf(params.id), apply)
   })
   on('DELETE', '/api/launcher/instances/:id', async (_req, params) => {
     instanceOf(params.id)
     await assertInstanceIdle(params.id, '删除')
-    return deleteInstance(params.id)
+    return withModUpdateLock(instanceOf(params.id), () => deleteInstance(params.id))
   })
   on('POST', '/api/launcher/instances/:id/duplicate', async (req, params) => {
     const body = await readBody(req)
     await assertInstanceIdle(params.id, '复制')
-    return await duplicateInstance(params.id, { name: body.name || '' })
+    return withModUpdateLock(instanceOf(params.id), () => duplicateInstance(params.id, { name: body.name || '' }))
   })
   on('POST', '/api/launcher/instances/:id/select', async (_req, params) => {
     instanceOf(params.id)
@@ -364,13 +368,13 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
     const body = await readBody(req)
     const inst = instanceOf(params.id)
     if (!body.path) throw new Error('缺少模组路径')
-    return await content.setModEnabled(inst, body.path, body.enabled !== false)
+    return withModUpdateLock(inst, () => content.setModEnabled(inst, body.path, body.enabled !== false))
   })
   on('POST', '/api/launcher/instances/:id/mods/delete', async (req, params) => {
     const body = await readBody(req)
     const inst = instanceOf(params.id)
     if (!body.path) throw new Error('缺少模组路径')
-    return await content.deleteMod(inst, body.path)
+    return withModUpdateLock(inst, () => content.deleteMod(inst, body.path))
   })
   on('GET', '/api/launcher/instances/:id/mods/updates', async (_req, params, query) => {
     const inst = instanceOf(params.id)
@@ -378,16 +382,24 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
   })
   on('POST', '/api/launcher/instances/:id/mods/update', async (req, params) => {
     const body = await readBody(req)
-    instanceOf(params.id)
+    await assertInstanceIdle(params.id, '更新模组')
     const items = (Array.isArray(body.items) ? body.items : []).map((item) => ({
       relPath: String(item?.relPath || ''),
+      oldSha1: String(item?.oldSha1 || '').toLowerCase(),
       name: String(item?.name || ''),
       url: String(item?.url || ''),
       filename: String(item?.filename || ''),
       sha1: String(item?.sha1 || '').toLowerCase(),
       size: Number(item?.size) || 0
-    })).filter((item) => item.relPath && item.url)
+    }))
     return startModUpdates(params.id, items)
+  })
+  on('GET', '/api/launcher/instances/:id/mods/update/backup', async (_req, params) =>
+    getModUpdateBackup(instanceOf(params.id)))
+  on('POST', '/api/launcher/instances/:id/mods/update/undo', async (req, params) => {
+    const body = await readBody(req)
+    await assertInstanceIdle(params.id, '撤销模组更新')
+    return undoModUpdate(instanceOf(params.id), body.id)
   })
   on('GET', '/api/launcher/instances/:id/mods/missing', async (_req, params) => {
     const inst = instanceOf(params.id)
@@ -408,7 +420,7 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
       }))
       .filter((group) => group.keep && group.remove.length)
     if (!groups.length) throw new Error('没有需要整理的重复模组')
-    return await content.cleanDuplicateMods(inst, { mode, groups })
+    return withModUpdateLock(inst, () => content.cleanDuplicateMods(inst, { mode, groups }))
   })
   on('POST', '/api/launcher/instances/:id/content/delete', async (req, params) => {
     const body = await readBody(req)
@@ -434,7 +446,8 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
     const name = decodeURIComponent(String(req.headers['x-file-name'] || ''))
     const buffer = await readRawBody(req, 512 * 1024 ** 2)
     if (!buffer.length) throw new Error('没有收到文件内容')
-    return await content.writeUpload(inst, type, name, buffer)
+    const write = () => content.writeUpload(inst, type, name, buffer)
+    return type === 'mods' ? withModUpdateLock(inst, write) : write()
   })
   on('GET', '/api/launcher/instances/:id/icon', async (_req, params, query, res) => {
     const inst = instanceOf(params.id)
@@ -587,6 +600,7 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
   on('DELETE', '/api/launcher/accounts/:id', async (_req, params) => accounts.removeAccount(params.id))
 
   /* ---------------- import existing installations ---------------- */
+  registerPrismMigrationApi(on, readBody)
   on('GET', '/api/launcher/import/scan', async (_req, _p, query) => await scanExisting({ dir: query.dir || '' }))
   on('POST', '/api/launcher/import', async (req) => {
     const body = await readBody(req)

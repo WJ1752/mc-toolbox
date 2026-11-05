@@ -128,6 +128,29 @@ export function fillPlan(diff, direction = 'acquire') {
   return { mode: 'acquire', acquire, toggle, disable }
 }
 
+// 群入服只要求必装项目。保留可选模组与本地额外模组；同名但无法确认
+// 是同一模组的文件交给玩家处理，避免覆盖同名的客户端补丁。
+export function groupJoinPlan(profile, inst, items) {
+  const compatible = profile.mc === inst.mc && profile.loader === inst.loader
+    && (!profile.loaderVersion || profile.loaderVersion === inst.loaderVersion)
+  const rows = profile.items.map((item) => {
+    const same = items.filter((local) => local.sha1 === item.sha1)
+    const other = items.filter((local) => local.enabled && local.sha1 !== item.sha1 && item.modid
+      && local.modid && normalizeModId(local.modid) === normalizeModId(item.modid))
+    const collision = items.some((local) => local.enabled && local.file.toLowerCase() === item.file.toLowerCase()
+      && local.sha1 !== item.sha1 && !other.includes(local))
+    let action = 'download'
+    if (collision) action = 'manual'
+    else if (same.some((local) => local.enabled)) action = other.length ? 'replace' : 'ready'
+    else if (same.length) action = 'enable'
+    else if (other.length) action = 'replace'
+    if (item.optional && action !== 'ready') action = 'optional'
+    const local = same.find((entry) => entry.enabled) || same[0]
+    return { ...item, action, local: local?.relPath || '', disable: other.map((entry) => entry.relPath) }
+  })
+  return { compatible, ready: compatible && rows.every((row) => row.optional || row.action === 'ready'), rows }
+}
+
 /** 暂存区路径：本机固定目录，绝不由对端文件名参与拼接。 */
 export function stagingDirFor(rootDir, transferId) {
   const text = String(transferId || '')

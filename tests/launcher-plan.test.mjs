@@ -179,6 +179,14 @@ test('buildLaunchPlan assembles classpath, natives, game args and Forge ignore l
   assert.ok(preview.includes('<access token>'))
 })
 
+test('现代版本进服使用清单中的 Quick Play，保留 IPv6 和端口', () => {
+  const version = { mainClass: 'Main', arguments: { game: [{ rules: [{ action: 'allow', features: { is_quick_play_multiplayer: true } }],
+    value: ['--quickPlayMultiplayer', '${quickPlayMultiplayer}'] }] } }
+  const plan = buildLaunchPlan({ version, paths: { nativesDir: '.', libraries: '.', gameDir: '.', assets: '.' },
+    options: { server: '[2001:db8::1]:25566' } })
+  assert.deepEqual(plan.gameArgs, ['--quickPlayMultiplayer', '[2001:db8::1]:25566'])
+})
+
 test('legacy minecraftArguments are split and substituted', () => {
   const version = {
     id: '1.7.10',

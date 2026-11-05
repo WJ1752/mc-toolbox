@@ -407,6 +407,7 @@ export function buildLaunchPlan({
   const height = Number(options.height) || 0
   const effectiveFeatures = {
     has_custom_resolution: width > 0 && height > 0,
+    is_quick_play_multiplayer: !!options.server,
     ...(options.features || {}),
     ...features
   }
@@ -430,6 +431,7 @@ export function buildLaunchPlan({
     version_name: paths.versionName || version.id || '',
     version_type: version.type || options.versionType || 'release',
     game_directory: paths.gameDir,
+    quickPlayMultiplayer: options.server || '',
     assets_root: paths.assets,
     assets_index_name: paths.assetIndexId || version.assetIndex?.id || version.assets || '',
     game_assets: paths.assets,
@@ -505,9 +507,9 @@ export function buildLaunchPlan({
     ]
   }
 
-  // Server auto-connect. Quick Play is deliberately not enabled: the classic
-  // --server/--port pair works across the widest range of versions.
-  if (server.host && options.server !== false) {
+  // Modern version manifests supply --quickPlayMultiplayer through their feature
+  // rules. Older clients use the host and port as separate arguments.
+  if (server.host && !game.includes('--quickPlayMultiplayer')) {
     if (!game.includes('--server')) game.push('--server', server.host)
     if (server.port && !game.includes('--port')) game.push('--port', server.port)
   }

@@ -23,7 +23,7 @@ import crypto from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const SERVER_NAME = 'mc-toolbox-friends'
-const SERVER_VERSION = 2
+const SERVER_VERSION = 3
 const SESSION_DAYS = 30
 const MAX_JSON_BODY = 1024 * 1024
 const MAX_MESSAGE = 2000
@@ -87,6 +87,36 @@ function validUuid(value) {
 }
 function validSha1(value) {
   return /^[0-9a-f]{40}$/.test(String(value || ''))
+}
+function cleanJoinProfile(body) {
+  const fail = (message) => { throw Object.assign(new Error(message), { status: 400 }) }
+  const address = String(body.address || '').trim()
+  if (address.length > 253 || !/^(?:[a-z0-9][a-z0-9.-]*|\[[0-9a-f:.]+\])(?::[0-9]{1,5})?$/i.test(address)) fail('请填写服务器域名或 IP，可附端口')
+  try {
+    if (new URL('http://' + address).port === '0') fail('端口无效')
+  } catch { fail('服务器地址或端口无效') }
+  const version = cleanText(body.version, 64)
+  const mc = cleanText(body.mc, 32)
+  const loader = cleanText(body.loader, 24)
+  const loaderVersion = cleanText(body.loaderVersion, 80)
+  if (!version || !mc || !loader || (loader !== 'vanilla' && !loaderVersion)) fail('缺少配置版本、MC 或加载器版本')
+  if (!Array.isArray(body.items) || body.items.length > MAX_MANIFEST_ITEMS) fail('入服清单最多 500 项')
+  const files = new Set()
+  const hashes = new Set()
+  const ids = new Set()
+  const items = body.items.map((item) => {
+    const file = sanitizeFileName(item?.file)
+    const sha1 = String(item?.sha1 || '').toLowerCase()
+    const modid = cleanText(item?.modid, 64).toLowerCase()
+    if (!validSha1(sha1) || !/\.jar$/i.test(file) || file !== item?.file || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])\./i.test(file)) fail('模组文件名或哈希无效')
+    if (files.has(file.toLowerCase()) || hashes.has(sha1) || (modid && ids.has(modid))) fail('入服清单包含重复模组：' + file)
+    files.add(file.toLowerCase())
+    hashes.add(sha1)
+    ids.add(modid)
+    const size = Number.isSafeInteger(item.size) && item.size > 0 ? item.size : 0
+    return { file, sha1, size, modid, version: cleanText(item.version, 64), optional: item.optional === true }
+  })
+  return { revision: randomId('r_'), version, address, mc, loader, loaderVersion, items }
 }
 function friendView(account) {
   return {
@@ -195,7 +225,10 @@ class Store {
   }
 
   saveGroups() {
-    return this.writeJson(this.groupsFile, [...this.groups.values()]).catch((error) => this.logger.warn?.('[friends-server] 保存群聊失败：' + error.message))
+    // 群主发布配置、群员变动共用 groups.json，排队写同一个临时文件。
+    this.groupWrite = (this.groupWrite || Promise.resolve()).catch(() => {}).then(() =>
+      this.writeJson(this.groupsFile, [...this.groups.values()]))
+    return this.groupWrite
   }
 
   createGroup(owner, { name, members }) {
@@ -545,6 +578,7 @@ export function createFriendsServer(options = {}) {
       id: group.id,
       name: group.name,
       owner: group.owner,
+      joinVersion: group.joinProfile?.version || '',
       memberIds: group.members.slice(),
       members: group.members.map((uuid) => store.accounts.get(uuid)).filter(Boolean).map(friendView),
       createdAt: group.createdAt || 0,
@@ -863,6 +897,7 @@ export function createFriendsServer(options = {}) {
           ok: true,
           name: SERVER_NAME,
           version: SERVER_VERSION,
+          capabilities: { groupJoinProfile: true },
           time: now(),
           requiresInvite: !!invite,
           quotaPerUser,
@@ -1007,6 +1042,28 @@ export function createFriendsServer(options = {}) {
         const group = store.createGroup(account.uuid, { name, members })
         await store.saveGroups()
         return json(res, 200, { group: groupView(account, group) })
+      }
+      const joinMatch = pathname.match(/^\/api\/groups\/([A-Za-z0-9_-]+)\/join-profile$/)
+      if (joinMatch) {
+        const group = groupOrFail(account, joinMatch[1], res)
+        if (!group) return
+        if (method === 'GET') return json(res, 200, { profile: group.joinProfile || null })
+        if (group.owner !== account.uuid) return json(res, 403, { error: '只有群主可以更改入服配置' })
+        if (method === 'PUT' || method === 'DELETE') {
+          const body = method === 'PUT' ? await readJson(req) : null
+          if (group.owner !== account.uuid) return json(res, 403, { error: '群主已变更' })
+          if (method === 'PUT' && !body) return json(res, 400, { error: '入服配置为空' })
+          const profile = body ? cleanJoinProfile(body) : null
+          const previous = group.joinProfile
+          group.joinProfile = profile
+          group.updatedAt = now()
+          try { await store.saveGroups() } catch (error) {
+            if (group.joinProfile === profile) group.joinProfile = previous
+            throw error
+          }
+          return json(res, 200, { profile })
+        }
+        return json(res, 405, { error: '不支持的请求' })
       }
       const groupMemberMatch = pathname.match(/^\/api\/groups\/([A-Za-z0-9_-]+)\/members(?:\/([A-Za-z0-9-]+))?$/)
       if (groupMemberMatch) {

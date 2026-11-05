@@ -1,0 +1,2 @@
+lang:zh_cn
+renderDistance:8

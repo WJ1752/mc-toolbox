@@ -81,6 +81,7 @@ test('健康检查与 MC 令牌校验登录', async (t) => {
   assert.equal(health.status, 200)
   assert.equal(health.data.ok, true)
   assert.equal(health.data.name, 'mc-toolbox-friends')
+  assert.equal(health.data.capabilities.groupJoinProfile, true)
 
   const bad = await api(ctx.base, 'POST', '/api/auth/minecraft', { body: { accessToken: 'bad' } })
   assert.equal(bad.status, 401)
@@ -342,6 +343,18 @@ test('群聊：创建、拉人、消息、未读与已读', async (t) => {
   const groupId = created.data.group.id
   assert.equal(created.data.group.members.length, 3)
 
+  const joinPath = `/api/groups/${groupId}/join-profile`
+  const pinned = { version: '开荒 v2', address: 'play.example.com:25565', mc: '1.20.1', loader: 'fabric',
+    loaderVersion: '0.16.1', items: [{ file: 'addon.jar', sha1: 'a'.repeat(40), optional: true }] }
+  assert.equal((await api(ctx.base, 'PUT', joinPath, { token: b.token, body: pinned })).status, 403)
+  assert.equal((await api(ctx.base, 'PUT', joinPath, { token: a.token, body: { ...pinned, address: '--server' } })).status, 400)
+  const published = await api(ctx.base, 'PUT', joinPath, { token: a.token, body: pinned })
+  assert.equal(published.status, 200)
+  const member = await api(ctx.base, 'GET', joinPath, { token: b.token })
+  assert.equal(member.data.profile.revision, published.data.profile.revision)
+  assert.equal(member.data.profile.items[0].optional, true)
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(ctx.dataDir, 'groups.json')))[0].joinProfile, member.data.profile)
+
   const bGroups = await api(ctx.base, 'GET', '/api/friends', { token: b.token })
   assert.equal(bGroups.data.groups.length, 1)
   assert.equal(bGroups.data.groups[0].unread, 0)
@@ -368,6 +381,10 @@ test('群聊：创建、拉人、消息、未读与已读', async (t) => {
   const removed = await api(ctx.base, 'DELETE', `/api/groups/${groupId}/members/${UUID_C}`, { token: a.token })
   assert.equal(removed.status, 200)
   const denied = await api(ctx.base, 'GET', `/api/groups/${groupId}/messages`, { token: c.token })
+  assert.equal((await api(ctx.base, 'GET', joinPath, { token: c.token })).status, 404)
+  assert.equal((await api(ctx.base, 'DELETE', joinPath, { token: b.token })).status, 403)
+  assert.equal((await api(ctx.base, 'DELETE', joinPath, { token: a.token })).status, 200)
+  assert.equal((await api(ctx.base, 'GET', joinPath, { token: b.token })).data.profile, null)
   assert.equal(denied.status, 404)
 })
 

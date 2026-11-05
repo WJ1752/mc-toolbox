@@ -122,6 +122,16 @@ journalctl -u mc-toolbox-friends -f
 
 自建/本地调试时，可在启动前设置 `MC_TOOLBOX_FRIENDS_SERVER`、`MC_TOOLBOX_FRIENDS_FINGERPRINT` 环境变量临时覆盖；正式发布应改 `config.js` 并重新构建，换证书/换地址都必须重新发版。
 
+### 群入服配置
+
+群主在群聊顶部打开「入服配置」，选择来源实例，填写配置版本和游戏服务器地址。勾选必装模组后发布。好友服务将文件名、SHA-1 和版本随群保存到 `groups.json`。每次发布都会生成新的修订号。
+
+成员选择 MC、加载器及加载器版本都匹配的实例，预览差异并点击「补齐必装模组」。启动器从已接收文件和 Modrinth 按哈希寻找必装 JAR；需要手动提供的文件会列出文件名和原因。群主可以把对应文件发到群聊。成员接收后再次补齐，或打开模组目录处理同名冲突。就绪后点击「启动并进服」，使用本次配置的地址。
+
+已经部署的好友服务需将 `tools/friends-server.mjs` 更新为含入服配置接口的版本，并重启原服务。沿用已有数据目录、证书及邀请码。
+
+v1.13.0 附带的好友服务在 `GET /api/health` 返回协议版本 3 和 `capabilities.groupJoinProfile: true`。管理员可通过这两项核对当前运行进程。
+
 ## 5. 接口
 
 所有接口在 HTTPS 下，除 `/api/health` 与 `/api/auth/minecraft` 外都需要 `Authorization: Bearer <会话令牌>`：
@@ -132,6 +142,7 @@ journalctl -u mc-toolbox-friends -f
 - `GET|POST /api/messages`、`POST /api/read`（消息可带 `image` 附件）
 - `GET /api/groups`、`POST /api/groups`、`POST|DELETE /api/groups/:id/members[/:uuid]`、`DELETE /api/groups/:id`
 - `GET|POST /api/groups/:id/messages`、`POST /api/groups/:id/read`
+- `GET /api/groups/:id/join-profile`（群员读取）、`PUT|DELETE /api/groups/:id/join-profile`（群主发布或撤下）
 - `POST /api/files`（`to` / `groupId` / `targets` 支持好友、群聊与群发）、`PUT /api/files/:id`、`GET /api/files`、`GET /api/files/:id/download`、`DELETE /api/files/:id`
 - `PUT /api/mods/:key`、`GET /api/mods?uuid=`
 - `PUT /api/me`、`POST /api/heartbeat`、`POST /api/auth/logout`

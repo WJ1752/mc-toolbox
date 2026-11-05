@@ -108,6 +108,7 @@ const state = {
   lastJobState: new Map(),
   finishedNotified: new Set(),
   installController: null,
+  installTab: 'create',
   javaController: null,
   downloadsController: null,
   friendsController: null,
@@ -672,13 +673,7 @@ function buildNav() {
     friendsBtn,
     navButton('downloads', '下载中心', 'download', () => showView('downloads')),
     navButton('java', 'Java', 'java', () => showView('java')),
-    navButton('import', '导入已有游戏', 'archive', async () => {
-      await showView('install')
-      setTimeout(() => {
-        const tabs = [...document.querySelectorAll('.lp-view-body .seg button')]
-        tabs.find((button) => /导入已有/.test(button.textContent || ''))?.click()
-      }, 60)
-    }),
+    navButton('import', '导入已有游戏', 'archive', () => showView('install', 'import')),
     h('div', { class: 'lp-nav-sep' }),
     // 启动器是主页：工作台只是另一个页面，不再写成「返回工作台」。
     navButton('workspace', '工作台', 'workspace', () => helpers.switchPage?.('workbench')),
@@ -1048,9 +1043,9 @@ async function renderInstallView() {
   ))
   try {
     const mod = await loadModule('install')
-    if (state.view !== 'install') return
+    if (state.view !== 'install' || !body.isConnected) return
     if (!state.installController) state.installController = mod.createInstallCenter(pageCtx())
-    state.installController.render(body)
+    state.installController.render(body, state.installTab)
   } catch (e) {
     state.pendingPackFile = null
     body.appendChild(h('div', { class: 'lp-main-error' }, icon('warning', { size: 22 }), h('b', {}, '加载安装中心失败'), h('p', {}, e.message)))
@@ -1106,7 +1101,8 @@ async function renderFriendsView() {
   }
 }
 
-async function showView(view) {
+async function showView(view, installTab = 'create') {
+  if (view === 'install') state.installTab = installTab
   // 切页时一定收掉拖放遮罩，避免 ESC 取消拖拽后遮罩跟着新页面一起出现。
   hideDropOverlay()
   // 离开安装页时丢弃还没被消费的拖入文件，避免下次进入安装页时误触发上传。
@@ -1159,13 +1155,7 @@ function renderWelcome() {
     h('div', { class: 'lp-welcome-actions' },
       btn('新建实例', { variant: 'primary', iconName: 'add', onClick: () => showView('install') }),
       btn(account ? '添加账户' : '添加账户', { iconName: 'user', onClick: () => openAccounts() }),
-      btn('导入已有游戏', { iconName: 'archive', onClick: async () => {
-        await showView('install')
-        setTimeout(() => {
-          const tabs = [...document.querySelectorAll('.lp-view-body .seg button')]
-          tabs.find((button) => /导入已有/.test(button.textContent || ''))?.click()
-        }, 60)
-      } })
+      btn('导入已有游戏', { iconName: 'archive', onClick: () => showView('install', 'import') })
     )
   ))
 

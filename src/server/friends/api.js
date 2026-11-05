@@ -35,6 +35,14 @@ export function registerFriendsApi(on, { readBody } = {}) {
   // ---------------- 群聊 ----------------
   on('GET', '/api/friends/groups', async () => await manager.listGroups())
   on('POST', '/api/friends/groups', async (req) => await manager.createGroup(await body(req)))
+  const joinPath = '/api/friends/groups/:id/join-profile'
+  on('GET', joinPath, async (_req, params) => await manager.getJoinProfile(params.id))
+  on('PUT', joinPath, async (req, params) => await manager.publishJoinProfile(params.id, await body(req)))
+  on('DELETE', joinPath, async (_req, params) => await manager.clearJoinProfile(params.id))
+  for (const action of ['preview', 'apply', 'launch']) {
+    on('POST', joinPath + '/' + action, async (req, params) =>
+      await manager.joinGroupInstance(params.id, await body(req), action))
+  }
   on('POST', '/api/friends/groups/:id/members', async (req, params) => {
     const payload = await body(req)
     return await manager.addGroupMember(params.id, payload.uuid)

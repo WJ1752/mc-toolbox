@@ -14,11 +14,12 @@ import { FriendsServerClient } from './server-client.js'
 import { resolveFriendsServer, sameFriendsServer } from './config.js'
 import * as content from '../launcher/content.js'
 import { findInstance, instancePaths } from '../launcher/state.js'
-import { listSessions } from '../launcher/launch.js'
+import { launchStatus, listSessions, startInstance } from '../launcher/launch.js'
+import { withModUpdateLock } from '../launcher/mod-update-transaction.js'
 import { startPackExport, getExportJob } from '../launcher/pack-export.js'
 import { nextSpeed } from '../launcher/speed-meter.js'
 import * as accounts from '../launcher/accounts.js'
-import { applyJar, diffManifests, fillPlan, findStagedBySha, manifestFromItems, sha1File } from './mods-sync.js'
+import { applyJar, diffManifests, fillPlan, findStagedBySha, groupJoinPlan, manifestFromItems, sha1File } from './mods-sync.js'
 import { sanitizeFileName, uniqueFileName } from './transfer.js'
 
 const RECEIVED_ROOT = process.env.MC_TOOLBOX_FRIENDS_RECEIVED || path.join(DATA_DIR, 'friends', 'received')
@@ -627,13 +628,13 @@ export async function downloadFile(id, { dir = '', instanceId = '' } = {}) {
     let finalPath = result.path
     let finalName = path.basename(result.path)
     if (applyToInstance) {
-      const applied = await applyJar({
+      const applied = await withModUpdateLock(inst, () => applyJar({
         sourceFile: result.path,
         targetDir: instancePaths(inst).modsDir,
         filename: file.name,
         sha1: file.sha1 || result.sha1,
         enabled: true
-      })
+      }))
       finalPath = applied.file
       finalName = path.basename(applied.file)
       // 已经进了实例 mods 目录，中转区的临时副本就没用了。
@@ -693,13 +694,13 @@ export async function applyReceivedToInstance(id, instanceId) {
   if (!src?.path || !fs.existsSync(src.path)) throw new Error('文件已被移动或删除')
   const inst = findInstance(String(instanceId || ''))
   if (!inst) throw new Error('实例不存在')
-  const applied = await applyJar({
+  const applied = await withModUpdateLock(inst, async () => applyJar({
     sourceFile: src.path,
     targetDir: instancePaths(inst).modsDir,
     filename: record.name || src.name,
     sha1: src.sha1 || await sha1File(src.path),
     enabled: true
-  })
+  }))
   record.instanceId = inst.id
   record.instanceName = inst.name
   getStore().addReceived(record)
@@ -1051,6 +1052,7 @@ export async function compareMods({ friendId, instanceId } = {}) {
 }
 
 async function resolveModrinthFile(sha1) {
+  if (!/^[0-9a-f]{40}$/.test(sha1)) throw new Error('模组哈希无效')
   const cacheDir = path.join(DATA_DIR, 'friends', 'mods-cache')
   const cacheFile = path.join(cacheDir, `${sha1}.jar`)
   if (fs.existsSync(cacheFile)) {
@@ -1081,6 +1083,14 @@ async function resolveModrinthFile(sha1) {
 }
 
 async function findReceivedBySha(sha1) {
+  // 下载目录可以自选；先按本地台账定位并复核，避免群友发来的手动文件
+  // 因为保存在默认暂存区之外而被要求再次下载。
+  for (const record of getStore().get().received || []) {
+    if (record.kind !== 'mod') continue
+    for (const file of record.files || []) {
+      if (file.sha1 === sha1 && file.path && await sha1File(file.path).catch(() => '') === sha1) return file.path
+    }
+  }
   let entries = []
   try {
     entries = await fsp.readdir(receivedRoot, { withFileTypes: true })
@@ -1093,6 +1103,86 @@ async function findReceivedBySha(sha1) {
     if (found) return found
   }
   return ''
+}
+
+function joinProfilePath(groupId) {
+  return `/api/groups/${encodeURIComponent(groupIdOf(groupId))}/join-profile`
+}
+
+export async function getJoinProfile(groupId) {
+  return await requireClient().request('GET', joinProfilePath(groupId))
+}
+
+export async function clearJoinProfile(groupId) {
+  return await requireClient().request('DELETE', joinProfilePath(groupId))
+}
+
+export async function publishJoinProfile(groupId, { instanceId, version, address, optionalFiles = [] }) {
+  const inst = findInstance(instanceId)
+  if (!inst) throw new Error('请选择配置来源实例')
+  const manifest = await manifestForInstance(inst)
+  const enabled = manifest.items.filter((item) => item.enabled)
+  if (enabled.length !== manifest.counts.enabled) throw new Error('部分模组读取失败，请重新检查实例')
+  const optional = new Set(optionalFiles)
+  const items = enabled.map((item) => ({
+    file: item.file, sha1: item.sha1, size: item.size, modid: item.modid, version: item.version, optional: optional.has(item.relPath)
+  }))
+  return await requireClient().request('PUT', joinProfilePath(groupId), {
+    body: { version, address, mc: inst.mc, loader: inst.loader, loaderVersion: inst.loaderVersion, items }
+  })
+}
+
+async function readJoinPlan(groupId, inst, revision) {
+  const { profile } = await getJoinProfile(groupId)
+  if (!profile || (revision && profile.revision !== revision)) throw new Error('入服配置已变更，请重新打开入服配置')
+  const manifest = await manifestForInstance(inst)
+  if (manifest.items.length !== manifest.counts.total) throw new Error('部分本地模组读取失败，请检查后重试')
+  return { profile, modsDir: manifest.dir, ...groupJoinPlan(profile, inst, manifest.items) }
+}
+
+export async function joinGroupInstance(groupId, { instanceId, revision }, action) {
+  const inst = findInstance(instanceId)
+  if (!inst) throw new Error('请选择本地实例')
+  if (action === 'preview') return await readJoinPlan(groupId, inst, revision)
+  if (!revision) throw new Error('请先预览群入服配置')
+  if (action === 'launch') {
+    return await startInstance(inst.id, { resolveServer: async (instance) => {
+      const plan = await readJoinPlan(groupId, instance, revision)
+      if (!plan.ready) throw new Error('必装模组或游戏版本不匹配，请先补齐')
+      return plan.profile.address
+    } })
+  }
+  if (action !== 'apply') throw new Error('未知的入服操作')
+  return await withModUpdateLock(inst, async () => {
+    const plan = await readJoinPlan(groupId, inst, revision)
+    if (!plan.compatible) throw new Error('请选择 MC、加载器及其版本均匹配的实例')
+    if ((await launchStatus(inst.id)).running) throw new Error('请关闭正在运行的实例后再补齐模组')
+    const manual = []
+    // 一次只处理一个必装项；已完成的项可在重试时按哈希跳过。
+    for (const row of plan.rows) {
+      if (row.optional || row.action === 'ready') continue
+      if (row.action === 'manual') {
+        manual.push({ file: row.file, reason: '与本地文件同名，请在实例中确认并移走冲突文件' })
+        continue
+      }
+      try {
+        const active = row.local && !row.local.toLowerCase().endsWith('.disabled')
+        let installedFile = active ? path.resolve(plan.modsDir, row.local) : ''
+        if (!active) {
+          const source = row.local ? path.resolve(plan.modsDir, row.local)
+            : await findReceivedBySha(row.sha1) || await resolveModrinthFile(row.sha1)
+          const result = await applyJar({ sourceFile: source, targetDir: plan.modsDir, filename: row.file, sha1: row.sha1 })
+          installedFile = result.file
+        }
+        for (const old of row.disable) {
+          if (path.resolve(plan.modsDir, old).toLowerCase() !== installedFile.toLowerCase()) await content.setModEnabled(inst, old, false)
+        }
+      } catch (error) {
+        manual.push({ file: row.file, reason: error.message })
+      }
+    }
+    return { ...await readJoinPlan(groupId, inst, revision), manual }
+  })
 }
 
 export function startModsFill({ friendId, instanceId } = {}) {
@@ -1117,7 +1207,7 @@ export function startModsFill({ friendId, instanceId } = {}) {
   }
   jobs.set(job.id, job)
   pruneJobs()
-  setImmediate(() => runModsFill(job).catch((error) => {
+  setImmediate(() => withModUpdateLock(inst, () => runModsFill(job)).catch((error) => {
     if (job.cancelled) {
       job.status = 'cancelled'
       job.phase = '已取消'

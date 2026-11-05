@@ -179,7 +179,6 @@ export function makeProxyFetch(proxy) {
         h.forEach((v, k) => { headers[k] = v })
       }
 
-      let req
       const wireSignal = (r) => {
         if (!init.signal) return
         const onDestroy = () => r.destroy(new Error('请求已取消'))
@@ -190,7 +189,11 @@ export function makeProxyFetch(proxy) {
         r.on('close', () => init.signal.removeEventListener('abort', onDestroy))
       }
 
-      const finish = (r) => { req = r; wireSignal(r); r.on('error', reject); r.end() }
+      const finish = (r) => {
+        r.on('error', reject)
+        wireSignal(r)
+        r.end(init.body)
+      }
 
       if (httpsTarget) {
         finish(https.request({
@@ -228,17 +231,39 @@ export function makeProxyFetch(proxy) {
   }
 
   async function proxyFetch(input, init = {}) {
-    let current = String(input)
+    const signal = init.signal === undefined ? input?.signal : init.signal
+    signal?.throwIfAborted()
+    // Request 负责 URLSearchParams、FormData（含 boundary）、字符串和字节的标准编码。
+    // 项目的 JSON / 表单请求可重放；307/308 复用同一份编码后的字节。
+    const request = new Request(input, { ...init, signal: null })
+    const headers = new Headers(request.headers)
+    headers.delete('proxy-authorization')
+    const options = { method: request.method, headers, signal, body: request.body ? Buffer.from(await request.arrayBuffer()) : undefined }
+    if (options.body) {
+      headers.delete('transfer-encoding')
+      headers.set('content-length', String(options.body.length))
+    }
+    let current = new URL(request.url)
     for (let i = 0; i <= 10; i++) {
-      const res = await singleRequest(current, init)
-      if (res.status >= 300 && res.status < 400) {
-        const loc = res.headers.get('location')
-        if (!loc) return res
-        await res.body?.cancel?.().catch(() => {})
-        current = new URL(loc, current).toString()
-        continue
+      signal?.throwIfAborted()
+      if (!['http:', 'https:'].includes(current.protocol) || current.username || current.password) throw new Error('代理请求地址无效')
+      current.hash = ''
+      const res = await singleRequest(current.href, options)
+      const loc = res.headers.get('location')
+      if (!loc || ![301, 302, 303, 307, 308].includes(res.status) || request.redirect === 'manual') return res
+      await res.body?.cancel?.().catch(() => {})
+      if (request.redirect === 'error') throw new Error('代理请求遇到重定向')
+      const next = new URL(loc, current)
+      if (next.origin !== current.origin) {
+        for (const name of ['host', 'authorization', 'cookie', 'cookie2', 'x-api-key']) headers.delete(name)
       }
-      return res
+      if (((res.status === 301 || res.status === 302) && options.method === 'POST') ||
+          (res.status === 303 && !['GET', 'HEAD'].includes(options.method))) {
+        options.method = 'GET'
+        options.body = undefined
+        for (const name of ['content-length', 'content-type', 'content-encoding', 'content-language', 'content-location', 'transfer-encoding']) headers.delete(name)
+      }
+      current = next
     }
     throw new Error('重定向次数过多')
   }

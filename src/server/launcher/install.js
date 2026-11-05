@@ -43,6 +43,7 @@ import { collectLibraries, normalizeOs, requiredJavaMajor } from './launch-plan.
 import { downloadFromMirrors, fetchToFile, pickFastestSource, runPool, runPoolAdaptive, sha1File } from './download.js'
 import { canGrowConcurrency, hostOf } from './source-select.js'
 import { nextSpeed } from './speed-meter.js'
+import { applyModUpdate } from './mod-update-transaction.js'
 import { pickJava } from './java.js'
 import {
   isSeedableMojmapsProfile, patchJarEntry, patchMojmapsProcessor, readJarJson, resolveMojmapsCoordinate
@@ -1387,7 +1388,7 @@ async function installInstanceCoreUnlocked(job, instId, { from = 0, to = 100, so
   return result
 }
 
-export function startInstall({ name = '', mc, loader = 'vanilla', loaderVersion = '', memory = {}, minMemory, javaPath = '', group = '', jvmArgs = '' }) {
+export function startInstall({ name = '', mc, loader = 'vanilla', loaderVersion = '', memory = {}, minMemory, javaPath = '', group = '', jvmArgs = '' }, prepareInstance) {
   if (!mc) throw new Error('请选择 Minecraft 版本')
   const settings = getSettings()
   const inst = createInstance({
@@ -1404,7 +1405,7 @@ export function startInstall({ name = '', mc, loader = 'vanilla', loaderVersion 
     group,
     versionId: mc,
     installing: true
-  })
+  }, loaderVersion && ['fabric', 'quilt'].includes(loader) ? [customVersionId(loader, mc, loaderVersion)] : [])
   const job = new InstallJob({
     type: 'install',
     instanceId: inst.id,
@@ -1415,14 +1416,11 @@ export function startInstall({ name = '', mc, loader = 'vanilla', loaderVersion 
   })
   job.createdInstanceId = inst.id
   runJob(job, async () => {
+    if (prepareInstance) await prepareInstance(job, inst.paths.gameDir)
+    job.signal.throwIfAborted()
     await installInstanceCore(job, inst.id, { from: 0, to: 100 })
   })
   return { job: job.public(), instance: publicInstance(findInstance(inst.id)) }
-}
-
-function safeModFileName(name, fallback = 'mod-update.jar') {
-  const base = path.basename(String(name || '')).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim()
-  return base || fallback
 }
 
 function insideDir(base, target) {
@@ -1438,11 +1436,14 @@ function insideDir(base, target) {
 export function startModUpdates(instanceId, items = []) {
   const inst = findInstance(instanceId)
   if (!inst) throw new Error('实例不存在')
-  const list = (Array.isArray(items) ? items : []).filter((item) => item && item.relPath && item.url)
+  const list = Array.isArray(items) ? items : []
   if (!list.length) throw new Error('没有可更新的模组')
-  const paths = ensureInstanceDirs(inst)
+  if (activeJobs().some((job) => job.instanceId === instanceId)) throw new Error('实例已有任务在执行，请稍后再更新')
+  for (const item of list) {
+    if (!item?.relPath || !/^https?:\/\//i.test(item.url || '')) throw new Error('更新文件或地址无效')
+  }
   const label = list.length === 1
-    ? `更新 ${safeModFileName(list[0].name || list[0].filename, '模组')}`
+    ? `更新 ${safePackFilename(list[0].name || list[0].filename, '模组')}`
     : `更新 ${list.length} 个模组`
   const job = new InstallJob({
     type: 'update',
@@ -1455,46 +1456,27 @@ export function startModUpdates(instanceId, items = []) {
   runJob(job, async () => {
     const total = list.reduce((sum, item) => sum + (Number(item.size) || 0), 0)
     let doneBytes = 0
-    let done = 0
-    job.log(`开始更新 ${list.length} 个模组`)
-    for (const item of list) {
-      job.signal.throwIfAborted()
-      let url
-      try { url = new URL(String(item.url || '')) } catch { throw new Error('更新地址无效：' + item.relPath) }
-      if (!/^https?:$/.test(url.protocol)) throw new Error('更新地址必须是 HTTP(S)：' + item.relPath)
-      const oldPath = path.resolve(paths.modsDir, ...String(item.relPath).replace(/\\/g, '/').split('/'))
-      if (!insideDir(paths.modsDir, oldPath)) throw new Error('更新路径超出 mods 目录：' + item.relPath)
-      const sha1 = String(item.sha1 || '').toLowerCase()
-      if (!/^[0-9a-f]{40}$/.test(sha1)) throw new Error('更新缺少有效的 SHA-1 校验值：' + item.relPath)
-      const disabled = /\.disabled$/i.test(oldPath)
-      const filename = safeModFileName(item.filename || path.basename(oldPath))
-      const target = path.join(paths.modsDir, filename + (disabled ? '.disabled' : ''))
-      if (!insideDir(paths.modsDir, target)) throw new Error('更新文件名非法：' + filename)
-      job.phaseLabel('下载更新', `${item.name || filename} · ${Math.round((Number(item.size) || 0) / 1048576 * 10) / 10} MB`)
-      let last = 0
-      await downloadFromMirrors([url.toString()], target, {
-        ...netOptions(),
-        sha1,
-        size: Number(item.size) || 0,
-        signal: job.signal,
-        verify: true,
-        retries: Number(getSettings().retries) || 0,
-        onProgress: ({ received }) => {
-          const delta = Math.max(0, Number(received) - last)
-          last = Number(received) || 0
-          doneBytes += delta
-          if (total) progressIn(job, 0, 99, doneBytes / total, `下载更新 · ${Math.round(doneBytes / 1048576 * 10) / 10} / ${Math.round(total / 1048576 * 10) / 10} MB`)
-          else progressIn(job, 0, 99, done / list.length, `下载更新 ${done + 1}/${list.length}`)
-          // 下载中心需要 received/total 才能显示真实字节进度；与其它阶段共用同一字段。
-          job.bytes(doneBytes, total)
-        }
-      })
-      if (oldPath !== target && fs.existsSync(oldPath)) await fsp.rm(oldPath, { force: true })
-      done++
-      job.log(`已更新：${path.basename(oldPath)} → ${path.basename(target)}`, 'ok')
-      if (done === list.length) progressIn(job, 0, 100, 1, '更新完成')
-      else progressIn(job, 0, 99, Math.max(done / list.length, total ? doneBytes / total : 0), `已完成 ${done}/${list.length}`)
-    }
+    job.log(`准备整批更新 ${list.length} 个模组`)
+    await applyModUpdate(inst, list, {
+      signal: job.signal,
+      onCommit: () => job.phaseLabel('替换模组', '所有更新文件已通过校验'),
+      download: async (item, target, index) => {
+        job.phaseLabel('下载更新', `${index + 1}/${list.length} · ${item.name || item.relPath}`)
+        let last = 0
+        await downloadFromMirrors([item.url], target, {
+          ...netOptions(), sha1: item.sha1, size: Number(item.size) || 0, signal: job.signal,
+          verify: true, retries: Number(getSettings().retries) || 0,
+          onProgress: ({ received }) => {
+            doneBytes += Math.max(0, received - last)
+            last = received
+            progressIn(job, 0, 98, total ? doneBytes / total : index / list.length, `下载更新 ${index + 1}/${list.length}`)
+            job.bytes(doneBytes, total)
+          }
+        })
+      }
+    })
+    job.committed = true
+    job.log('全部模组已更新，可在实例模组页撤销本批更新', 'ok')
   })
   return { job: job.public(), instance: publicInstance(findInstance(instanceId)) }
 }

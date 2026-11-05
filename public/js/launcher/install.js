@@ -137,10 +137,10 @@ export function createInstallCenter(ctx) {
   let active = null
   let pendingFile = null
   return {
-    render(container) {
+    render(container, initialTab = 'create') {
       if (!container) return
       active?.dispose()
-      active = buildView(ctx, container)
+      active = buildView(ctx, container, initialTab)
       if (pendingFile && active?.importFile) {
         const file = pendingFile
         pendingFile = null
@@ -158,7 +158,7 @@ export function createInstallCenter(ctx) {
     destroy() { active?.dispose(); active = null }
   }
 }
-function buildView(ctx, container) {
+function buildView(ctx, container, initialTab) {
   let disposed = false
   let jobsTimer = null
   let jobsBusy = false
@@ -1374,7 +1374,68 @@ function buildView(ctx, container) {
   const importHint = hint('')
   const importError = h('div', { class: 'lp-hint bad', role: 'alert', style: { display: 'none' } })
   const importResults = h('div', { class: 'col', style: { gap: '8px' } })
+  const prismPath = input({ placeholder: 'Prism / MultiMC 启动器目录、instances 或单个实例目录', mono: true })
+  const prismResults = h('div', { class: 'col', 'aria-live': 'polite' })
+  let prismEpoch = 0
+  async function scanPrism() {
+    const epoch = ++prismEpoch
+    prismResults.replaceChildren(hint('正在读取实例清单…'))
+    try {
+      const { items } = await ctx.api.scanPrism(prismPath.value.trim())
+      if (disposed || epoch !== prismEpoch) return
+      clear(prismResults)
+      if (!items.length) prismResults.appendChild(hint('未在所选目录找到含 mmc-pack.json 的实例。'))
+      for (const item of items) {
+        let reviewed = false
+        const sizeHint = hint('')
+        const migrate = btn('预估空间', {
+          size: 'sm', disabled: !!item.error, iconName: 'copy',
+          onClick: async () => {
+            migrate.disabled = true
+            try {
+              if (!reviewed) {
+                sizeHint.textContent = '正在统计要复制的文件…'
+                const { bytes, files, freeBytes, root } = await ctx.api.previewPrism(item.dir)
+                const enough = freeBytes === null || bytes <= freeBytes
+                setHint(sizeHint, [
+                  files + ' 个文件，共 ' + fmtBytes(bytes), freeBytes === null ? '剩余空间未知' : '目标盘可用 ' + fmtBytes(freeBytes),
+                  enough ? '游戏运行库下载另计' : '空间不足，请释放空间后重新预估'
+                ].join(' · '), enough ? '' : 'bad')
+                sizeHint.title = root
+                reviewed = enough
+                migrate.textContent = enough ? '复制并安装' : '重新预估'
+                migrate.disabled = false
+                return
+              }
+              const { job } = await ctx.api.migratePrism(item.dir)
+              if (disposed) return
+              inlineInstall.show(job)
+              inlineInstall.el.scrollIntoView?.({ block: 'nearest' })
+              migrate.textContent = '已加入任务'
+              void refreshJobs()
+            } catch (e) { migrate.disabled = false; setHint(sizeHint, e.message, 'bad') }
+          }
+        })
+        prismResults.appendChild(row('lp-import-row',
+          h('div', { class: 'lp-import-main' }, h('b', { title: item.dir }, item.name),
+            item.error ? hint(item.error, 'bad') : hint([
+              item.mc, item.loader === 'fabric' ? 'Fabric ' + item.loaderVersion : '原版',
+              item.content.length ? '复制 ' + item.content.join('、') : '没有匹配的游戏内容'
+            ].join(' · ')), sizeHint), migrate))
+      }
+    } catch (e) {
+      if (!disposed && epoch === prismEpoch) prismResults.replaceChildren(hint('扫描失败：' + e.message, 'bad'))
+    }
+  }
   const importPane = h('div', { style: { ...paneStyle, display: 'none' } },
+    card('迁移 Prism / MultiMC 实例', '请先退出源实例的游戏。工具箱会复制下方列出的内容，并重新安装匹配的原版或 Fabric。',
+      row('row wrap', h('div', { class: 'grow' }, prismPath),
+        btn('浏览…', { size: 'sm', iconName: 'folder', onClick: async () => {
+          const dir = await ctx.pickDir(prismPath.value.trim(), { title: '选择 Prism / MultiMC 目录' })
+          if (dir) { prismPath.value = dir; await scanPrism() }
+        } }),
+        btn('扫描实例', { size: 'sm', iconName: 'refresh', onClick: scanPrism })),
+      prismResults),
     card('导入已有版本', 'PCL2 / HMCL / 官方启动器 / 本地 .minecraft',
       row('row wrap', h('div', { class: 'grow' }, scanDirInput), browseScanDir,
         btn('扫描', { size: 'sm', iconName: 'refresh', onClick: () => scanImport(scanDirInput.value.trim()) })),
@@ -1588,6 +1649,10 @@ function buildView(ctx, container) {
     h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px', maxWidth: '980px' } },
       createPane, packPane, importPane))
   container.appendChild(root)
+  if (initialTab === 'import') {
+    tabs.setValue('import')
+    switchTab('import')
+  }
   toggleLoaderFields()
   loadVersions(form.versionType)
   loadPackVersionOptions()

@@ -239,6 +239,7 @@ export function launcherRoot() {
 // 实例目录的归属标记：versions/ 下还有真正的版本文件夹，靠它区分两者，
 // 也用来判断某个名字是否已被别的实例占用。
 const INSTANCE_MARKER = '.mc-toolbox-instance.json'
+export const MOD_UPDATE_DIR = '.mc-toolbox-mod-updates'
 
 /** 把实例名变成合法的文件夹名（Windows 非法字符、结尾点号、保留名）。 */
 export function safeInstanceFolderName(name) {
@@ -531,14 +532,15 @@ export function listInstances({ includePaths = true, includeInstalling = false }
     .map((item) => includePaths ? publicInstance(item) : item)
 }
 
-export function createInstance(input) {
+export function createInstance(input, reservedFolders = []) {
   const data = getState()
   const inst = normalizeInstance(input)
   if (!inst.mc) throw new Error('缺少 Minecraft 版本')
   // 目录用可读名称：versions/<实例名>，撞上真版本文件夹或别的实例就加后缀。
   inst.folder = allocateInstanceFolder(path.resolve(inst.root), inst.name, inst.id, '', [
     inst.versionId,
-    `${inst.mc}-${inst.loader}`
+    `${inst.mc}-${inst.loader}`,
+    ...reservedFolders
   ])
   data.instances = data.instances || []
   // 先建目录再入库：建目录失败（盘符不可用、路径被占）时不能留下幽灵实例。
@@ -661,7 +663,8 @@ export async function duplicateInstance(id, { name = '' } = {}) {
       }
     } else {
       const sourceMarker = path.join(sourcePaths.gameDir, INSTANCE_MARKER)
-      await fsp.cp(sourcePaths.gameDir, ownDir, { recursive: true, filter: (file) => file !== sourceMarker })
+      const backupDir = path.join(sourcePaths.gameDir, MOD_UPDATE_DIR)
+      await fsp.cp(sourcePaths.gameDir, ownDir, { recursive: true, filter: (file) => file !== sourceMarker && file !== backupDir })
     }
     ensureInstanceDirs(copy)
   } catch (error) {

@@ -14,7 +14,20 @@ let targetServer = null
 const BODY = 'proxy-keepalive-body'
 
 test.before(async () => {
-  targetServer = http.createServer((req, res) => {
+  targetServer = http.createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://' + req.headers.host)
+    if (url.pathname === '/redirect') {
+      res.writeHead(Number(url.searchParams.get('status')), { location: url.searchParams.get('to') })
+      req.resume()
+      res.end()
+      return
+    }
+    if (url.pathname === '/echo') {
+      const chunks = []
+      for await (const chunk of req) chunks.push(chunk)
+      res.end(JSON.stringify({ method: req.method, headers: req.headers, bytes: Buffer.concat(chunks).toString('base64') }))
+      return
+    }
     res.writeHead(200, { 'content-length': String(BODY.length) })
     res.end(BODY)
   })
@@ -23,10 +36,11 @@ test.before(async () => {
     proxyRequests++
     const url = new URL(req.url, `http://${req.headers.host || 'fallback.invalid'}`)
     const upstream = http.request({
-      host: url.hostname,
+      host: url.hostname === 'other.test' ? '127.0.0.1' : url.hostname,
       port: Number(url.port) || 80,
       path: url.pathname + url.search,
-      method: req.method
+      method: req.method,
+      headers: req.headers
     }, (upRes) => {
       res.writeHead(upRes.statusCode || 502, upRes.headers)
       upRes.pipe(res)
@@ -117,4 +131,29 @@ test('并发请求内容都正确（响应管道不串流）', async () => {
   } finally {
     fetchVia.destroy()
   }
+})
+
+test('代理保留 Modrinth 批量 POST、表单和二进制请求体，并按重定向类型处理凭证', async () => {
+  const fetchVia = makeProxyFetch(parseProxy(`127.0.0.1:${proxyServer.address().port}`))
+  const base = `http://127.0.0.1:${targetServer.address().port}`
+  const payload = JSON.stringify({ algorithm: 'sha1', hashes: ['测试'] })
+  const post = { method: 'POST', headers: { 'Content-Type': 'application/json', authorization: 'Bearer test', cookie: 'test=1', 'x-api-key': 'test' }, body: payload }
+  try {
+    for (const [body, contentType] of [[payload, 'text/plain'], [new URLSearchParams({ a: '空 格' }), 'application/x-www-form-urlencoded'], [new Uint8Array([0, 127, 255]), undefined]]) {
+      const init = { method: 'POST', body }
+      const result = await (await fetchVia(base + '/echo', init)).json()
+      assert.equal(result.bytes, Buffer.from(await new Request(base, init).arrayBuffer()).toString('base64'))
+      assert.equal(result.headers['content-type']?.split(';')[0], contentType)
+    }
+    for (const status of [301, 302, 303, 307, 308]) {
+      const crossOrigin = status === 308
+      const to = crossOrigin ? base.replace('127.0.0.1', 'other.test') + '/echo' : '/echo'
+      const result = await (await fetchVia(base + '/redirect?' + new URLSearchParams({ status, to }), post)).json()
+      const kept = status === 307 || status === 308
+      assert.equal(result.method, kept ? 'POST' : 'GET')
+      assert.equal(result.bytes, kept ? Buffer.from(payload).toString('base64') : '')
+      assert.equal(result.headers['content-type'], kept ? 'application/json' : undefined)
+      for (const header of ['authorization', 'cookie', 'x-api-key']) assert.equal(result.headers[header], crossOrigin ? undefined : post.headers[header])
+    }
+  } finally { fetchVia.destroy() }
 })

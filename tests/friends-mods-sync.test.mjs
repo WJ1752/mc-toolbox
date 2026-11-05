@@ -161,6 +161,40 @@ test('同一个 jar 只是启用状态不同：只切换，不传文件', () => 
   assert.equal(plan.toggle[0].enabled, false)
 })
 
+test('固定入服清单：使用已收到的必装 JAR，保留额外项并检查配置修订与加载器版本', async (t) => {
+  const { store } = await import('../src/server/store.js')
+  const { ClientStore } = await import('../src/server/friends/client-store.js')
+  const { resolveFriendsServer } = await import('../src/server/friends/config.js')
+  const { FriendsServerClient } = await import('../src/server/friends/server-client.js')
+  const { configurePaths, joinGroupInstance } = await import('../src/server/friends/manager.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mctb-group-join-'))
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }))
+  const inst = { id: 'mc', name: '实例', mc: '1.20.1', loader: 'fabric', loaderVersion: '0.16.1', gameDir: dir, root: dir }
+  t.mock.method(store, 'get', () => ({ layoutVersion: 2, instances: [inst] }))
+  t.mock.method(store, 'set', () => {})
+  t.mock.method(ClientStore.prototype, 'get', () => ({ server: resolveFriendsServer(), session: {} }))
+  const profile = { version: 'v1', address: 'example.com', mc: inst.mc, loader: inst.loader, loaderVersion: inst.loaderVersion,
+    revision: 'r_1', items: [{ file: 'required.jar', sha1: sha('new') }, { file: 'optional.jar', optional: true, sha1: sha('optional') }] }
+  t.mock.method(FriendsServerClient.prototype, 'request', async () => ({ profile }))
+  const received = path.join(dir, 'received')
+  configurePaths({ received })
+  fs.mkdirSync(path.join(received, 'transfer1'), { recursive: true })
+  fs.writeFileSync(path.join(received, 'transfer1', 'shared.jar'), 'new')
+  const mods = path.join(dir, 'mods')
+  fs.mkdirSync(mods)
+  fs.writeFileSync(path.join(mods, 'extra.jar'), 'keep')
+  const run = (action) => joinGroupInstance('g_1234', { instanceId: 'mc', revision: 'r_1' }, action)
+  assert.deepEqual((await run('preview')).rows.map((item) => item.action), ['download', 'optional'])
+  inst.loaderVersion = '0.16.2'
+  await assert.rejects(run('apply'), /版本均匹配/)
+  inst.loaderVersion = profile.loaderVersion
+  assert.equal((await run('apply')).ready, true)
+  assert.deepEqual(fs.readdirSync(mods).sort(), ['extra.jar', 'required.jar'])
+  assert.equal(fs.readFileSync(path.join(mods, 'extra.jar'), 'utf8'), 'keep')
+  profile.revision = 'r_2'
+  await assert.rejects(run('launch'), /配置已变更/)
+})
+
 test('modid 归一化忽略大小写与分隔符', () => {
   assert.equal(normalizeModId('Yumi-Commons_Core'), normalizeModId('yumi_commons_core'))
   assert.equal(normalizeModId(' Yumi Commons Core '), 'yumicommonscore')

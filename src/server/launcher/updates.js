@@ -31,6 +31,9 @@ const HASH_CACHE_MAX = 5000
 const hashCache = new Map()
 const updateCache = new Map()
 const dependencyCache = new Map()
+export function invalidateModUpdates(instanceId) {
+  updateCache.delete(instanceId)
+}
 let diskHashes = null
 let diskSaveTimer = null
 
@@ -281,6 +284,7 @@ export async function findModUpdates(inst, { force = false, signal, fetcher } = 
     const next = publicVersion(latest)
     const entry = {
       relPath,
+      oldSha1: hashInfo.hash,
       file: item.file,
       name: item.name || item.file,
       modid: item.modid || '',

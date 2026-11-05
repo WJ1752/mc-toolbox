@@ -68,14 +68,16 @@ async function step0() {
 // ---------- 1. esbuild 把 server.js 打成 CJS bundle ----------
 async function step1() {
   logStep(1, 'esbuild bundle server.js')
-  const args = [path.join(here, 'server.js'), '--bundle', '--platform=node', '--target=node22', '--format=cjs', `--outfile=${BUNDLE_CJS}`, '--external:node:*', '--legal-comments=none', '--log-level=warning']
+  const args = [path.join(here, 'server.js'), '--bundle', '--platform=node', '--target=node22', '--format=cjs', '--external:node:*', '--legal-comments=none', '--log-level=warning']
   // esbuild 的真实入口是 bin/esbuild（无扩展名），通过 node 解释执行；
   // 回退成 npx 命令时按空格拆分执行。
-  if (ESBUILD_BIN.includes(' ')) {
-    await runCmd(ESBUILD_BIN.split(' ')[0], ESBUILD_BIN.split(' ').slice(1).concat(args))
-  } else {
-    await runCmd(process.execPath, [ESBUILD_BIN, ...args])
-  }
+  // 缓存里的 Windows esbuild 可能以低完整性运行；让它输出源码，由构建进程写入 dist。
+  const options = { silent: true, maxBuffer: 32 * 1024 * 1024 }
+  const result = ESBUILD_BIN.startsWith('npx')
+    ? await runCmd(ESBUILD_BIN.split(' ')[0], ESBUILD_BIN.split(' ').slice(1).concat(args), options)
+    : await runCmd(process.execPath, [ESBUILD_BIN, ...args], options)
+  if (result.stderr) process.stderr.write(result.stderr)
+  await fsp.writeFile(BUNDLE_CJS, result.stdout)
   const stat = await fsp.stat(BUNDLE_CJS)
   console.log(`     bundle size: ${(stat.size / 1024).toFixed(1)} KB`)
 }

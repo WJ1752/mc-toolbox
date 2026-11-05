@@ -1,0 +1,25 @@
+{
+  "version": "周末服 1.0",
+  "address": "127.0.0.1:25565",
+  "mc": "1.20.1",
+  "loader": "fabric",
+  "loaderVersion": "0.16.14",
+  "items": [
+    {
+      "file": "fabric-api-0.92.12+1.20.1.jar",
+      "modid": "fabric-api",
+      "size": 2137232,
+      "version": "0.92.12+1.20.1",
+      "sha1": "3e9cdd3e2f827ca9a259df9eb8e31949437b6bd4",
+      "optional": false
+    },
+    {
+      "file": "modmenu-7.2.2.jar",
+      "modid": "modmenu",
+      "size": 721366,
+      "version": "7.2.2",
+      "sha1": "099c68feeb74887cbbbd8ce9a27c6123804a2c5a",
+      "optional": true
+    }
+  ]
+}

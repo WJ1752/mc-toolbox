@@ -537,6 +537,7 @@ export function createFriendsView(ctx) {
           )
         ),
         h('div', { class: 'lp-chat-actions' },
+          btn(group.joinVersion ? `入服 · ${group.joinVersion}` : '入服配置', { size: 'sm', onClick: () => openGroupJoin(group) }),
           btn('分享整合包', { size: 'sm', variant: 'ghost', iconName: 'upload', onClick: () => openShareModal({ type: 'group', id: group.id }) }),
           btn('发送文件', { size: 'sm', variant: 'ghost', iconName: 'file', onClick: () => sendLocalFileToChat() }),
           btn('邀请好友', { size: 'sm', variant: 'ghost', iconName: 'user', onClick: () => openAddMemberModal(group) }),
@@ -1699,6 +1700,146 @@ export function createFriendsView(ctx) {
 
   function instanceOptions() {
     return (ctx.getState().instances || []).map((inst) => [inst.id, `${inst.name} · ${inst.mc}${inst.loader && inst.loader !== 'vanilla' ? ' · ' + inst.loader : ''}`])
+  }
+
+  async function openGroupJoin(group) {
+    let profile
+    try {
+      const result = await ctx.api.getJoinProfile(group.id)
+      profile = result.profile
+    } catch (error) {
+      toast('读取入服配置失败：' + error.message + '。请确认好友服务器已更新。', 'err')
+      return
+    }
+    const owner = group.owner === data?.profile?.uuid
+    if (!profile) {
+      if (owner) editGroupJoin(group, null)
+      else toast('群主尚未发布入服配置', 'warn')
+      return
+    }
+    const options = instanceOptions()
+    const matches = ctx.getState().instances.filter((inst) => inst.mc === profile.mc && inst.loader === profile.loader
+      && (!profile.loaderVersion || inst.loaderVersion === profile.loaderVersion))
+    const match = matches.find(inst => inst.id === ctx.getState().selectedId) || matches[0]
+    const picker = select(options, match?.id || ctx.getState().selectedId || options[0]?.[0])
+    const status = h('div', { class: 'lp-friends-modal-status', role: 'status' })
+    const list = h('div', { class: 'lp-friends-mods-result' })
+    const check = btn('检查实例')
+    const apply = btn('补齐必装模组', { disabled: true })
+    const launch = btn('启动并进服', { variant: 'primary', disabled: true })
+    async function run(action) {
+      const id = picker.value
+      picker.disabled = check.disabled = apply.disabled = launch.disabled = true
+      status.textContent = action === 'apply' ? '正在校验并补齐必装文件…' : action === 'launch' ? '正在准备启动…' : '正在检查清单…'
+      try {
+        const plan = await ctx.api.joinGroupInstance(group.id, action, { instanceId: id, revision: profile.revision })
+        if (action === 'launch') {
+          modal.close()
+          await ctx.showInstance(id)
+          return
+        }
+        const labels = { ready: '已就绪', optional: '可选', enable: '待启用', replace: '待替换', download: '待下载', manual: '同名冲突' }
+        status.textContent = !plan.compatible ? '请选择相同 MC、加载器和加载器版本的实例。'
+          : plan.ready ? '必装模组已就绪，可以进服。' : '补齐只处理必装项。额外模组由你管理。'
+        const missing = plan.rows.filter(item => !item.optional && !item.local && ['replace', 'download'].includes(item.action))
+        if (plan.compatible && missing.length) {
+          const bytes = missing.reduce((sum, item) => sum + (item.size || 0), 0)
+          const estimate = missing.every(item => item.size > 0) ? `，最多下载 ${fmtBytes(bytes)}` : ''
+          status.textContent += ` 需获取 ${missing.length} 个文件${estimate}。`
+        }
+        list.replaceChildren(...plan.rows.map((item) => h('div', { class: 'lp-friends-mod-line', title: 'SHA-1 ' + item.sha1 },
+          h('span', { class: 'mono' }, item.file), item.version, badge(item.optional ? '可选' : labels[item.action], item.action === 'ready' ? 'ok' : ''))))
+        if (plan.manual?.length || plan.rows.some((item) => item.action === 'manual')) {
+          list.prepend(h('div', { class: 'lp-friends-hint' },
+            ...((plan.manual || []).map((item) => h('div', {}, item.file + ' · ' + item.reason))),
+            '可让群主发送指定 JAR，接收后再次补齐，或在模组目录处理冲突后重新检查。',
+            btn('打开模组目录', { size: 'sm', onClick: () => ctx.openPath(plan.modsDir) })))
+        }
+        apply.disabled = !plan.compatible || plan.ready
+        launch.disabled = !plan.ready
+      } catch (error) {
+        list.replaceChildren()
+        status.textContent = error.message
+      } finally {
+        picker.disabled = false
+        check.disabled = !picker.value
+      }
+    }
+    check.onclick = () => run('preview')
+    apply.onclick = () => run('apply')
+    launch.onclick = () => run('launch')
+    picker.onchange = check.onclick
+    const modal = ctx.openModal({
+      title: group.name + ' · 入服配置',
+      body: h('div', { class: 'lp-friends-modal' },
+        h('b', {}, profile.version + ' · ' + profile.address),
+        h('div', {}, [profile.mc, profile.loader, profile.loaderVersion].filter(Boolean).join(' · ')),
+        options.length ? field('本地实例', picker) : h('div', {}, '先创建兼容的游戏实例，再回来检查。'),
+        !match ? btn('新建兼容实例', { onClick: () => { modal.close(); ctx.showView('install') } }) : null,
+        status, list),
+      buttons: [owner ? btn('管理配置', { onClick: () => { modal.close(); editGroupJoin(group, profile) } }) : null,
+        check, apply, launch].filter(Boolean)
+    })
+    if (picker.value) void run('preview')
+    else check.disabled = true
+  }
+
+  function editGroupJoin(group, previous) {
+    const options = instanceOptions()
+    const picker = select(options, ctx.getState().selectedId || options[0]?.[0])
+    const version = input({ value: previous?.version || '', placeholder: '例如 周末开荒 v2' })
+    const address = input({ value: previous?.address || '', placeholder: 'play.example.com:25565' })
+    const list = h('div', { class: 'lp-friends-mods-result' })
+    const status = h('div', { class: 'lp-friends-modal-status', role: 'status' })
+    const publish = btn('固定到群聊', { variant: 'primary', disabled: true })
+    let optional = new Set()
+    async function load() {
+      const id = picker.value
+      publish.disabled = true
+      list.replaceChildren()
+      status.textContent = '正在读取来源实例…'
+      try {
+        const { items } = await ctx.api.content(id, 'mods')
+        if (picker.value !== id) return
+        const prior = new Set((previous?.items || []).filter((item) => item.optional).map((item) => item.file))
+        optional = new Set()
+        for (const item of items.filter((item) => !item.disabled)) {
+          if (prior.has(item.file)) optional.add(item.relPath)
+          const required = h('input', { type: 'checkbox', checked: !optional.has(item.relPath) })
+          required.onchange = () => required.checked ? optional.delete(item.relPath) : optional.add(item.relPath)
+          list.append(h('label', { class: 'lp-friends-mod-line' }, required, item.file))
+        }
+        status.textContent = list.childElementCount ? '勾选必装模组，取消勾选即为可选。' : '此实例没有已启用的模组。'
+        publish.disabled = false
+      } catch (error) { if (picker.value === id) status.textContent = error.message }
+    }
+    picker.onchange = load
+    publish.onclick = async () => {
+      publish.disabled = picker.disabled = true
+      try {
+        await ctx.api.publishJoinProfile(group.id, { instanceId: picker.value, address: address.value.trim(),
+          version: version.value.trim(), optionalFiles: [...optional] })
+        modal.close()
+        toast('入服配置已固定到群聊', 'ok')
+        await refreshData(true)
+      } catch (error) {
+        status.textContent = error.message
+        publish.disabled = picker.disabled = false
+      }
+    }
+    const remove = btn('撤下配置', { onClick: async () => {
+      if (!await ctx.confirm('撤下群内固定的入服配置？')) return
+      try {
+        await ctx.api.clearJoinProfile(group.id)
+        modal.close()
+        await refreshData(true)
+      } catch (error) { status.textContent = error.message }
+    } })
+    const modal = ctx.openModal({ title: group.name + ' · 管理入服配置',
+      body: h('div', { class: 'lp-friends-modal' }, field('来源实例', picker), field('配置版本', version),
+        field('服务器地址', address), status, list), buttons: previous ? [remove, publish] : [publish] })
+    if (picker.value) void load()
+    else status.textContent = '请先创建来源实例。'
   }
 
   /** 好友 + 群聊多选列表，用于群发整合包 / 文件。 */

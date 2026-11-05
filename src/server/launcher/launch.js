@@ -19,6 +19,7 @@ import {
   listInstances
 } from './state.js'
 import { loadVersionChain, readAssetIndex } from './meta.js'
+import { recoverModUpdate, withModUpdateLock } from './mod-update-transaction.js'
 import {
   buildLaunchPlan,
   previewCommand,
@@ -45,6 +46,9 @@ import {
 const sessions = new Map()
 const launchStates = new Map()
 const startingInstances = new Set()
+export function isInstanceStarting(id) {
+  return startingInstances.has(id)
+}
 // 由系统进程表接管的外部游戏：instanceId -> { pid, timer, startedAt }
 const externalStopping = new Map()
 // 外部进程没有 stdout 管道，实时日志从游戏自己的 latest.log 增量读取。
@@ -1279,7 +1283,7 @@ function makeSession(inst, paths) {
  * Spawn the game. Returns a session snapshot immediately: preparation runs in
  * the background and is observable through launchStatus().launch / readLog().
  */
-export async function startInstance(instanceId, { accountId = '' } = {}) {
+export async function startInstance(instanceId, { accountId = '', resolveServer } = {}) {
   const active = launchStates.get(instanceId)
   if (active && ['preparing', 'spawning', 'running'].includes(active.status)) {
     const inst = active.session?.inst || findInstance(instanceId)
@@ -1294,7 +1298,7 @@ export async function startInstance(instanceId, { accountId = '' } = {}) {
       paths: inst ? errorPaths(inst, existing.paths || instancePaths(inst)) : {}
     })
   }
-  const inst = findInstance(instanceId)
+  let inst = findInstance(instanceId)
   if (!inst) {
     const error = new Error('实例不存在')
     error.code = 'NOT_FOUND'
@@ -1322,6 +1326,13 @@ export async function startInstance(instanceId, { accountId = '' } = {}) {
       })
     }
 
+    if (resolveServer) {
+      // 持锁恢复后再核对入服清单，服务器地址只对本次启动生效。
+      const server = await withModUpdateLock(inst, () => resolveServer(inst))
+      inst = { ...inst, autoConnect: true, server }
+    } else {
+      await recoverModUpdate(inst)
+    }
     const paths = instancePaths(inst)
     const session = makeSession(inst, paths)
     sessions.set(instanceId, session)
