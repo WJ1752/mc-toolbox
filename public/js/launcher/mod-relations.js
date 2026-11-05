@@ -3,6 +3,7 @@ import { badge } from '../ui/kit.js'
 
 const key = id => String(id || '').trim().toLowerCase()
 const active = item => item && !item.disabled && !item.loaderMismatch
+const RUNTIME_IDS = new Set(['minecraft', 'java', 'forge', 'neoforge', 'fabricloader', 'fabric', 'quilt', 'quilt_loader', 'quilt-loader', 'cleanroom', 'minecraftforge', 'mod_minecraftforge', 'forge_loader', 'fml'])
 
 /** Build edges once per dialog. Platform IDs are only compared to exact installed-file hash matches. */
 export function buildModRelations(items, projects = []) {
@@ -33,23 +34,36 @@ export function buildModRelations(items, projects = []) {
     add(byProject, p.projectId, byPath.get(p.relPath))
     add(byVersion, p.versionId, byPath.get(p.relPath))
   }
-  const outgoing = new Map(), incoming = new Map()
+  const outgoing = new Map(), incoming = new Map(), missingNodes = new Map(), edges = []
   function connect(owner, providers, detail) {
     for (const target of providers?.length ? providers : [null]) {
       const edge = { owner, target, ...detail }
+      const absentKey = (detail.platform ? 'platform:' : 'missing:') + key(detail.id)
+      if (!target && !missingNodes.has(absentKey)) {
+        missingNodes.set(absentKey, {
+          relPath: absentKey, modid: detail.id, name: detail.id,
+          relationMissing: true, relationPlatform: detail.platform === true, requiredMissing: false
+        })
+      }
+      const node = target || missingNodes.get(absentKey)
+      if (!target && detail.missing) node.requiredMissing = true
       add(outgoing, owner.relPath, edge)
-      if (target) add(incoming, target.relPath, edge)
+      add(incoming, node.relPath, edge)
+      if (owner !== node) edges.push({ ...edge, target: node, unresolved: !target, status: edgeStatus(edge) })
     }
   }
   for (const item of items) {
     for (const [kind, deps] of [['needs', item.dependencies], ['conflicts', item.conflicts]]) {
       for (const dep of deps || []) {
         const id = key(dep.id)
+        if (!id || RUNTIME_IDS.has(id)) continue
         const exact = byId.get(id)
         const similar = bySeparator.get(id.replace(/-/g, '_'))
         const inferred = byFilename.get(id)
         const uncertain = exact ? '' : similar ? 'ID 分隔符不同，关联待核对' : inferred ? '文件名推测，关联待核对' : ''
-        connect(item, exact || similar || inferred, {
+        const providers = exact || similar || inferred
+        // 宿主已内嵌提供的依赖由自身满足，其他携带同一库的宿主不是它的前置。
+        connect(item, kind === 'needs' && providers?.includes(item) ? [item] : providers, {
           kind, id: dep.id, optional: dep.optional, range: dep.range,
           source: dep.source || item.metadataSource || '本地 JAR',
           uncertain,
@@ -69,12 +83,12 @@ export function buildModRelations(items, projects = []) {
       })
     }
   }
-  return (item) => {
+  const relations = (item) => {
     const groups = { needs: new Map(), usedBy: new Map(), conflicts: new Map() }
     function record(edge, target, direction) {
       const group = groups[direction]
       const id = target?.relPath || (edge.platform ? '平台:' : '本地:') + edge.id
-      const node = group.get(id) || { target, id: edge.id, lines: [] }
+      const node = group.get(id) || { target, id: edge.id, platform: edge.platform === true, lines: [] }
       const status = edgeStatus(edge)
       const line = [status, edge.id, edge.range, edge.source].filter(Boolean).join(' · ')
       if (!node.lines.includes(line)) node.lines.push(line)
@@ -86,6 +100,13 @@ export function buildModRelations(items, projects = []) {
     }
     return Object.fromEntries(Object.entries(groups).map(([name, map]) => [name, [...map.values()]]))
   }
+  // 云图和单模组视图共享同一份关联结果；未安装依赖也能查看其所有宿主。
+  relations.nodes = [...items, ...missingNodes.values()]
+  relations.edges = edges
+  relations.find = (id, platform = false) => byPath.get(id)
+    || (!platform && (byId.get(key(id)) || byFilename.get(key(id)))?.[0])
+    || missingNodes.get((platform ? 'platform:' : 'missing:') + key(id))
+  return relations
 }
 
 function edgeStatus(edge) {
@@ -108,7 +129,8 @@ function edgeStatus(edge) {
 export function openModRelations({ items, selected, projects, loadProjects, openModal, iconFor }) {
   const body = h('div', { class: 'lp-relations' })
   let graph = buildModRelations(items, projects)
-  let current = selected
+  let current = typeof selected === 'string' ? graph.find(selected) : selected
+  if (!current) return null
   let closed = false
   const history = []
   let online = projects ? 'ready' : 'idle'
@@ -119,7 +141,7 @@ export function openModRelations({ items, selected, projects, loadProjects, open
   }
   function nodeCard(item, id, lines, center = false) {
     const name = item?.name || id
-    const description = [item?.version, item?.disabled ? '已禁用' : '', item?.loaderMismatch ? '加载器不匹配' : ''].filter(Boolean).join(' · ')
+    const description = [item?.version, item?.relationMissing ? (item.requiredMissing ? '缺少必需依赖' : '本地未安装') : '', item?.disabled ? '已禁用' : '', item?.loaderMismatch ? '加载器不匹配' : ''].filter(Boolean).join(' · ')
     return h(center ? 'div' : 'button', {
       class: 'lp-relation-node' + (center ? ' current' : ''), type: center ? undefined : 'button',
       onclick: center ? undefined : () => item && item !== current ? navigate(item) : openModal({ title: name, body: h('div', {}, ...lines.map(line => h('p', {}, line))), buttons: [{ label: '确定' }] })
@@ -128,7 +150,7 @@ export function openModRelations({ items, selected, projects, loadProjects, open
   }
   function column(label, nodes, className) {
     return h('section', { class: 'lp-relation-column ' + className }, h('h4', {}, label),
-      nodes.length ? h('div', { class: 'lp-relation-branches' }, ...nodes.map(node => nodeCard(node.target, node.id, node.lines))) : h('small', { class: 'lp-hint' }, '无已知声明'))
+      nodes.length ? h('div', { class: 'lp-relation-branches' }, ...nodes.map(node => nodeCard(node.target || graph.find(node.id, node.platform), node.id, node.lines))) : h('small', { class: 'lp-hint' }, '无已知声明'))
   }
   async function supplement() {
     online = 'loading'
@@ -137,6 +159,7 @@ export function openModRelations({ items, selected, projects, loadProjects, open
       const result = await loadProjects()
       if (closed) return
       graph = buildModRelations(items, result)
+      current = graph.find(current.relPath) || current
       online = 'ready'
     } catch (e) { online = 'failed'; onlineError = e.message }
     if (!closed) paint()

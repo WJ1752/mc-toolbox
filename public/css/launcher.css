@@ -143,13 +143,6 @@
   box-shadow: var(--slot);
 }
 .lp-face-canvas { display: block; image-rendering: pixelated; width: 100%; height: 100%; }
-.lp-skin-layer {
-  position: absolute;
-  inset: 0;
-  background-repeat: no-repeat;
-  image-rendering: pixelated;
-}
-.lp-skin-layer.overlay { pointer-events: none; }
 
 .lp-search {
   position: relative;
@@ -2172,9 +2165,15 @@
 .skin-wardrobe { display: grid; grid-template-columns: minmax(175px, .9fr) minmax(220px, 1fr); gap: 18px; }
 .skin-scene { position: relative; min-height: 254px; perspective: 800px; overflow: hidden; touch-action: none; cursor: grab; border: 1px solid var(--line); border-radius: 10px; background: radial-gradient(ellipse at 50% 60%, #70899c30, transparent 70%); }
 .skin-scene:active { cursor: grabbing; }
-.skin-model, .skin-box { position: absolute; transform-style: preserve-3d; width: 0; height: 0; }
+.skin-model, .skin-part, .skin-limb, .skin-box { position: absolute; transform-style: preserve-3d; width: 0; height: 0; }
 .skin-model { left: 50%; top: 49%; }
 .skin-box canvas { position: absolute; backface-visibility: hidden; image-rendering: pixelated; }
 .skin-controls { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .skin-controls select { max-width: 100%; }
+.skin-model[data-pose="walking"] { --skin-stride: 28deg; --skin-cycle: 1.2s; }
+.skin-model[data-pose="running"] { --skin-stride: 58deg; --skin-cycle: .65s; }
+.skin-model:is([data-pose="walking"], [data-pose="running"]) .skin-part:is(.skin-right-arm, .skin-left-leg) > .skin-limb { animation: skin-stride var(--skin-cycle) ease-in-out infinite alternate; }
+.skin-model:is([data-pose="walking"], [data-pose="running"]) .skin-part:is(.skin-left-arm, .skin-right-leg) > .skin-limb { animation: skin-stride var(--skin-cycle) ease-in-out infinite alternate-reverse; }
+@keyframes skin-stride { from { transform: rotateX(calc(-1 * var(--skin-stride))); } to { transform: rotateX(var(--skin-stride)); } }
+@media (prefers-reduced-motion: reduce) { .skin-part > .skin-limb { animation-play-state: paused !important; } }
 @media (max-width: 620px) { .skin-wardrobe { grid-template-columns: 1fr; } }

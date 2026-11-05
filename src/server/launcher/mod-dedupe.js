@@ -14,8 +14,8 @@ const PRE_RELEASE = new Set(['alpha', 'beta', 'rc', 'pre', 'preview', 'snapshot'
 const COPY_SUFFIX = /\s*\(\d+\)$/
 
 export function normalizeModId(value) {
-  // Forge / Fabric 的 modId 大小写不敏感，分隔符也不可靠：yumi-commons-core = yumi_commons_core。
-  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+  // 分隔符是模组身份的一部分，mod_a、mod-a 与 moda 不能当成同一个 ID。
+  return String(value || '').trim().toLowerCase()
 }
 
 /** 去掉 .jar / .jar.disabled、复制后缀与首尾空白，保留原始大小写。 */
@@ -169,11 +169,12 @@ function groupItems(items, { hashes = null } = {}) {
   const byHash = new Map()
   const byStem = new Map()
   items.forEach((item, index) => {
-    const ids = new Set(
-      [item.modid, ...(item.modids || [])]
-        .map(normalizeModId)
-        .filter(Boolean)
-    )
+    // 不同宿主可以合法携带同一份内嵌库，不能因此建议删除整个宿主。
+    // 兼容未提供 topLevelModIds 的调用者，同时排除已知的内嵌 ID。
+    const nested = new Set((item.nestedModIds || []).map(normalizeModId))
+    const declared = Array.isArray(item.topLevelModIds) ? item.topLevelModIds
+      : [item.modid, ...(item.modids || []).filter((id) => !nested.has(normalizeModId(id)))]
+    const ids = new Set((item.hasMeta === false ? [] : declared).map(normalizeModId).filter(Boolean))
     for (const id of ids) {
       if (byId.has(id)) union(index, byId.get(id))
       else byId.set(id, index)
@@ -202,7 +203,7 @@ function groupItems(items, { hashes = null } = {}) {
 }
 
 /**
- * 把扫描结果分组成重复项。items 需要 file / relPath / size / mtime / disabled / version / modid / modids / hasMeta。
+ * 把扫描结果分组成重复项。items 需要 file / relPath / size / mtime / disabled / version / topLevelModIds / hasMeta。
  * @returns {Array<object>} 只返回确实有 2 个以上文件的组
  */
 export function groupModDuplicates(items, { hashes = null } = {}) {

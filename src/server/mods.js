@@ -2,6 +2,7 @@ import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
 import os from 'node:os'
+import crypto from 'node:crypto'
 import { readJarEntries } from './zip.js'
 import { classAnnotations } from './class-annotations.js'
 import { DATA_DIR } from './paths.js'
@@ -25,7 +26,7 @@ const TOP_LEVEL_FILES = [
 ]
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i
 const META_CACHE_LIMIT = 5000
-const META_CACHE_VERSION = 3
+const META_CACHE_VERSION = 4
 
 /** 模组图标字段可能是字符串，也可能是 Fabric 的 { small, large } 对象。 */
 function iconPathOf(value) {
@@ -39,7 +40,7 @@ function iconPathOf(value) {
 
 /** 文件名/元数据缓存键：内容没变就不重新解压 JAR。 */
 function metaCacheKey(filePath, stat, runtime = {}) {
-  const rt = `${runtime.mc || ''}|${runtime.loader || ''}|${runtime.loaderVersion || ''}`
+  const rt = `${runtime.mc || ''}|${runtime.loader || ''}|${runtime.loaderVersion || ''}|${runtime.dependencyOverridesKey || ''}`
   return `${process.platform === 'win32' ? path.resolve(filePath).toLowerCase() : path.resolve(filePath)}|${stat.size}|${stat.mtimeMs}|${rt}`
 }
 
@@ -193,21 +194,34 @@ function parseDependencyMap(value, out, defaults = {}) {
   }
 }
 
-function parseFabricMeta(buf) {
+function parseFabricMeta(buf, runtime = {}) {
   const obj = jsonParseLoose(buf.toString('utf8'))
   if (!obj) return null
   const dependencies = []
   const conflicts = []
-  const fabricMap = (map, out, defaults) => {
-    for (const [id, rule] of Object.entries(map || {})) {
+  const overrides = runtime.dependencyOverrides?.[obj.id] || {}
+  const fabricMap = (kind, out, defaults) => {
+    const replacement = overrides[kind]
+    const replaced = replacement && typeof replacement === 'object' && !Array.isArray(replacement)
+    const map = { ...(replaced ? replacement : obj[kind]) }
+    // Fabric 的整包覆盖优先；否则先移除再追加，不取决于 JSON 键顺序。
+    if (!replaced) {
+      for (const id of Object.keys(overrides['-' + kind] || {})) delete map[id]
+      Object.assign(map, overrides['+' + kind])
+    }
+    for (const [id, rule] of Object.entries(map)) {
+      const start = out.length
       addDependency(out, { id, version: Array.isArray(rule) ? rule.join(' || ') : rule }, defaults)
+      if (replaced || Object.hasOwn(overrides['+' + kind] || {}, id)) {
+        for (let i = start; i < out.length; i++) out[i].source = 'config/fabric_loader_dependencies.json'
+      }
     }
   }
-  fabricMap(obj.depends, dependencies)
-  fabricMap(obj.recommends, dependencies, { optional: true })
-  fabricMap(obj.suggests, dependencies, { optional: true })
-  fabricMap(obj.breaks, conflicts)
-  fabricMap(obj.conflicts, conflicts, { optional: true })
+  fabricMap('depends', dependencies)
+  fabricMap('recommends', dependencies, { optional: true })
+  fabricMap('suggests', dependencies, { optional: true })
+  fabricMap('breaks', conflicts)
+  fabricMap('conflicts', conflicts, { optional: true })
   return {
     modid: obj.id || null,
     name: obj.name || obj.id || null,
@@ -441,7 +455,7 @@ async function readPrimaryModMeta(filePath, runtime = {}, prepared = null) {
   for (const [file, buf] of ordered) {
     if (!buf) continue
     try {
-      if (file === 'fabric.mod.json') return parseFabricMeta(buf)
+      if (file === 'fabric.mod.json') return parseFabricMeta(buf, runtime)
       if (file === 'quilt.mod.json') return parseQuiltMeta(buf)
       if (file.endsWith('mods.toml')) return parseModsToml(buf, { neo: file === 'META-INF/neoforge.mods.toml' })
       if (file === 'mcmod.info') {
@@ -474,6 +488,9 @@ export async function readModMeta(filePath, runtime = {}, depth = 0) {
   // 一次读取元数据 + MANIFEST + 内嵌清单；后续解析都复用这份 entries。
   const entries = await readJarEntries(filePath, TOP_LEVEL_FILES)
   let meta = await readPrimaryModMeta(filePath, runtime, entries)
+  // 顶层身份与 jar-in-jar 提供的库分开，多个模组共享内嵌库不代表文件重复。
+  const topLevelModIds = [...new Set([...(meta?.modids || []), meta?.modid].filter(Boolean))]
+  if (meta) meta.topLevelModIds = topLevelModIds
   if (depth >= 3) return meta
   // 有些 fat jar（如 kotlinforforge-*-all.jar）本身没有 mods.toml，真正声明
   // modId 的是 META-INF/jarjar/ 下的子 jar；不能因为没有主元数据就跳过内嵌扫描。
@@ -487,6 +504,7 @@ export async function readModMeta(filePath, runtime = {}, depth = 0) {
       environment: '*',
       dependencies: [],
       modids: [],
+      topLevelModIds,
       nestedModIds: [],
       providedVersions: {}
     }
@@ -628,7 +646,19 @@ export async function scanModsDir(dir, opts = {}) {
   await walk(dir, 0)
   files.sort((a, b) => a.relPath.localeCompare(b.relPath))
 
-  const runtime = opts.runtime || {}
+  const runtime = { ...opts.runtime }
+  // 覆盖声明属于实例而非 JAR，读取一次后传给全部内嵌模组；缓存键随配置变化。
+  if (runtime.loader === 'fabric' && opts.gameDir) {
+    try {
+      const text = await fsp.readFile(path.join(opts.gameDir, 'config', 'fabric_loader_dependencies.json'), 'utf8')
+      const config = jsonParseLoose(text)
+      if (config?.version === 1 && config.overrides && typeof config.overrides === 'object' && !Array.isArray(config.overrides)) {
+        runtime.dependencyOverrides = config.overrides
+      }
+    } catch { /* 没有覆盖声明时使用 JAR 原始依赖 */ }
+  }
+  runtime.dependencyOverridesKey = runtime.dependencyOverrides
+    ? crypto.createHash('sha256').update(JSON.stringify(runtime.dependencyOverrides)).digest('hex') : ''
   let done = 0
   const requestedConcurrency = Number(opts.concurrency)
   const concurrency = Number.isFinite(requestedConcurrency)
@@ -677,6 +707,7 @@ export async function scanModsDir(dir, opts = {}) {
       disabled,
       modid: meta?.modid || null,
       modids: actualIds.length ? actualIds : filenameModIds,
+      topLevelModIds: meta?.topLevelModIds || [],
       nestedModIds: nestedIds,
       modIdHints: filenameModIds,
       providedModIds: providedIds.length ? providedIds : filenameModIds,

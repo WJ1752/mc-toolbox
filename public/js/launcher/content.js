@@ -11,6 +11,7 @@ import { emptyBlock, sectionCard, loaderLabel } from './ui.js'
 import { versionCombo, partitionVersions, compatibleVersion, filterSummary, isMinecraftVersion, versionTagBadges } from './version-picker.js'
 import { createPager, pageOffset, SEARCH_PAGE_SIZE, SEARCH_SORTS } from './search-pager.js'
 import { openModRelations } from './mod-relations.js'
+import { openModDependencyMap } from './mod-dependency-map.js'
 const ENV = { client: ['客户端', 'info'], server: ['服务端', 'accent'], both: ['通用', ''], '*': ['通用', ''] }
 const MOD_LOADER_LABELS = { fabric: 'Fabric', forge: 'Forge', neoforge: 'NeoForge', quilt: 'Quilt', 'legacy-forge': '旧版 Forge', cleanroom: 'Cleanroom' }
 const MODES = ['生存模式', '创造模式', '冒险模式', '旁观模式']
@@ -237,7 +238,18 @@ async function mountMods(container, t) {
   const list = h('div', { class: 'lp-list lp-mod-list' })
   const openFolder = () => t.openPath(data.dir || t.inst.paths?.modsDir || '')
   const refresh = async () => { await load(false); await t.reloadInstance() }
-  const openInstall = (initialQuery = '') => openContentInstall(t, 'mods', refresh, { initialQuery })
+  const openInstall = (initialQuery = '', dependencyId = '') => openContentInstall(t, 'mods', refresh, {
+    initialQuery,
+    dependencyRelations: dependencyId ? () => openDependencyMap(dependencyId) : null
+  })
+  function relationOptions(selected) {
+    return {
+      items: data.items || [], selected, projects: updateState.data?.relationProjects,
+      loadProjects: async () => (await t.api.modUpdates(t.id, false)).relationProjects || [],
+      openModal: t.modal, iconFor: mod => contentIcon(t, 'mods', mod, 'puzzle')
+    }
+  }
+  function openDependencyMap(selected) { return openModDependencyMap(relationOptions(selected)) }
   const importOne = async () => {
     const file = await chooseFiles({ accept: '.jar,.zip', title: '选择模组 JAR' })
     if (file) await uploadFiles(t, 'mods', [file], () => load(false))
@@ -249,6 +261,7 @@ async function mountMods(container, t) {
   container.appendChild(tabEl(
     barEl(searchInput, seg([['all', '全部'], ['enabled', '已启用'], ['disabled', '已禁用'], ['duplicate', '重复']], 'all', (value) => { filter = value; paint() }), spacer(), count,
       checkBtn, updateAllBtn, btn('更新记录', { size: 'sm', onClick: openUpdateBackup }), dedupeBtn,
+      btn('依赖云图', { size: 'sm', onClick: () => openDependencyMap() }),
       btn('打开 mods 文件夹', { size: 'sm', iconName: 'folder-open', onClick: openFolder }),
       btn('导入 JAR', { size: 'sm', iconName: 'upload', onClick: importOne }),
       btn('安装模组', { size: 'sm', variant: 'primary', iconName: 'package-down', onClick: () => openInstall() })),
@@ -372,11 +385,7 @@ async function mountMods(container, t) {
           : missing.length ? tip('缺少前置：' + missing.join('、')) : null
       ),
       actEl(
-        btn('依赖关系', { size: 'xs', onClick: () => openModRelations({
-          items: data.items, selected: item, projects: updateState.data?.relationProjects,
-          loadProjects: async () => (await t.api.modUpdates(t.id, false)).relationProjects || [],
-          openModal: t.modal, iconFor: mod => contentIcon(t, 'mods', mod, 'puzzle')
-        }) }),
+        btn('依赖关系', { size: 'xs', onClick: () => openModRelations(relationOptions(item)) }),
         upd ? btn('更新', { size: 'xs', variant: 'primary', iconName: 'download', onClick: () => updateOne(item) }) : null,
         iconBtn('folder-open', { size: 13, label: '打开 mods 文件夹', onClick: openFolder }),
         iconBtn('trash', { size: 13, label: '删除模组', onClick: () => removeMod(item, label) })
@@ -803,18 +812,20 @@ async function mountMods(container, t) {
     } else if (item.state === 'ambiguous') {
       action = btn('选择匹配', { size: 'xs', iconName: 'search', onClick: () => chooseDependency(item) })
     } else {
-      action = btn('手动搜索', { size: 'xs', iconName: 'search', onClick: () => openInstall(item.id) })
+      action = btn('手动搜索', { size: 'xs', iconName: 'search', onClick: () => openInstall(item.id, item.id) })
     }
     const detail = ready
       ? `匹配到 ${project.title || item.id} · ${item.version.number || item.version.name || ''}`
       : item.state === 'error' ? '查询失败：' + (item.message || '') : '未找到明确匹配，请手动确认'
+    const owners = (data.items || []).filter(mod => (mod.missingDependencies || []).includes(item.id))
     return h('div', { class: 'lp-row lp-dep-row' },
       iconEl,
       mainEl(
         titleEl(h('b', {}, item.id), badge(ready ? '可自动补全' : item.state === 'ambiguous' ? '需要确认' : '未匹配', ready ? 'ok' : item.state === 'ambiguous' ? 'warn' : 'bad')),
-        tip(detail)
+        tip(detail),
+        owners.length ? tip('被 ' + owners.length + ' 个模组依赖：' + owners.slice(0, 3).map(mod => mod.name || mod.file).join('、') + (owners.length > 3 ? ' 等' : '')) : null
       ),
-      actEl(action)
+      actEl(btn('依赖关系', { size: 'xs', onClick: () => openDependencyMap(item.id) }), action)
     )
   }
   async function installDependency(item, project, version, file, button) {
@@ -859,7 +870,7 @@ async function mountMods(container, t) {
   }
   function chooseDependency(item) {
     const candidates = item.candidates || []
-    if (!candidates.length) { openInstall(item.id); return }
+    if (!candidates.length) { openInstall(item.id, item.id); return }
     const listEl = h('div', { class: 'lp-list', style: { maxHeight: '56vh', overflowY: 'auto' } })
     const modal = t.modal({
       title: `选择前置：${item.id}`,
@@ -867,7 +878,7 @@ async function mountMods(container, t) {
       body: h('div', { class: 'col', style: { gap: '6px' } },
         tip('没有找到完全同名项目，请选择实际提供该模组 ID 的前置。'),
         listEl),
-      buttons: [{ label: '关闭', class: 'btn-ghost' }]
+      buttons: [btn('依赖关系', { size: 'sm', onClick: () => openDependencyMap(item.id) }), { label: '关闭', class: 'btn-ghost' }]
     })
     for (const hit of candidates) {
       const choose = btn('使用这个', { size: 'xs', variant: 'primary', onClick: async (event) => {
@@ -909,7 +920,7 @@ const INSTALL_KINDS = {
 /** 读取 Mojang 版本清单失败时的内置常用版本（契约 §7）。 */
 const MC_FALLBACK_VERSIONS = ['26.2', '26.1', '1.21.11', '1.21.8', '1.21.4', '1.21.1', '1.20.1', '1.20', '1.19.4', '1.18.2', '1.17.1', '1.16.5', '1.12.2', '1.8.9']
 
-function openContentInstall(t, kind, onDone, { initialQuery = '' } = {}) {
+function openContentInstall(t, kind, onDone, { initialQuery = '', dependencyRelations = null } = {}) {
   const conf = INSTALL_KINDS[kind] || INSTALL_KINDS.mods
   const isMod = kind === 'mods'
   const instanceMc = String(t.inst.mc || '').trim()
@@ -1018,7 +1029,7 @@ function openContentInstall(t, kind, onDone, { initialQuery = '' } = {}) {
     title: conf.title,
     size: 'xl',
     body: h('div', { class: 'col', style: { gap: '8px' } }, searchBar, filterLine, comboHint, noticeEl, vanillaWarning, status, results, pager.el),
-    buttons: [{ label: '关闭', class: 'btn-ghost' }],
+    buttons: [...(dependencyRelations ? [btn('查看前置依赖关系', { size: 'sm', onClick: dependencyRelations })] : []), { label: '关闭', class: 'btn-ghost' }],
     onClose: () => combo.destroy()
   })
   function filterMc() {

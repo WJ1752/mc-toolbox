@@ -67,6 +67,53 @@ test('同一 modId 的多个版本归为一组，建议保留最新且启用的�
   assert.equal(groups[0].items.find((entry) => entry.relPath === 'foo-2.0.0.jar').keep, true)
 })
 
+test('顶层模组身份保留分隔符，内嵌库和文件名推测不参与 ID 判重', () => {
+  const groups = groupModDuplicates([
+    item('mod_a.jar', { modid: 'mod_a', modids: ['mod_a', 'shared'], topLevelModIds: ['mod_a'], hasMeta: true }),
+    item('mod-a.jar', { modid: 'mod-a', modids: ['mod-a', 'shared'], topLevelModIds: ['mod-a'], hasMeta: true }),
+    item('moda.jar', { modid: 'moda', modids: ['moda', 'shared'], topLevelModIds: ['moda'], hasMeta: true }),
+    item('shared.jar', { modid: 'shared', modids: ['shared'], topLevelModIds: ['shared'], hasMeta: true }),
+    item('unidentified.jar', { modids: ['mod_a'] }),
+    item('wrapper.jar', { modid: 'shared', modids: ['shared'], topLevelModIds: [], hasMeta: true })
+  ])
+  assert.deepEqual(groups, [])
+  const legacy = groupModDuplicates([
+    item('one.jar', { modid: 'one', modids: ['one', 'shared'], nestedModIds: ['one', 'shared'], hasMeta: true }),
+    item('two.jar', { modid: 'two', modids: ['two', 'shared'], nestedModIds: ['two', 'shared'], hasMeta: true })
+  ])
+  assert.deepEqual(legacy, [])
+  const multi = groupModDuplicates([
+    item('bundle.jar', { modid: 'first', modids: ['first', 'second'], topLevelModIds: ['first', 'second'], hasMeta: true }),
+    item('second.jar', { modid: 'second', topLevelModIds: ['second'], hasMeta: true })
+  ])
+  assert.equal(multi.length, 1)
+})
+
+test('整合包共享内嵌前置不误报，真实的宿主复制品仍被识别', async () => {
+  const { root, modsDir, inst } = await makeInstance('mc-dedupe-nested-')
+  inst.loader = 'fabric'
+  const shared = modJar('shared', '1.0.0', { loader: 'fabric' })
+  const host = (id, version) => makeZip([
+    ['fabric.mod.json', JSON.stringify({ schemaVersion: 1, id, version, jars: [{ file: 'META-INF/jars/shared.jar' }] })],
+    ['META-INF/jars/shared.jar', shared]
+  ])
+  try {
+    await fs.writeFile(path.join(modsDir, 'one-1.jar'), host('one', '1.0.0'))
+    await fs.writeFile(path.join(modsDir, 'one-2.jar'), host('one', '2.0.0'))
+    await fs.writeFile(path.join(modsDir, 'two.jar'), host('two', '1.0.0'))
+    await fs.writeFile(path.join(modsDir, 'shared.jar'), shared)
+    const list = await listMods(inst)
+    assert.equal(list.duplicateGroups, 1)
+    assert.deepEqual(list.items.filter((entry) => entry.duplicateGroup).map((entry) => entry.file).sort(), ['one-1.jar', 'one-2.jar'])
+    const report = await findDuplicateMods(inst)
+    assert.equal(report.totalGroups, 1)
+    assert.equal(report.groups[0].keep, 'one-2.jar')
+    assert.deepEqual(report.groups[0].items.map((entry) => entry.file).sort(), ['one-1.jar', 'one-2.jar'])
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
 test('启用优先：旧版本启用 + 新版本禁用时保留启用的那份', () => {
   const groups = groupModDuplicates([
     item('foo-1.0.0.jar', { modid: 'foo', modids: ['foo'], version: '1.0.0', hasMeta: true }),

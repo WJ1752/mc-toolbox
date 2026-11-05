@@ -94,7 +94,7 @@ export function publicAccount(account, selected = '') {
     uuid: account.uuid,
     selected: account.id === selected,
     skin: account.skin || '',
-    model: account.model === 'slim' ? 'slim' : 'classic',
+    model: ['slim', 'classic'].includes(account.model) ? account.model : '',
     cape: account.cape || '',
     authlibServer: account.authlibServer || '',
     createdAt: account.createdAt || 0,

@@ -1,6 +1,7 @@
 // 启动器共享 UI 片段：材质槽图标、皮肤头像、加载器徽章、卡片与标签。
 import { h, fmtBytes, fmtAgo, fmtDuration, fmtDateTime } from '../core/dom.js'
 import { icon } from '../ui/icons.js'
+import { normalizeSkin } from './skin-texture.js'
 
 export const LOADER_STYLE = {
   vanilla: { label: '原版', short: 'VAN', color: '#63c77e', icon: 'cube' },
@@ -51,14 +52,12 @@ function hashString(text) {
 }
 
 /** Deterministic 8×8 pixel face for offline accounts (no external service). */
-function generatedFace(name, size) {
+function generatedFace(name) {
   const hash = hashString(name)
   const canvas = document.createElement('canvas')
   canvas.width = 8
   canvas.height = 8
   canvas.className = 'lp-face-canvas'
-  canvas.style.width = size + 'px'
-  canvas.style.height = size + 'px'
   const ctx = canvas.getContext('2d')
   const skins = ['#d7a179', '#c68c62', '#e2b48d', '#a8704a', '#8a5a3b']
   const hairs = ['#2b1d14', '#4a2f1c', '#6b4a2a', '#1f1a17', '#8a6a3a']
@@ -87,19 +86,22 @@ function generatedFace(name, size) {
 /** Player head: cropped from the real skin when available, generated otherwise. */
 export function playerAvatar(account = {}, { size = 30 } = {}) {
   const wrap = h('span', { class: 'lp-avatar', style: { width: size + 'px', height: size + 'px' }, 'aria-hidden': 'true' })
-  wrap.appendChild(generatedFace(account.name || account.uuid || '?', size))
+  const face = generatedFace(account.name || account.uuid || '?')
+  wrap.appendChild(face)
   if (account.skin) {
-    const scale = size / 8
-    for (const [x, y, cls] of [[8, 8, 'base'], [40, 8, 'overlay']]) {
-      wrap.appendChild(h('span', {
-        class: 'lp-skin-layer ' + cls,
-        style: {
-          backgroundImage: `url("${String(account.skin).replace(/"/g, '%22')}")`,
-          backgroundSize: `${64 * scale}px auto`,
-          backgroundPosition: `${-x * scale}px ${-y * scale}px`
-        }
-      }))
+    const image = new Image()
+    image.crossOrigin = 'anonymous'
+    image.onload = () => {
+      if (image.naturalWidth !== 64 || ![32, 64].includes(image.naturalHeight)) return
+      try {
+        const texture = normalizeSkin(image)
+        const ctx = face.getContext('2d')
+        ctx.clearRect(0, 0, 8, 8)
+        ctx.drawImage(texture, 8, 8, 8, 8, 0, 0, 8, 8)
+        ctx.drawImage(texture, 40, 8, 8, 8, 0, 0, 8, 8)
+      } catch { /* 纹理不可读时保留本地头像。 */ }
     }
+    image.src = account.skin
   }
   return wrap
 }

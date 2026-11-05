@@ -133,6 +133,7 @@ export async function listMods(inst, { signal } = {}) {
   const items = await scanModsDir(paths.modsDir, {
     recursive: true,
     includeDisabled: true,
+    gameDir: paths.gameDir,
     runtime: { mc: inst.mc, loader: inst.loader, loaderVersion: inst.loaderVersion },
     signal
   })
@@ -191,6 +192,7 @@ export async function listMods(inst, { signal } = {}) {
         disabled: item.disabled,
         modid: item.modid,
         modids: item.modids || [],
+        topLevelModIds: item.topLevelModIds || [],
         nestedModIds: item.nestedModIds || [],
         modIdHints: item.modIdHints || [],
         providedModIds: item.providedModIds || [],
@@ -221,6 +223,7 @@ export async function findDuplicateMods(inst, { signal } = {}) {
   const items = await scanModsDir(paths.modsDir, {
     recursive: true,
     includeDisabled: true,
+    gameDir: paths.gameDir,
     runtime: { mc: inst.mc, loader: inst.loader, loaderVersion: inst.loaderVersion },
     signal
   })
