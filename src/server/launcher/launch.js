@@ -671,7 +671,7 @@ export async function prepareLaunch(instanceId, { accountId = '', signal, accoun
   return plan
 }
 
-async function collectMissingFiles(plan, paths, { signal } = {}) {
+export async function collectMissingFiles(plan, paths, { signal } = {}) {
   const fixed = []
   const seen = new Set()
   const addFixed = (file, label) => {
@@ -715,12 +715,26 @@ async function collectMissingFiles(plan, paths, { signal } = {}) {
       if (missing.length < 20) missing.push(`资源索引格式无效：${path.basename(indexPath)}`)
     } else {
       const entries = Object.entries(info.index.objects)
+      const objectsDir = path.join(paths.baseDir, 'assets', 'objects')
+      const buckets = new Map()
       const results = await mapLimit(entries, 16, async ([name, value]) => {
         signal?.throwIfAborted()
         const hash = String(value?.hash || '')
         if (!/^[0-9a-f]{40}$/i.test(hash)) return { name, ok: false }
-        const file = path.join(paths.baseDir, 'assets', 'objects', hash.slice(0, 2), hash)
-        return { name, ok: await fileExists(file) }
+        const prefix = hash.slice(0, 2)
+        const dir = path.join(objectsDir, prefix)
+        // 大索引按哈希前缀共用一次目录读取。只接受常规文件，链接、大小写别名和
+        // 仅授予遍历权限的目录继续走 stat，保留原有文件判断。
+        if (entries.length > 256) {
+          if (!buckets.has(prefix)) {
+            buckets.set(prefix, fsp.readdir(dir, { withFileTypes: true })
+              .then((files) => new Set(files.filter((file) => file.isFile()).map((file) => file.name)))
+              .catch(() => null))
+          }
+          const files = await buckets.get(prefix)
+          if (files?.has(hash)) return { name, ok: true }
+        }
+        return { name, ok: await fileExists(path.join(dir, hash)) }
       })
       for (const result of results) {
         if (result.ok) continue

@@ -1,4 +1,5 @@
 // 实例内容：模组、资源包、光影、世界、截图、服务器列表、日志与崩溃报告。
+import { receiveUpload, removeTempPack } from '../upload.js'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
@@ -348,7 +349,7 @@ export async function readContentIcon(inst, type, name, { entry = '', modid = ''
   return rememberIcon(key, null)
 }
 
-export async function writeUpload(inst, type, filename, buffer) {
+export async function writeUpload(inst, type, filename, req, commit = (write) => write()) {
   const paths = instancePaths(inst)
   const dirs = {
     mods: paths.modsDir,
@@ -363,12 +364,32 @@ export async function writeUpload(inst, type, filename, buffer) {
   const allowed = type === 'mods' ? ['.jar', '.zip'] : ['.zip', '.jar']
   if (!allowed.includes(ext)) throw new Error(`不能把 ${ext || '无扩展名'} 文件放入 ${type} 目录`)
   await fsp.mkdir(dir, { recursive: true })
-  const stem = path.basename(base, ext)
-  let target = path.join(dir, base)
-  let index = 1
-  while (fs.existsSync(target)) target = path.join(dir, `${stem} (${index++})${ext}`)
-  await fsp.writeFile(target, buffer)
-  return { file: path.basename(target), dir, size: buffer.length }
+  const staged = await receiveUpload(req, 'payload', {
+    parent: dir, maxBytes: 512 * 1024 ** 2, limitMessage: '上传文件超过 512 MiB'
+  })
+  try {
+    return await commit(async () => {
+      const stem = base.slice(0, -ext.length)
+      for (let index = 0; ; index++) {
+        const name = index ? `${stem} (${index})${ext}` : base
+        const target = path.join(dir, name)
+        // 独占预留文件名，再在同一卷发布完整文件。
+        let reservation
+        try { reservation = await fsp.open(target, 'wx') }
+        catch (error) { if (error.code === 'EEXIST') continue; throw error }
+        try {
+          await reservation.close()
+          await fsp.rename(staged.file, target)
+        } catch (error) {
+          await fsp.rm(target, { force: true })
+          throw error
+        }
+        return { file: name, dir, size: staged.size }
+      }
+    })
+  } finally {
+    await removeTempPack(staged.dir)
+  }
 }
 
 /* ------------------------------------------------------------------ */

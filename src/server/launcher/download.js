@@ -71,17 +71,17 @@ export async function fileExists(file) {
   try { return (await fsp.stat(file)).isFile() } catch { return false }
 }
 
-async function reuseExisting(target, { sha1 = '', size = 0, verify = true } = {}) {
+async function reuseExisting(target, { sha1 = '', size = 0, verify = true, onProgress } = {}) {
   let stat
   try { stat = await fsp.stat(target) } catch { return null }
   if (!stat.isFile()) return null
-  if (size > 0 && stat.size !== size) return null
-  if (sha1) {
-    if (!verify) return { size: stat.size }
+  if (size > 0 && stat.size !== size && !(sha1 && verify)) return null
+  if (sha1 && verify) {
     const digest = await sha1File(target)
     if (digest.toLowerCase() !== String(sha1).toLowerCase()) return null
   }
-  return { size: stat.size }
+  onProgress?.({ received: stat.size, total: stat.size, cached: true })
+  return { cached: true, size: stat.size }
 }
 
 function sleep(ms, signal) {
@@ -170,7 +170,7 @@ async function probeRange(url, { signal, headers = {}, timeout = RANGE_PROBE_TIM
 }
 
 /** 单连接下载：写到临时文件的当前位置，边下边报进度。 */
-async function downloadSingle({ url, partial, signal, headers = {}, size = 0, onProgress, maxBytes }) {
+async function downloadSingle({ url, partial, signal, headers = {}, size = 0, sha1, onProgress, maxBytes }) {
   const controller = new AbortController()
   const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
   let lastAt = Date.now()
@@ -189,6 +189,7 @@ async function downloadSingle({ url, partial, signal, headers = {}, size = 0, on
     const declared = Number(size || response.headers.get('content-length')) || 0
     if (declared > maxBytes) throw new Error('文件超过允许的大小')
     handle = await fsp.open(partial, 'w')
+    const hash = sha1 ? crypto.createHash('sha1') : null
     let received = 0
     if (response.body) {
       for await (const chunk of response.body) {
@@ -197,10 +198,11 @@ async function downloadSingle({ url, partial, signal, headers = {}, size = 0, on
         received += chunk.length
         if (received > maxBytes) throw new Error('文件超过允许的大小')
         await handle.writeFile(chunk)
+        hash?.update(chunk)
         onProgress?.({ received, total: declared || Number(size) || 0 })
       }
     }
-    return { received, total: declared || Number(size) || received }
+    return { received, total: declared || Number(size) || received, digest: hash?.digest('hex') }
   } catch (error) {
     if (error?.status) recordSample(url, { failed: true, status: error.status })
     else if (!signal?.aborted) recordSample(url, { failed: true })
@@ -367,24 +369,22 @@ async function downloadRanged({ url, partial, total, threads, signal, headers = 
  * @param {number} [options.expectedSize] 调用方已知的文件大小（只用于判断是否分段）
  * @returns {Promise<{cached:boolean,size:number}>}
  */
-export async function fetchToFile(url, target, {
+export async function fetchToFile(url, target, options = {}) {
+  const existing = await reuseExisting(target, options)
+  return existing ?? downloadToFile(url, target, options)
+}
+
+async function downloadToFile(url, target, {
   sha1 = '',
   size = 0,
   expectedSize = 0,
   signal,
-  verify = true,
   retries = 0,
   maxBytes = 2 * 1024 ** 3,
   onProgress,
   headers = {},
   threads = 1
 } = {}) {
-  const existing = await reuseExisting(target, { sha1, size, verify })
-  if (existing) {
-    onProgress?.({ received: existing.size, total: size || existing.size, cached: true })
-    return { cached: true, size: existing.size }
-  }
-
   await fsp.mkdir(path.dirname(target), { recursive: true })
   const wantThreads = Math.max(1, Math.min(MAX_THREADS, Number(threads) || 1))
   const hint = Math.max(0, Number(expectedSize) || 0)
@@ -420,7 +420,7 @@ export async function fetchToFile(url, target, {
       }
       if (!outcome) {
         outcome = await downloadSingle({
-          url, partial, signal, headers, size: known, onProgress, maxBytes
+          url, partial, signal, headers, size: known, sha1, onProgress, maxBytes
         })
       }
       return outcome
@@ -445,11 +445,12 @@ export async function fetchToFile(url, target, {
       // 有 SHA-1 时以哈希为准：清单里的 size 可能来自另一次上传，差几个字节
       // 并不代表内容不对。分段下载必须从磁盘再算一次，顺序与分块无关。
       if (sha1) {
-        const digest = await sha1File(partial)
+        const digest = outcome.digest ?? await sha1File(partial)
         if (digest.toLowerCase() !== String(sha1).toLowerCase()) throw new Error('SHA-1 校验失败')
       } else if (size > 0 && outcome.received !== size) {
         throw new Error(`长度校验失败（${outcome.received} / ${size} 字节）`)
       }
+      signal?.throwIfAborted()
       await fsp.rename(partial, target)
       recordSample(url, { bytes: outcome.received, ms: Date.now() - startedAt })
       return { cached: false, size: outcome.received }
@@ -474,6 +475,8 @@ export async function fetchToFile(url, target, {
 export async function downloadFromMirrors(urls, target, options = {}) {
   const list = [...new Set((Array.isArray(urls) ? urls : [urls]).filter(Boolean))]
   if (!list.length) throw new Error('没有可用的下载地址')
+  const existing = await reuseExisting(target, options)
+  if (existing) return existing
   let ordered = list
   if (list.length > 1 && options.rankBySpeed !== false) {
     try {
@@ -486,7 +489,7 @@ export async function downloadFromMirrors(urls, target, options = {}) {
   let lastError = null
   for (let i = 0; i < ordered.length; i++) {
     try {
-      return await fetchToFile(ordered[i], target, { ...options, retries: i === 0 ? (options.retries ?? 2) : 1 })
+      return await downloadToFile(ordered[i], target, { ...options, retries: i === 0 ? (options.retries ?? 2) : 1 })
     } catch (e) {
       if (options.signal?.aborted) throw e
       lastError = e

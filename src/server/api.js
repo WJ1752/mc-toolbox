@@ -64,31 +64,11 @@ function readBody(req) {
   })
 }
 
-function readRawBody(req, maxBytes = 2 * 1024 * 1024 * 1024) {
-  return new Promise((resolve, reject) => {
-    const length = Number(req.headers['content-length'] || 0)
-    if (length > maxBytes) return reject(new Error('上传文件超过 2 GB'))
-    const chunks = []
-    let total = 0
-    req.on('data', (chunk) => {
-      total += chunk.length
-      if (total > maxBytes) {
-        req.destroy()
-        reject(new Error('上传文件超过 2 GB'))
-        return
-      }
-      chunks.push(chunk)
-    })
-    req.on('end', () => resolve(Buffer.concat(chunks, total)))
-    req.on('error', reject)
-  })
-}
-
 const routes = []
 const on = (method, pattern, handler) => routes.push({ method, pattern, handler })
 
 // 启动器（MC launcher）路由：独立模块注册，避免把它和工具箱原有接口混在一起。
-registerLauncherApi(on, { readBody, readRawBody })
+registerLauncherApi(on, { readBody })
 registerFriendsApi(on, { readBody })
 
 // 客户端心跳状态 —— server.js 用它判断「应用窗口是否还开着」。

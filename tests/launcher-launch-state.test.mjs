@@ -19,10 +19,37 @@ import {
   ensureInstanceDirs,
   publicInstance
 } from '../src/server/launcher/state.js'
-import { classifyJava, classifyMissingFiles, prepareLaunch } from '../src/server/launcher/launch.js'
+import { classifyJava, classifyMissingFiles, collectMissingFiles, prepareLaunch } from '../src/server/launcher/launch.js'
 
 const ACTIONS = ['repair', 'select-java', 'open-game-dir', 'open-logs', 'copy']
 const CHINESE = /[\u4e00-\u9fa5]/
+
+test('大资源索引按桶校验，保留重复对象、非法哈希和同名目录的缺失报告', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'mtb-assets-'))
+  try {
+    const bucket = path.join(root, 'assets', 'objects', 'aa')
+    const indexes = path.join(root, 'assets', 'indexes')
+    const good = 'a'.repeat(40)
+    const directory = 'aa' + 'b'.repeat(38)
+    const absent = 'c'.repeat(40)
+    await fsp.mkdir(path.join(bucket, directory), { recursive: true })
+    await fsp.mkdir(indexes, { recursive: true })
+    await fsp.writeFile(path.join(bucket, good), 'asset')
+    const objects = Object.fromEntries(Array.from({ length: 257 }, (_, i) => ['sound-' + i, { hash: good }]))
+    Object.assign(objects, {
+      folder: { hash: directory }, missing: { hash: absent }, alias: { hash: absent }, invalid: { hash: '../' }
+    })
+    const indexFile = path.join(indexes, 'demo.json')
+    await fsp.writeFile(indexFile, JSON.stringify({ objects }))
+    const result = await collectMissingFiles({ clientJar: indexFile, version: { assets: 'demo' } }, { baseDir: root })
+    assert.deepEqual(result, {
+      missingCount: 4,
+      missing: ['资源对象：folder', '资源对象：missing', '资源对象：alias', '资源对象：invalid']
+    })
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true })
+  }
+})
 
 test('启动阶段顺序与中文标签固定', () => {
   assert.deepEqual(LAUNCH_PHASES.map((item) => item.id), [

@@ -1,3 +1,4 @@
+import { receiveUpload } from './upload.js'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import os from 'node:os'
@@ -783,30 +784,11 @@ export async function writeUploadedPack(buffer, name) {
 
 // Stream browser uploads to disk; aborting the HTTP request removes the partial file.
 export async function receiveUploadedPack(req, name, { allowJar = false } = {}) {
-  if (Number(req.headers['content-length']) > MAX_ARCHIVE_BYTES) throw new Error('整合包超过 4 GB；请解压后使用“选择文件夹”')
   const ext = (allowJar ? /\.(mrpack|zip|jar)$/i : /\.(mrpack|zip)$/i).exec(name)?.[1]
   if (!ext) throw new Error('仅支持 ZIP 或 .mrpack')
-  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'mc-toolbox-upload-'))
-  const file = path.join(dir, 'client-pack.' + ext.toLowerCase())
-  let handle
-  try {
-    handle = await fsp.open(file, 'w')
-    let total = 0
-    for await (const chunk of req) {
-      total += chunk.length
-      if (total > MAX_ARCHIVE_BYTES) throw new Error('整合包超过 4 GB；请解压后使用“选择文件夹”')
-      await handle.writeFile(chunk)
-    }
-    if (!total || req.aborted) throw new Error('上传中止或文件为空')
-    await handle.close()
-    return { dir, file }
-  } catch (e) {
-    await handle?.close().catch(() => {})
-    await removeTempPack(dir)
-    throw e
-  }
+  return receiveUpload(req, 'client-pack.' + ext.toLowerCase(), {
+    maxBytes: MAX_ARCHIVE_BYTES, limitMessage: '整合包超过 4 GB；请解压后使用“选择文件夹”'
+  })
 }
 
-export async function removeTempPack(dir) {
-  await fsp.rm(dir, { recursive: true, force: true }).catch(() => {})
-}
+export { removeTempPack } from './upload.js'

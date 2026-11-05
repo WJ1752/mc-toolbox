@@ -8,7 +8,7 @@ import os from 'node:os'
 import http from 'node:http'
 import crypto from 'node:crypto'
 
-import { fetchToFile } from '../src/server/launcher/download.js'
+import { downloadFromMirrors, fetchToFile } from '../src/server/launcher/download.js'
 
 const body = Buffer.from('jar-bytes-with-two-extra')          // 24 字节
 const goodSha1 = crypto.createHash('sha1').update(body).digest('hex')
@@ -17,10 +17,12 @@ const badSha1 = crypto.createHash('sha1').update('something else').digest('hex')
 let dir = ''
 let server = null
 let base = ''
+let requests = 0
 
 test.before(async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), 'mc-toolbox-verify-'))
   server = http.createServer((req, res) => {
+    requests++
     if (req.url === '/missing') { res.writeHead(404); res.end('nope'); return }
     res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': String(body.length) })
     res.end(body)
@@ -41,6 +43,13 @@ test('哈希匹配时忽略清单长度差异（1286460 vs 实际 1286462 的场
   assert.equal(result.cached, false)
   assert.equal(result.size, body.length)
   assert.equal((await fs.readFile(target)).length, body.length)
+  // 第二次安装用同一份清单，命中缓存后即使远端已下线也能成功。
+  const before = requests
+  const cached = await downloadFromMirrors([`${base}/missing`, `${base}/mirror`], target, {
+    sha1: goodSha1, size: body.length - 2
+  })
+  assert.deepEqual(cached, { cached: true, size: body.length })
+  assert.equal(requests, before, '已缓存文件不应请求镜像测速')
 })
 
 test('哈希不匹配时仍然失败，并清掉半成品', async () => {

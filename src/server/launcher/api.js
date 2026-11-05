@@ -156,7 +156,7 @@ async function launcherStatusPayload() {
   }
 }
 
-export function registerLauncherApi(on, { readBody, readRawBody }) {
+export function registerLauncherApi(on, { readBody }) {
   /* ---------------- bootstrap / settings ---------------- */
   on('GET', '/api/launcher/bootstrap', async () => {
     const data = await launcherStatusPayload()
@@ -444,10 +444,8 @@ export function registerLauncherApi(on, { readBody, readRawBody }) {
     const inst = instanceOf(params.id)
     const type = String(query.type || '')
     const name = decodeURIComponent(String(req.headers['x-file-name'] || ''))
-    const buffer = await readRawBody(req, 512 * 1024 ** 2)
-    if (!buffer.length) throw new Error('没有收到文件内容')
-    const write = () => content.writeUpload(inst, type, name, buffer)
-    return type === 'mods' ? withModUpdateLock(inst, write) : write()
+    const commit = type === 'mods' ? (write) => withModUpdateLock(inst, write) : undefined
+    return content.writeUpload(inst, type, name, req, commit)
   })
   on('GET', '/api/launcher/instances/:id/icon', async (_req, params, query, res) => {
     const inst = instanceOf(params.id)
