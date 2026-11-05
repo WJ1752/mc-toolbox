@@ -73,7 +73,8 @@ function cfLoadersFromGameVersions(gameVersions) {
 }
 
 function pickModrinthVersion(list) {
-  const versions = Array.isArray(list) ? list : []
+  const versions = Array.isArray(list) ? [...list].sort((a, b) =>
+    (Date.parse(b?.date_published) || 0) - (Date.parse(a?.date_published) || 0)) : []
   const hasPackFile = (v) => (Array.isArray(v?.files) ? v.files : []).some((f) => /\.(mrpack|zip)$/i.test(String(f?.filename || '')))
   return versions.find((v) => v?.version_type === 'release' && hasPackFile(v)) || versions.find(hasPackFile) || versions[0] || null
 }
@@ -183,7 +184,8 @@ function cfEdgeUrl(fileId, fileName) {
 }
 
 function pickCfFile(files) {
-  const list = Array.isArray(files) ? files : []
+  const list = Array.isArray(files) ? [...files].sort((a, b) =>
+    (Date.parse(b?.fileDate) || 0) - (Date.parse(a?.fileDate) || 0)) : []
   return list.find((file) => Number(file?.releaseType) === 1) || list[0] || null
 }
 
@@ -230,6 +232,9 @@ async function resolveCurseForge({ projectId, versionId, apiKey, fetcher, signal
     file = pickCfFile(body?.data)
   }
   if (!file) throw new Error('该 CurseForge 项目没有可下载的整合包文件')
+  if ((file.modId && String(file.modId) !== id) || (project?.id && String(project.id) !== id)) {
+    throw new Error('CurseForge 文件与所选整合包项目不一致')
+  }
 
   const filename = String(file.fileName || '').trim()
   if (!filename || path.basename(filename) !== filename || /[\\/]/.test(filename)) {

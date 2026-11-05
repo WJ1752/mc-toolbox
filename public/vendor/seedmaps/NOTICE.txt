@@ -1,0 +1,12 @@
+seedmaps-engine-wasm 0.1.0 (MIT)
+https://www.npmjs.com/package/seedmaps-engine-wasm/v/0.1.0
+seed_engine.js and seed_engine.wasm were extracted from the published package.
+To reproduce, run npm pack --ignore-scripts seedmaps-engine-wasm@0.1.0, extract the
+tarball, and copy package/dist/seed_engine.js and package/dist/seed_engine.wasm.
+seed_engine.wasm SHA-256: c0f341dea293853e37aeba54f484074e0c944d9b9d90131c485dace81cd133b1
+
+world-generator.js and structures.js come from the project's Java and core packages at
+https://github.com/afzalimdad9/mc-seed-map/tree/8b7732e3b28f6c3a1ac8ce15b692c22711f314cc
+The loader import in world-generator.js was adjusted for the bundled directory.
+Cubiomes source and build instructions are available at the same revision.
+See LICENSE and LICENSE-cubiomes for license notices.

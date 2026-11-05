@@ -15,6 +15,7 @@ import { launcherApi as api } from './api.js'
 import * as ui from './ui.js'
 import { optimizedJvmArgs, hasOptimizedJvm } from './jvm.js'
 import { openGameDirSetup } from './setup.js'
+import { openPackUpdate } from './pack-update.js'
 import { initUpdateChecker, disposeUpdateChecker, checkForUpdates } from './update.js'
 
 const TABS = [
@@ -1868,6 +1869,7 @@ async function renderOverview(container, inst) {
     ['打开日志目录', 'terminal', () => openPath(detail?.paths?.logsDir || inst.paths?.logsDir || '')],
     ['检查并修复文件', 'refresh', () => repairInstance(inst)],
     ['复制实例', 'copy', () => duplicateInstance(inst)],
+    ['检查整合包更新', 'refresh', () => openPackUpdate(inst)],
     ['导出为整合包', 'archive', () => openPackExport(inst)],
     ['导出实例配置', 'save', () => exportInstance(inst)],
     ['删除实例', 'trash', () => deleteInstanceAction(inst)]
@@ -2633,6 +2635,7 @@ function openInstanceMenu(e, inst) {
       { label: '打开日志目录', iconName: 'terminal', onClick: () => openPath(inst.paths?.logsDir || '') },
       { separator: true },
       { label: '复制启动命令', iconName: 'copy', onClick: () => showCommandPreview(inst, true) },
+      { label: '检查整合包更新', iconName: 'refresh', onClick: () => openPackUpdate(inst) },
       { label: '导出为整合包', iconName: 'archive', onClick: () => openPackExport(inst) },
       { label: '导出实例配置', iconName: 'save', onClick: () => exportInstance(inst) },
       { label: '复制实例', iconName: 'copy', disabled: running, title: running ? '请先退出游戏' : '', onClick: () => duplicateInstance(inst) },

@@ -10,6 +10,7 @@ import { launcherApi } from './api.js'
 import { emptyBlock, sectionCard, loaderLabel } from './ui.js'
 import { versionCombo, partitionVersions, compatibleVersion, filterSummary, isMinecraftVersion, versionTagBadges } from './version-picker.js'
 import { createPager, pageOffset, SEARCH_PAGE_SIZE, SEARCH_SORTS } from './search-pager.js'
+import { openModRelations } from './mod-relations.js'
 const ENV = { client: ['客户端', 'info'], server: ['服务端', 'accent'], both: ['通用', ''], '*': ['通用', ''] }
 const MOD_LOADER_LABELS = { fabric: 'Fabric', forge: 'Forge', neoforge: 'NeoForge', quilt: 'Quilt', 'legacy-forge': '旧版 Forge', cleanroom: 'Cleanroom' }
 const MODES = ['生存模式', '创造模式', '冒险模式', '旁观模式']
@@ -371,6 +372,11 @@ async function mountMods(container, t) {
           : missing.length ? tip('缺少前置：' + missing.join('、')) : null
       ),
       actEl(
+        btn('依赖关系', { size: 'xs', onClick: () => openModRelations({
+          items: data.items, selected: item, projects: updateState.data?.relationProjects,
+          loadProjects: async () => (await t.api.modUpdates(t.id, false)).relationProjects || [],
+          openModal: t.modal, iconFor: mod => contentIcon(t, 'mods', mod, 'puzzle')
+        }) }),
         upd ? btn('更新', { size: 'xs', variant: 'primary', iconName: 'download', onClick: () => updateOne(item) }) : null,
         iconBtn('folder-open', { size: 13, label: '打开 mods 文件夹', onClick: openFolder }),
         iconBtn('trash', { size: 13, label: '删除模组', onClick: () => removeMod(item, label) })
@@ -1474,6 +1480,7 @@ async function mountWorlds(container, t) {
   container.appendChild(tabEl(
     barEl(count, spacer(),
       btn('刷新', { size: 'sm', iconName: 'refresh', onClick: () => load() }),
+      btn('存档备份', { size: 'sm', onClick: showBackups }),
       btn('打开 saves 文件夹', { size: 'sm', iconName: 'folder-open', onClick: openFolder })),
     grid
   ))
@@ -1506,9 +1513,49 @@ async function mountWorlds(container, t) {
           h('span', { class: 'lp-hint', title: fmtDateTime(world.lastPlayed) }, `上次游玩 ${fmtAgo(world.lastPlayed)}`),
           h('span', { class: 'lp-hint mono' }, `${fmtBytes(world.size)} · ${world.files || 0} 个文件`)),
       h('div', { class: 'lp-world-actions' },
+        world.seed !== undefined && world.seed !== '' && !world.error ? btn('种子地图', {
+          size: 'sm', onClick: async () => {
+            try {
+              const { openSeedMap } = await import('../../features/seed-map/tile.js')
+              openSeedMap({ seed: String(world.seed), version: world.version })
+            } catch (error) { t.toast(error.message, 'err') }
+          }
+        }) : null,
+        btn('备份', { size: 'sm', onClick: () => copySave(() => t.api.backupWorld(t.id, world.name), '正在备份 ' + name, () => '已备份 ' + name) }),
         btn('打开文件夹', { size: 'sm', iconName: 'folder-open', onClick: () => t.openPath(world.path || data.savesDir || '') }),
         btn('删除', { size: 'sm', variant: 'danger', iconName: 'trash', onClick: () => removeWorld(world, name) }))
     )
+  }
+  async function copySave(request, pending, message) {
+    if (busy) return
+    busy = true
+    count.textContent = pending + '…'
+    try {
+      const result = await request()
+      t.toast(message(result), 'ok')
+      if (!t.life.dead) await load(false)
+    } catch (error) {
+      t.toast(error.message, 'err')
+      if (!t.life.dead) paint()
+    } finally { busy = false }
+  }
+  async function showBackups() {
+    try {
+      const { backups } = await t.api.worldBackups(t.id)
+      if (t.life.dead) return
+      const modal = t.modal({
+        title: '存档备份', size: 'lg',
+        body: backups.length ? h('div', { class: 'lp-list' }, ...backups.map(item => rowEl('',
+          mainEl(titleEl(item.world), metaEl([fmtDateTime(item.createdAt), fmtBytes(item.bytes), item.files + ' 个文件'])),
+          btn('恢复为新世界', { size: 'sm', onClick: () => {
+            if (busy) return
+            modal.close()
+            copySave(() => t.api.restoreWorldBackup(t.id, item.id), '正在恢复 ' + item.world, result => '已恢复到 ' + result.name)
+          } })
+        ))) : tip('暂无备份。在世界卡片上选择「备份」即可创建。'),
+        buttons: [{ label: '关闭' }]
+      })
+    } catch (error) { t.toast('读取备份失败：' + error.message, 'err') }
   }
   async function removeWorld(world, name) {
     if (busy) return

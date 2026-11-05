@@ -70,6 +70,9 @@ export const launcherApi = {
   modDuplicates: (id) => api.get(`/api/launcher/instances/${encodeURIComponent(id)}/mods/duplicates`),
   cleanModDuplicates: (id, mode, groups) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/mods/dedupe`, { mode, groups }),
   deleteContent: (id, type, name) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/content/delete`, { type, name }),
+  worldBackups: (id) => api.get(`/api/launcher/instances/${encodeURIComponent(id)}/world-backups`),
+  backupWorld: (id, name) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/world-backups`, { name }),
+  restoreWorldBackup: (id, backupId) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/world-backups/restore`, { id: backupId }),
   setResourcePack: (id, name, enabled) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/resourcepack`, { name, enabled }),
   serverAction: (id, payload) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/servers`, payload),
   upload: (id, type, file, { onProgress } = {}) => upload(`/api/launcher/instances/${encodeURIComponent(id)}/upload?type=${encodeURIComponent(type)}`, file, { onProgress }),
@@ -78,6 +81,7 @@ export const launcherApi = {
   loaders: () => api.get('/api/launcher/loaders'),
   loaderVersions: (loader, mc) => api.get(`/api/launcher/loaders/${encodeURIComponent(loader)}/versions${qs({ mc })}`),
   install: (payload) => api.post('/api/launcher/install', payload),
+  estimateInstall: (payload) => api.post('/api/launcher/install/estimate', payload),
   jobs: () => api.get('/api/launcher/jobs'),
   // 任务对象本身带 error 字段（失败原因），不能让它触发通用错误处理。
   job: (id, after = 0) => api.get(`/api/launcher/jobs/${encodeURIComponent(id)}${qs({ after })}`, { allowErrorField: true }),

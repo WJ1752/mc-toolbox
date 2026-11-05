@@ -11,7 +11,8 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { httpFetch } from '../http.js'
-import { knownSpeed, markRateLimited, pickFastestSource as pickFastestSourceRaw, rankCandidates, recordSample } from './source-select.js'
+import { openPackResume } from './pack-resume.js'
+import { hostOf, knownSpeed, markRateLimited, pickFastestSource as pickFastestSourceRaw, rankCandidates, recordSample } from './source-select.js'
 
 const STALL_MS = 30000
 // 小于这个大小的文件分段反而更慢（建立连接的成本高于并行收益）。
@@ -170,7 +171,7 @@ async function probeRange(url, { signal, headers = {}, timeout = RANGE_PROBE_TIM
 }
 
 /** 单连接下载：写到临时文件的当前位置，边下边报进度。 */
-async function downloadSingle({ url, partial, signal, headers = {}, size = 0, sha1, onProgress, maxBytes }) {
+async function downloadSingle({ url, partial, signal, headers = {}, size = 0, sha1, onProgress, maxBytes, onResponse }) {
   const controller = new AbortController()
   const combined = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal
   let lastAt = Date.now()
@@ -186,6 +187,7 @@ async function downloadSingle({ url, partial, signal, headers = {}, size = 0, sh
       await response.body?.cancel?.().catch(() => {})
       throw error
     }
+    onResponse?.(response.url)
     const declared = Number(size || response.headers.get('content-length')) || 0
     if (declared > maxBytes) throw new Error('文件超过允许的大小')
     handle = await fsp.open(partial, 'w')
@@ -231,13 +233,14 @@ async function writeAll(handle, buffer, position) {
  * 过程中按 2.5 秒采样：总吞吐低于 1.5 MB/s 就逐步加连接，最多 32 条；
  * 同时用全局闸门把整个进程的 Range 请求限制在 64 条以内。
  */
-async function downloadRanged({ url, partial, total, threads, signal, headers = {}, onProgress, maxBytes }) {
+async function downloadRanged({ url, partial, total, threads, signal, headers = {}, onProgress, maxBytes, onResponse, resume }) {
   const initial = Math.max(1, Math.min(MAX_THREADS, Number(threads) || 1))
   const cap = initial <= 1
     ? 1
     : Math.max(initial, Math.min(MAX_ADAPTIVE_THREADS, Math.ceil(total / CHUNK_MIN)))
   // 块数至少 32 个，给后续增加连接留出余量；大文件仍用 8 MB 块控制请求数。
-  const chunkSize = Math.max(CHUNK_MIN, Math.min(CHUNK_MAX, Math.ceil(total / Math.max(32, initial * 4))))
+  const wantedChunks = resume ? 64 : Math.max(32, initial * 4)
+  const chunkSize = Math.max(CHUNK_MIN, Math.min(CHUNK_MAX, Math.ceil(total / wantedChunks)))
   const chunks = []
   for (let start = 0; start < total; start += chunkSize) {
     chunks.push({ start, end: Math.min(total - 1, start + chunkSize - 1) })
@@ -246,6 +249,7 @@ async function downloadRanged({ url, partial, total, threads, signal, headers = 
   const abort = new AbortController()
   const combined = signal ? AbortSignal.any([signal, abort.signal]) : abort.signal
   let received = 0
+  let restored = 0
   let lastAt = Date.now()
   let nextIndex = 0
   let active = 0
@@ -267,6 +271,13 @@ async function downloadRanged({ url, partial, total, threads, signal, headers = 
 
   const runChunk = async ({ start, end }) => {
     const expected = end - start + 1
+    if (resume && await resume.restore(partial, start, end, combined)) {
+      restored += expected
+      received += expected
+      lastAt = Date.now()
+      onProgress?.({ received, total, restored })
+      return
+    }
     let release = null
     try {
       release = await acquireRangeSlot(combined)
@@ -285,6 +296,13 @@ async function downloadRanged({ url, partial, total, threads, signal, headers = 
         await response.body?.cancel?.().catch(() => {})
         throw error
       }
+      const range = /^bytes (\d+)-(\d+)\/(\d+)$/i.exec(response.headers.get('content-range') || '')
+      if (response.status !== 206 || !range || Number(range[1]) !== start || Number(range[2]) !== end || Number(range[3]) !== total) {
+        await response.body?.cancel?.().catch(() => {})
+        throw new RangeUnsupported('服务器返回的范围与请求不一致')
+      }
+      onResponse?.(response.url)
+      onResponse = null
       const reader = response.body?.getReader?.()
       if (!reader) throw new Error('下载流不可用')
       let pos = start
@@ -297,12 +315,13 @@ async function downloadRanged({ url, partial, total, threads, signal, headers = 
         received += value.length
         lastAt = Date.now()
         if (received > maxBytes) throw new Error('文件超过允许的大小')
-        onProgress?.({ received, total })
+        onProgress?.({ received, total, restored })
       }
       if (pos !== end + 1) throw new Error(`分段下载不完整（${pos - start} / ${expected} 字节）`)
     } finally {
       release?.()
     }
+    if (resume) await resume.save(partial, start, end, combined)
   }
 
   const launch = () => {
@@ -333,8 +352,9 @@ async function downloadRanged({ url, partial, total, threads, signal, headers = 
     if (failure || nextIndex >= chunks.length) return
     const nowAt = Date.now()
     const elapsed = Math.max(0.5, (nowAt - sampleAt) / 1000)
-    const speed = (received - sampleBytes) / elapsed
-    sampleBytes = received
+    const networkBytes = received - restored
+    const speed = (networkBytes - sampleBytes) / elapsed
+    sampleBytes = networkBytes
     sampleAt = nowAt
     if (speed >= ADAPTIVE_TARGET_BPS || workersWanted >= cap) return
     workersWanted = Math.min(cap, workersWanted + Math.max(2, Math.ceil(workersWanted / 2)))
@@ -348,7 +368,7 @@ async function downloadRanged({ url, partial, total, threads, signal, headers = 
     await finished
     if (failure) throw failure
     if (received !== total) throw new Error(`分段下载不完整（${received} / ${total} 字节）`)
-    return received
+    return { received, total, restored }
   } catch (error) {
     abort.abort(error)
     if (error?.status) recordSample(url, { failed: true, status: error.status })
@@ -382,33 +402,40 @@ async function downloadToFile(url, target, {
   retries = 0,
   maxBytes = 2 * 1024 ** 3,
   onProgress,
+  onSource,
+  resumeDir,
   headers = {},
   threads = 1
 } = {}) {
   await fsp.mkdir(path.dirname(target), { recursive: true })
+  const host = onSource ? hostOf(url) : ''
+  onSource?.({ host })
+  let responseHost = ''
+  const onResponse = onSource && ((responseUrl) => {
+    responseHost = hostOf(responseUrl) || host
+    onSource({ host, responseHost, bps: knownSpeed(url) || 0 })
+  })
   const wantThreads = Math.max(1, Math.min(MAX_THREADS, Number(threads) || 1))
   const hint = Math.max(0, Number(expectedSize) || 0)
   let lastError = null
+  let resume = null
   for (let attempt = 0; attempt <= Math.max(0, Number(retries) || 0); attempt++) {
-    signal?.throwIfAborted()
-    // 逐次拉长等待：跨境线路的短暂重置通常 1–3 秒内恢复，固定 350ms 太短。
-    if (attempt > 0) await sleep(Math.min(10000, 700 * 2 ** (attempt - 1)), signal)
-    const partial = `${target}.part-${crypto.randomUUID()}`
-    const startedAt = Date.now()
-    const downloadOnce = async (modeThreads) => {
+    const partial = `${target}.part-${resumeDir ? process.pid + '-' : ''}${crypto.randomUUID()}`
+    const downloadOnce = async (modeThreads, allowResume = true) => {
       let known = hint || Number(size) || 0
       let outcome = null
       // 只有「已知是大文件」或「大小未知」时才值得多花一次 Range 探测：
       // 素材索引里成百上千的小文件直接单连接，省下探测请求。
-      if (modeThreads > 1 && (known === 0 || known >= SEGMENT_MIN_BYTES)) {
+      const resumable = allowResume && resumeDir && /^[a-f0-9]{40}$/i.test(sha1)
+      if ((modeThreads > 1 || resumable) && (known === 0 || known >= SEGMENT_MIN_BYTES)) {
         const head = await probeRange(url, { signal, headers })
         if (head.ranges && head.total >= SEGMENT_MIN_BYTES) {
           if (head.total > maxBytes) throw new Error('文件超过允许的大小')
           try {
-            const received = await downloadRanged({
-              url, partial, total: head.total, threads: modeThreads, signal, headers, onProgress, maxBytes
+            if (resumable) resume = await openPackResume(resumeDir, sha1, head.total)
+            outcome = await downloadRanged({
+              url, partial, total: head.total, threads: modeThreads, signal, headers, onProgress, maxBytes, onResponse, resume
             })
-            outcome = { received, total: head.total }
           } catch (error) {
             if (!(error instanceof RangeUnsupported)) throw error
             // 服务器 / 代理忽略了 Range：删掉半成品，退回单连接。
@@ -420,23 +447,27 @@ async function downloadToFile(url, target, {
       }
       if (!outcome) {
         outcome = await downloadSingle({
-          url, partial, signal, headers, size: known, sha1, onProgress, maxBytes
+          url, partial, signal, headers, size: known, sha1, onProgress, maxBytes, onResponse
         })
       }
       return outcome
     }
     try {
+      signal?.throwIfAborted()
+      if (attempt > 0) await sleep(Math.min(10000, 700 * 2 ** (attempt - 1)), signal)
+      const startedAt = Date.now()
       let outcome
       try {
         outcome = await downloadOnce(wantThreads)
       } catch (error) {
         // 429 通常是「并发太高」：先按单连接再试一次，而不是立刻换源。
         // 单连接仍然 429 时把这条线路短暂排到最后，交给另一个下载源。
-        if (error?.rateLimited && wantThreads > 1 && !signal?.aborted) {
+        if (error?.rateLimited && (wantThreads > 1 || resume) && !signal?.aborted) {
           markRateLimited(url)
+          onSource?.({ host: hostOf(url), limited: true })
           await fsp.rm(partial, { force: true }).catch(() => {})
           await sleep(600, signal)
-          outcome = await downloadOnce(1)
+          outcome = await downloadOnce(1, false)
         } else {
           throw error
         }
@@ -446,24 +477,39 @@ async function downloadToFile(url, target, {
       // 并不代表内容不对。分段下载必须从磁盘再算一次，顺序与分块无关。
       if (sha1) {
         const digest = outcome.digest ?? await sha1File(partial)
-        if (digest.toLowerCase() !== String(sha1).toLowerCase()) throw new Error('SHA-1 校验失败')
+        if (digest.toLowerCase() !== String(sha1).toLowerCase()) {
+          await resume?.clear()
+          throw new Error('SHA-1 校验失败')
+        }
       } else if (size > 0 && outcome.received !== size) {
         throw new Error(`长度校验失败（${outcome.received} / ${size} 字节）`)
       }
       signal?.throwIfAborted()
       await fsp.rename(partial, target)
-      recordSample(url, { bytes: outcome.received, ms: Date.now() - startedAt })
+      await resume?.clear()
+      recordSample(url, { bytes: outcome.received - (outcome.restored || 0), ms: Date.now() - startedAt })
+      onSource?.({ host, responseHost, bps: knownSpeed(url) || 0 })
       return { cached: false, size: outcome.received }
     } catch (e) {
       lastError = e
       if (signal?.aborted) throw signal.reason || new Error('已取消')
+      if (e?.rateLimited) onSource?.({ host: hostOf(url), limited: true })
       // 404/403 重试同一个地址没有意义；429 说明要换源或等一会儿，也不能原地重试。
       if (e?.rateLimited || /HTTP 40[134]/.test(e.message)) break
     } finally {
+      if (signal?.reason?.code === 'JOB_CANCELLED') await resume?.clear()
       await fsp.rm(partial, { force: true }).catch(() => {})
     }
   }
   throw lastError || new Error('下载失败')
+}
+
+// 仅传递主机与受控原因，原始异常和 CDN 签名链接都不进入诊断数据。
+export function mirrorFallback(previous, next, error) {
+  let reason = '下载失败'
+  if (Number(error?.status)) reason = `HTTP ${Number(error.status)}`
+  else if (/校验/.test(error?.message || '')) reason = '文件校验失败'
+  return { host: hostOf(next), previousHost: hostOf(previous), reason }
 }
 
 /**
@@ -488,6 +534,9 @@ export async function downloadFromMirrors(urls, target, options = {}) {
   }
   let lastError = null
   for (let i = 0; i < ordered.length; i++) {
+    if (i && options.onSource) {
+      options.onSource(mirrorFallback(ordered[i - 1], ordered[i], lastError))
+    }
     try {
       return await downloadToFile(ordered[i], target, { ...options, retries: i === 0 ? (options.retries ?? 2) : 1 })
     } catch (e) {

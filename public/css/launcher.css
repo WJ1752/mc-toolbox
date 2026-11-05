@@ -2169,3 +2169,12 @@
   .lp-friends-hero { grid-template-columns: minmax(0, 1fr); }
   .lp-friends-hero > :nth-child(3) { grid-column: auto; }
 }
+.skin-wardrobe { display: grid; grid-template-columns: minmax(175px, .9fr) minmax(220px, 1fr); gap: 18px; }
+.skin-scene { position: relative; min-height: 254px; perspective: 800px; overflow: hidden; touch-action: none; cursor: grab; border: 1px solid var(--line); border-radius: 10px; background: radial-gradient(ellipse at 50% 60%, #70899c30, transparent 70%); }
+.skin-scene:active { cursor: grabbing; }
+.skin-model, .skin-box { position: absolute; transform-style: preserve-3d; width: 0; height: 0; }
+.skin-model { left: 50%; top: 49%; }
+.skin-box canvas { position: absolute; backface-visibility: hidden; image-rendering: pixelated; }
+.skin-controls { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.skin-controls select { max-width: 100%; }
+@media (max-width: 620px) { .skin-wardrobe { grid-template-columns: 1fr; } }

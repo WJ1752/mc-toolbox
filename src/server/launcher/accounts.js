@@ -74,6 +74,7 @@ function textureInfo(textures) {
     const decoded = JSON.parse(Buffer.from(textures, 'base64').toString('utf8'))
     return {
       skin: decoded?.textures?.SKIN?.url || '',
+      model: decoded?.textures?.SKIN?.metadata?.model === 'slim' ? 'slim' : 'classic',
       cape: decoded?.textures?.CAPE?.url || ''
     }
   } catch { return { skin: '', cape: '' } }
@@ -93,6 +94,7 @@ export function publicAccount(account, selected = '') {
     uuid: account.uuid,
     selected: account.id === selected,
     skin: account.skin || '',
+    model: account.model === 'slim' ? 'slim' : 'classic',
     cape: account.cape || '',
     authlibServer: account.authlibServer || '',
     createdAt: account.createdAt || 0,
@@ -261,7 +263,7 @@ async function completeMicrosoft(msToken, refreshToken, clientId, flow = 'azure'
     throw new Error('获取 Minecraft 档案失败：' + message)
   }
 
-  const skin = profile.skins?.find((item) => item.state === 'ACTIVE')?.url || profile.skins?.[0]?.url || ''
+  const skin = profile.skins?.find((item) => item.state === 'ACTIVE') || profile.skins?.[0]
   const cape = profile.capes?.find((item) => item.state === 'ACTIVE')?.url || ''
   return {
     id: 'ms_' + String(profile.id || '').replace(/-/g, ''),
@@ -274,7 +276,8 @@ async function completeMicrosoft(msToken, refreshToken, clientId, flow = 'azure'
     msFlow: flow,
     xuid: xsts.data?.DisplayClaims?.xui?.[0]?.xid || '',
     expiresAt: Date.now() + (Number(login.data.expires_in) || 86400) * 1000,
-    skin,
+    skin: skin?.url || '',
+    model: skin?.variant === 'SLIM' ? 'slim' : 'classic',
     cape,
     createdAt: Date.now()
   }
@@ -569,3 +572,32 @@ export function accountsSummary() {
 }
 
 export { pending as pendingMicrosoftLogins }
+
+// 衣柜存放本地纹理。仅微软账户向官方档案上传，离线账户只更新启动器外观。
+export async function applyAccountSkin(id, skin, png) {
+  const account = getInternalAccount(id)
+  if (!account) throw new Error('账户不存在')
+  if (account.type === 'authlib') throw new Error('请在第三方皮肤站更改此角色的皮肤')
+  let url = skin.data
+  if (account.type === 'microsoft') {
+    const fresh = await ensureFreshAccount(account)
+    url = await uploadMinecraftSkin(fresh.accessToken, skin, png)
+  }
+  const current = getInternalAccount(id)
+  if (!current) throw new Error('本机账户已被移除')
+  addAccount({ ...current, skin: url, model: skin.model }, { select: false })
+  return listAccounts()
+}
+
+export async function uploadMinecraftSkin(token, skin, png, fetcher = httpFetch) {
+  const body = new FormData()
+  body.set('variant', skin.model)
+  body.set('file', new Blob([png], { type: 'image/png' }), 'skin.png')
+  const response = await fetcher('https://api.minecraftservices.com/minecraft/profile/skins', {
+    method: 'POST', headers: { Authorization: 'Bearer ' + token },
+    body, signal: AbortSignal.timeout(30000)
+  })
+  if (!response.ok) throw new Error('Minecraft 皮肤上传失败（HTTP ' + response.status + '），请检查登录状态后重试')
+  const profile = await response.json().catch(() => null)
+  return profile?.skins?.find(item => item.state === 'ACTIVE')?.url || skin.data
+}

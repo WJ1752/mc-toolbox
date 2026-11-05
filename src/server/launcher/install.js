@@ -40,9 +40,10 @@ import {
   BMCL_MAVEN
 } from './meta.js'
 import { collectLibraries, normalizeOs, requiredJavaMajor } from './launch-plan.js'
-import { downloadFromMirrors, fetchToFile, pickFastestSource, runPool, runPoolAdaptive, sha1File } from './download.js'
-import { canGrowConcurrency, hostOf } from './source-select.js'
+import { downloadFromMirrors, fetchToFile, mirrorFallback, pickFastestSource, runPool, runPoolAdaptive, sha1File } from './download.js'
+import { canGrowConcurrency, cooldownUntil, hostOf } from './source-select.js'
 import { nextSpeed } from './speed-meter.js'
+import { estimateInstallSpace, availableBytes } from './install-space.js'
 import { applyModUpdate } from './mod-update-transaction.js'
 import { pickJava } from './java.js'
 import {
@@ -51,6 +52,8 @@ import {
 import { readZipIndex, extractZip } from '../pack-converter.js'
 import { hydrateCurseForgeFiles } from '../curseforge-pack.js'
 import { resolveOnlinePack } from './pack-online.js'
+import { packIdentity, packOverrides, manifestMods, localPackFiles, writePackMarker } from './pack-baseline.js'
+import { cleanDeadPackDownloads } from './pack-resume.js'
 
 const jobs = new Map()
 const FINISHED = new Set(['done', 'failed', 'cancelled'])
@@ -103,6 +106,7 @@ class InstallJob {
     this.progress = 0
     this.indeterminate = false
     this.received = 0
+    this.restoredBytes = 0
     this.total = 0
     // createdAt 是排队时刻，startedAt 只在 runJob 真正开跑时写入：
     // 排队时间不能算进「已进行」，否则界面会出现「已进行 9.7 小时」。
@@ -144,13 +148,14 @@ class InstallJob {
    */
   startSpeedMeter(interval = 500) {
     this.stopSpeedMeter()
-    let lastBytes = this.received
+    let lastBytes = this.received - this.restoredBytes
     let lastAt = Date.now()
     this.speedTimer = setInterval(() => {
       const now = Date.now()
       const dt = Math.max(0.1, (now - lastAt) / 1000)
-      const delta = this.received - lastBytes
-      lastBytes = this.received
+      const networkBytes = this.received - this.restoredBytes
+      const delta = networkBytes - lastBytes
+      lastBytes = networkBytes
       lastAt = now
       // 阶段切换时 received 会被清零：这一拍只重置基线，不能算成负速度。
       this.speed = delta < 0 ? 0 : nextSpeed(this.speed, delta, dt)
@@ -164,6 +169,21 @@ class InstallJob {
     if (this.speedTimer) clearInterval(this.speedTimer)
     this.speedTimer = null
     this.speed = 0
+  }
+
+  recordSource({ host, responseHost = '', bps = 0, previousHost, reason, limited }) {
+    if (!host) return
+    const route = this.route ||= {}
+    Object.assign(route, { host, responseHost, bps })
+    if (limited) {
+      route.limitedHost = host
+      route.cooldownUntil = cooldownUntil('https://' + host)
+    }
+    if (previousHost) {
+      const change = `${previousHost} → ${host}（${reason}）`
+      if (route.lastSwitch !== change) this.log('下载切源：' + change, 'warn')
+      route.lastSwitch = change
+    }
   }
 
   log(text, kind = '') {
@@ -193,6 +213,7 @@ class InstallJob {
   /** 阶段切换时重置本阶段字节计数。 */
   resetBytes() {
     this.received = 0
+    this.restoredBytes = 0
     this.total = 0
     this.updatedAt = Date.now()
   }
@@ -210,8 +231,9 @@ class InstallJob {
     this.updatedAt = Date.now()
   }
 
-  bytes(received, total) {
+  bytes(received, total, restored = 0) {
     this.received = Math.max(0, Math.round(Number(received) || 0))
+    this.restoredBytes = restored
     // total 未知（undefined / null / 0）时归零，不能沿用上一阶段的总量，
     // 否则 received 属于新阶段、total 还停在旧阶段，百分比就会失真。
     this.total = Math.max(0, Math.round(Number(total) || 0))
@@ -230,6 +252,12 @@ class InstallJob {
       received: this.received,
       total: this.total,
       speed: this.speed,
+      route: this.route && {
+        ...this.route,
+        cooldownUntil: this.route.limitedHost
+          ? Math.min(this.route.cooldownUntil, cooldownUntil('https://' + this.route.limitedHost))
+          : 0
+      },
       createdAt: this.createdAt,
       startedAt: this.startedAt,
       finishedAt: this.finishedAt,
@@ -469,7 +497,7 @@ export function cancelJob(id) {
   job.detail = '正在取消并清理…'
   job.updatedAt = Date.now()
   job.log('收到取消请求，正在停止下载 / 安装器…', 'warn')
-  try { job.controller.abort(new Error('已取消')) } catch {}
+  try { job.controller.abort(Object.assign(new Error('已取消'), { code: 'JOB_CANCELLED' })) } catch {}
   killChild(job.child)
   return true
 }
@@ -664,7 +692,7 @@ async function prefillInstallerLibraries(job, installerFile, root, { source }) {
     ].filter(Boolean)
     try {
       await downloadFromMirrors(urls, dest, {
-        ...netOptions(),
+        ...netOptions(job),
         sha1: artifact.sha1 || '',
         size: Number(artifact.size) || 0,
         signal: job.signal,
@@ -762,7 +790,7 @@ async function prepareInstallerMappings(job, installerFile, root, meta, { source
   if (!valid) {
     job.log('预取 Mojang 映射表（安装器直连 Mojang 经常被重置）…')
     await downloadFromMirrors(candidateUrls(mappings.url, { source }), dest, {
-      ...netOptions(source),
+      ...netOptions(job, source),
       sha1: mappings.sha1 || '',
       size: expectedSize,
       signal: job.signal,
@@ -888,10 +916,11 @@ async function runInstaller(job, javaPath, installerFile, root) {
  * 下载参数：自动源先测速再选线路；显式选择官方 / BMCL 时保持用户给的顺序。
  * threads 来自启动器设置（大文件分段线程数），小文件会自动退化为单连接。
  */
-function netOptions(source) {
+function netOptions(job, source) {
   const settings = getSettings()
   return {
     threads: Math.max(1, Math.min(16, Number(settings.threads) || 1)),
+    onSource: (event) => job.recordSource(event),
     rankBySpeed: (source || settings.source) === 'auto'
   }
 }
@@ -901,7 +930,7 @@ async function downloadOne(job, artifact, dest, { source, from, to, baseDone, ba
   if (!urls.length) throw new Error('缺少下载地址：' + artifact.path)
   let last = 0
   await downloadFromMirrors(urls, dest, {
-    ...netOptions(source),
+    ...netOptions(job, source),
     sha1: artifact.sha1 || '',
     size: artifact.size || 0,
     signal: job.signal,
@@ -984,6 +1013,25 @@ async function probeAssetSource(job, entries, { source }) {
   }
 }
 
+async function loadInstallAssetIndex(job, root, info, source) {
+  const indexFile = path.join(root, 'assets', 'indexes', `${info.id}.json`)
+  const local = await readJson(indexFile, null)
+  if (local) return local
+  job.phaseLabel('下载资源索引', info.id)
+  const urls = candidateUrls(info.url, { source })
+  if (!urls.length) throw new Error('资源索引缺少下载地址')
+  await downloadFromMirrors(urls, indexFile, {
+    ...netOptions(job, source),
+    sha1: info.sha1 || '',
+    size: info.size || 0,
+    signal: job.signal,
+    verify: getSettings().verify !== false,
+    retries: getSettings().retries || 0
+  })
+  job.log('资源索引已下载：' + info.id)
+  return readJson(indexFile, null)
+}
+
 async function downloadAssets(job, root, inst, effective, { source, from, to }) {
   const info = assetIndexInfo(effective)
   if (!info) {
@@ -994,23 +1042,7 @@ async function downloadAssets(job, root, inst, effective, { source, from, to }) 
     job.log('已按设置跳过资源文件下载；游戏可能缺少声音/语言资源', 'warn')
     return
   }
-  const indexFile = path.join(root, 'assets', 'indexes', `${info.id}.json`)
-  const local = await readJson(indexFile, null)
-  if (!local) {
-    job.phaseLabel('下载资源索引', info.id)
-    const urls = candidateUrls(info.url, { source })
-    if (!urls.length) throw new Error('资源索引缺少下载地址')
-    await downloadFromMirrors(urls, indexFile, {
-      ...netOptions(source),
-      sha1: info.sha1 || '',
-      size: info.size || 0,
-      signal: job.signal,
-      verify: getSettings().verify !== false,
-      retries: getSettings().retries || 0
-    })
-    job.log('资源索引已下载：' + info.id)
-  }
-  const index = await readJson(indexFile, null)
+  const index = await loadInstallAssetIndex(job, root, info, source)
   if (!index?.objects) throw new Error('资源索引格式无效')
   const entries = Object.entries(index.objects)
   const total = entries.reduce((sum, [, value]) => sum + (Number(value.size) || 0), 0)
@@ -1032,7 +1064,7 @@ async function downloadAssets(job, root, inst, effective, { source, from, to }) 
     const dest = path.join(root, 'assets', 'objects', hash.slice(0, 2), hash)
     let last = 0
     await downloadFromMirrors(assetObjectUrls(hash, { source }), dest, {
-      ...netOptions(source),
+      ...netOptions(job, source),
       sha1: hash,
       size: Number(value.size) || 0,
       signal,
@@ -1086,7 +1118,7 @@ async function downloadLogging(job, root, version, { source }) {
   if (fs.existsSync(dest) && (!file.sha1 || !getSettings().verify)) return dest
   job.log('下载日志配置：' + file.id)
   await downloadFromMirrors(candidateUrls(file.url, { source }), dest, {
-    ...netOptions(source),
+    ...netOptions(job, source),
     sha1: file.sha1 || '',
     size: Number(file.size) || 0,
     signal: job.signal,
@@ -1117,7 +1149,7 @@ async function installVersionFiles(job, instId, root, versionId, { source, from,
     // 与其它下载阶段使用同一套计数：detail、received/total 都来自本次下载。
     job.phaseLabel('下载客户端 JAR', jarVersion)
     await downloadFromMirrors(candidateUrls(info.url, { source }), clientJar, {
-      ...netOptions(source),
+      ...netOptions(job, source),
       sha1: info.sha1, size: info.size, signal: job.signal,
       verify: getSettings().verify !== false, retries: getSettings().retries || 0,
       onProgress: ({ received, total }) => {
@@ -1173,6 +1205,14 @@ async function installVersionFiles(job, instId, root, versionId, { source, from,
 async function prepareVanilla(job, root, mc, { source, from, to }) {
   job.phaseLabel('下载版本信息', 'Minecraft ' + mc)
   const meta = await getVersionMeta(mc, { source, signal: job.signal })
+  job.phaseLabel('预估安装空间', root)
+  const estimate = await estimateInstallSpace({ mc, loader: job.loader }, {
+    root, version: meta, signal: job.signal,
+    readRemoteIndex: () => loadInstallAssetIndex(job, root, assetIndexInfo(meta), source)
+  })
+  job.log(`游戏基础文件预计下载 ${formatBytes(estimate.downloadBytes)}，按大小可复用 ${formatBytes(estimate.cachedBytes)}，最大单文件暂存 ${formatBytes(estimate.largestPartBytes)}`)
+  for (const note of estimate.notes) job.log(note)
+  if (estimate.insufficient) throw new Error(`游戏目录空间不足：${root}，可用 ${formatBytes(estimate.freeBytes)}，写入文件至少需要 ${formatBytes(estimate.minimumFreeBytes)}`)
   await saveVersionJson(root, mc, meta)
   job.log('版本清单已就绪：' + mc)
 
@@ -1182,7 +1222,7 @@ async function prepareVanilla(job, root, mc, { source, from, to }) {
   let last = 0
   job.phaseLabel('下载客户端', `${mc} · ${Math.round((client.size || 0) / 1048576)} MB`)
   await downloadFromMirrors(candidateUrls(client.url, { source }), jar, {
-    ...netOptions(source),
+    ...netOptions(job, source),
     sha1: client.sha1,
     size: client.size,
     signal: job.signal,
@@ -1232,7 +1272,7 @@ async function installForgeLike(job, inst, loader, mc, loaderVersion, root, { so
       ? [info.url]
       : [...new Set([info.mirrorUrl, info.url].filter(Boolean))]
     await downloadFromMirrors(urls, installerFile, {
-      ...netOptions(source),
+      ...netOptions(job, source),
       signal: job.signal,
       retries: getSettings().retries || 0,
       onProgress: ({ received, total }) => {
@@ -1464,7 +1504,7 @@ export function startModUpdates(instanceId, items = []) {
         job.phaseLabel('下载更新', `${index + 1}/${list.length} · ${item.name || item.relPath}`)
         let last = 0
         await downloadFromMirrors([item.url], target, {
-          ...netOptions(), sha1: item.sha1, size: Number(item.size) || 0, signal: job.signal,
+          ...netOptions(job), sha1: item.sha1, size: Number(item.size) || 0, signal: job.signal,
           verify: true, retries: Number(getSettings().retries) || 0,
           onProgress: ({ received }) => {
             doneBytes += Math.max(0, received - last)
@@ -1558,7 +1598,13 @@ export async function readPackMeta(file) {
   if (!looksLikeZip(source)) throw new Error('整合包不是有效的 ZIP 文件，可能已损坏')
   let entries = {}
   const stats = {}
-  try { entries = await readJarEntries(source, ['modrinth.index.json', 'manifest.json'], { maxBytes: 24 * 1024 * 1024, stats }) } catch {}
+  try { entries = await readJarEntries(source, ['modrinth.index.json', 'manifest.json'], { maxBytes: 24 * 1024 * 1024, stats, includeDirectory: true }) } catch {}
+  const meta = parsePackMeta(source, entries, stats)
+  const space = estimatePackContents(meta, stats.directory)
+  return { ...meta, space, ...packOverrides(meta, stats.directory, overrideDirs(meta.overrides)) }
+}
+
+function parsePackMeta(source, entries, stats) {
   if (entries['modrinth.index.json']) {
     const index = parsePackJson(entries['modrinth.index.json'].toString('utf8'), 'modrinth.index.json')
     // 清单来自不可信压缩包：files 必须是数组，否则后面会抛出原生 TypeError。
@@ -1605,7 +1651,7 @@ export async function readPackMeta(file) {
         kind: 'toolbox',
         manifest,
         index,
-        name: manifest.name || path.basename(file, path.extname(file)),
+        name: manifest.name || path.basename(source, path.extname(source)),
         mc: String(runtime.mc || ''),
         loader: runtime.loader,
         loaderVersion: runtime.loaderVersion,
@@ -1619,7 +1665,7 @@ export async function readPackMeta(file) {
     return {
       kind: 'curseforge',
       manifest,
-      name: manifest.name || path.basename(file, path.extname(file)),
+      name: manifest.name || path.basename(source, path.extname(source)),
       // CurseForge 允许自定义覆盖目录名，不读这个字段会导致配置/资源包不生效。
       overrides: String(manifest.overrides || 'overrides') || 'overrides',
       ...runtime
@@ -1629,11 +1675,49 @@ export async function readPackMeta(file) {
   throw new Error('无法识别整合包：缺少 modrinth.index.json 或 manifest.json')
 }
 
+const PACK_METADATA = new Set(['manifest.json', 'modlist.html', 'modrinth.index.json'])
+function overrideDirs(overrides) {
+  return [...new Set(['overrides', 'client-overrides', normalizeOverridesDir(overrides)])]
+}
+
+function estimatePackContents(meta, directory) {
+  const files = meta.index?.files?.filter(item => item?.env?.client !== 'unsupported') || []
+  let downloadBytes = 0
+  let unknownFiles = meta.kind === 'curseforge' ? (meta.manifest.files?.length || 0) : 0
+  for (const file of files) {
+    if (Number.isSafeInteger(file?.fileSize) && file.fileSize >= 0) downloadBytes += file.fileSize
+    else unknownFiles++
+  }
+  const prefixes = overrideDirs(meta.overrides).map(dir => dir + '/')
+  let unpackBytes = 0
+  let overrideBytes = 0
+  let rootBytes = 0
+  let foundOverrides = false
+  for (const [raw, entry] of directory) {
+    const name = raw.replace(/\\/g, '/')
+    unpackBytes += entry.size
+    if (prefixes.some(prefix => name.startsWith(prefix))) {
+      foundOverrides = true
+      overrideBytes += entry.size
+    }
+    if (!PACK_METADATA.has(name)) rootBytes += entry.size
+  }
+  if (!foundOverrides && meta.kind === 'curseforge') overrideBytes = rootBytes
+  return { downloadBytes, unknownFiles, unpackBytes, overrideBytes, requiredBytes: downloadBytes + unpackBytes + overrideBytes }
+}
+
+async function checkPackSpace(directory, requiredBytes, label) {
+  const free = await availableBytes(directory)
+  if (free !== null && free < requiredBytes) {
+    throw new Error(`${label}空间不足：${directory} 可用 ${formatBytes(free)}，预计需要 ${formatBytes(requiredBytes)}，还差 ${formatBytes(requiredBytes - free)}`)
+  }
+  return free
+}
+
 export async function copyPackOverrides(tempDir, gameDir, kind, job, { overrides = 'overrides' } = {}) {
-  const metadata = new Set(['manifest.json', 'modlist.html', 'modrinth.index.json'])
   // 客户端实例只解压 overrides / client-overrides；server-overrides 属于服务端，
   // 装进客户端会让服务端专用模组/配置污染实例。
-  const dirs = [...new Set(['overrides', 'client-overrides', normalizeOverridesDir(overrides)].filter(Boolean))]
+  const dirs = overrideDirs(overrides)
   let copied = 0
   const copyEntry = async (source, target) => {
     job.signal.throwIfAborted()
@@ -1660,7 +1744,7 @@ export async function copyPackOverrides(tempDir, gameDir, kind, job, { overrides
   // 只有 README、图标等杂项，不能复制进实例。
   if (kind !== 'curseforge' || foundOverride) return copied
   for (const name of await fsp.readdir(tempDir)) {
-    if (dirs.includes(name) || metadata.has(name)) continue
+    if (dirs.includes(name) || PACK_METADATA.has(name)) continue
     await copyEntry(path.join(tempDir, name), path.join(gameDir, name))
   }
   return copied
@@ -1701,7 +1785,8 @@ async function downloadModrinthPackFiles(job, index, gameDir, { from, to, phase 
     // 保证任何算法下都以哈希为准。
     const targetTemp = target
     let lastError = null
-    for (const url of urls) {
+    for (const [index, url] of urls.entries()) {
+      if (index) job.recordSource(mirrorFallback(urls[index - 1], url, lastError))
       // 同一地址最多试两次：第一次内容不符（旧缓存/覆盖文件）时删掉再下一次。
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
@@ -1711,7 +1796,7 @@ async function downloadModrinthPackFiles(job, index, gameDir, { from, to, phase 
             // fileSize 只用于「要不要分段」和显示进度，不参与长度校验：
             // 真实一致性由下面的 sha1 / sha512 决定。
             expectedSize: Number(item.fileSize) || 0,
-            threads: Math.max(1, Math.min(16, Number(getSettings().threads) || 1)),
+            ...netOptions(job),
             signal: job.signal,
             verify: false,
             retries: getSettings().retries || 0,
@@ -1800,6 +1885,7 @@ async function downloadCurseForgePackFiles(job, meta, paths, { from, to, phase =
       retries: Number(settings.retries) || 0,
       concurrency: Math.max(4, Math.min(16, Number(settings.concurrency) || 8))
     })
+    meta.installedPaths = result?.installedPaths
     // 只缺光影 / 资源包时安装继续：把清单写进实例目录并在完成文案里点出来。
     if (Array.isArray(result?.blocked) && result.blocked.length) {
       logBlockedFiles(job, result.blocked)
@@ -1874,6 +1960,8 @@ async function runPackInstall(job, options = {}) {
   }
   job.log(`识别为 ${packKindLabel(meta.kind)} 整合包 · ${meta.name}`)
   if (!meta.mc) throw new Error('整合包没有声明 Minecraft 版本')
+  await checkPackSpace(tempRoot, meta.space.requiredBytes, '整合包安装')
+  job.log(`整合包清单需下载 ${formatBytes(meta.space.downloadBytes)}，解压暂存 ${formatBytes(meta.space.unpackBytes)}，覆盖文件约 ${formatBytes(meta.space.overrideBytes)}${meta.space.unknownFiles ? '，另有 ' + meta.space.unknownFiles + ' 个文件大小未知' : ''}；基础游戏另计`)
   const instName = String(name || meta.name || '整合包').trim()
   job.mc = meta.mc
   job.loader = meta.loader
@@ -1921,6 +2009,8 @@ async function runPackInstall(job, options = {}) {
   await fsp.mkdir(paths.gameDir, { recursive: true })
 
   const downloadContents = async () => {
+    // 基础运行环境此时已占用实际磁盘空间，再核对整包剩余文件。
+    await checkPackSpace(paths.gameDir, meta.space.requiredBytes, '整合包内容')
     if (meta.kind === 'modrinth' || meta.kind === 'toolbox') {
       await downloadModrinthPackFiles(job, meta.index, paths.gameDir, {
         from: downloadRange[0],
@@ -1955,14 +2045,20 @@ async function runPackInstall(job, options = {}) {
     await downloadContents()
   }
 
-  await fsp.writeFile(path.join(paths.gameDir, '.mc-toolbox-pack.json'), JSON.stringify({
+  const tracking = job.packOrigin ? {
+    origin: job.packOrigin, manifest: manifestMods(meta), configs: meta.overrideConfigs,
+    local: await localPackFiles(paths.gameDir, job.signal)
+  } : {}
+  if (options.afterContents) await options.afterContents(job, paths.gameDir)
+  job.signal.throwIfAborted()
+  await writePackMarker(paths.gameDir, {
     name: instName,
     kind: meta.kind,
     mc: meta.mc,
     loader: meta.loader,
     loaderVersion: meta.loaderVersion,
-    installedAt: Date.now()
-  }, null, 2), 'utf8')
+    installedAt: Date.now(), ...tracking
+  })
   job.set(finishProgress, '整合包安装完成，正在收尾…')
   if (finalPhase) job.phaseLabel(finalPhase, '整合包安装完成')
   job.log('整合包内容安装完成', 'ok')
@@ -2025,7 +2121,7 @@ export function startOnlinePackInstall({
   openWhenDone = false,
   apiKey = '',
   fetcher = null
-} = {}) {
+} = {}, { review, afterContents } = {}) {
   const packSource = String(source || '').trim().toLowerCase()
   if (packSource !== 'modrinth' && packSource !== 'curseforge') {
     throw new Error('不支持的整合包来源：' + (source || '（空），请选择 Modrinth 或 CurseForge'))
@@ -2071,6 +2167,7 @@ export function startOnlinePackInstall({
           extract: '解压覆盖文件'
         },
         finalPhase: '完成',
+        afterContents,
         lockInstallPhase: true,
         prepare: async (task) => {
           task.phaseLabel('下载整合包', '正在解析整合包信息…')
@@ -2087,31 +2184,37 @@ export function startOnlinePackInstall({
           task.signal.throwIfAborted()
           const filename = safePackFilename(pack.filename)
           task.log(`已解析在线整合包：${pack.project.title || pack.project.slug || project} · ${pack.version.name || pack.version.number || versionId || ''}`)
-          task.log('下载地址：' + pack.url)
+          task.log('整包下载源：' + hostOf(pack.url))
           try {
             await fsp.mkdir(cacheRoot, { recursive: true })
           } catch (e) {
             throw new Error('无法创建整合包缓存目录：' + e.message)
           }
           const file = path.join(cacheRoot, filename)
+          await cleanDeadPackDownloads(path.dirname(cacheRoot))
           const size = Number(pack.size) || 0
+          if (size > 0) {
+            await checkPackSpace(cacheRoot, size, '整包下载')
+            task.log(`整包下载 ${formatBytes(size)}；分块续传可能额外使用最多 ${formatBytes(size)}，解压空间将在读取清单后核对`)
+          }
           task.phaseLabel('下载整合包', `${filename}${size ? ' · ' + formatBytes(size) : ''}`)
           task.set(0, '开始下载整合包…')
           await downloadFromMirrors([pack.url], file, {
-            threads: Math.max(1, Math.min(16, Number(settings.threads) || 1)),
+            resumeDir: path.join(launcherRoot(), 'cache', 'pack-resume'),
+            ...netOptions(task),
             size,
             sha1: pack.hashes?.sha1 || '',
             signal: task.signal,
             verify: !!pack.hashes?.sha1,
             retries: settings.retries || 0,
-            onProgress: ({ received, total }) => {
+            onProgress: ({ received, total, restored }) => {
               const totalBytes = size || Number(total) || 0
               if (totalBytes > 0) {
                 progressIn(task, 0, 28, received / totalBytes, `下载整合包 · ${formatBytes(received)} / ${formatBytes(totalBytes)}`)
               } else {
                 task.set(null, `下载整合包 · ${formatBytes(received)}`, { indeterminate: true })
               }
-              task.bytes(received, totalBytes)
+              task.bytes(received, totalBytes, restored)
             }
           })
           const downloadedSize = (await fsp.stat(file)).size
@@ -2144,6 +2247,9 @@ export function startOnlinePackInstall({
           if (!meta.mc) throw new Error('整合包没有声明 Minecraft 版本')
           task.signal.throwIfAborted()
           task.log(`清单解析完成：${meta.mc} · ${meta.loader}${meta.loaderVersion ? ' ' + meta.loaderVersion : ''}`, 'ok')
+          task.packOrigin = packIdentity(pack)
+          if (review) await review(task, meta)
+          task.signal.throwIfAborted()
           return { file, meta }
         }
       })

@@ -7,9 +7,12 @@ import path from 'node:path'
 import os from 'node:os'
 import http from 'node:http'
 import crypto from 'node:crypto'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
 
-import { fetchToFile } from '../src/server/launcher/download.js'
-import { resetSourceStats } from '../src/server/launcher/source-select.js'
+import { downloadFromMirrors, fetchToFile } from '../src/server/launcher/download.js'
+import { cooldownUntil, resetSourceStats } from '../src/server/launcher/source-select.js'
+import { downloadRouteText } from '../public/js/launcher/downloads.js'
 
 const SIZE = 6 * 1024 * 1024
 const body = Buffer.alloc(SIZE)
@@ -84,6 +87,38 @@ test.beforeEach(() => {
   resetSourceStats()
 })
 
+test('下载诊断记录 429 切源、CDN 与冷却，签名链接不进入诊断', async () => {
+  const mirror = http.createServer((req, res) => {
+    if (req.url.startsWith('/redirect')) res.writeHead(302, { Location: base + '/full?signature=secret' })
+    else res.writeHead(429)
+    res.end()
+  })
+  await new Promise((resolve) => mirror.listen(0, '127.0.0.1', resolve))
+  try {
+    const origin = 'http://127.0.0.1:' + mirror.address().port
+    const limited = origin + '/limited?signature=secret'
+    const events = []
+    await downloadFromMirrors([limited, base + '/full?signature=secret'], path.join(dir, 'fallback.jar'), {
+      rankBySpeed: false, retries: 0, onSource: event => events.push(event)
+    })
+    assert.ok(events.some(event => event.limited))
+    const change = events.find(event => event.previousHost)
+    assert.equal(change.reason, 'HTTP 429')
+    const until = cooldownUntil(limited)
+    const text = downloadRouteText({ ...events.at(-1), limitedHost: change.previousHost, cooldownUntil: until })
+    assert.match(text, /线路参考速度/)
+    assert.match(text, /冷却/)
+    assert.doesNotMatch(downloadRouteText({ ...events.at(-1), limitedHost: change.previousHost, cooldownUntil: until }, until), /冷却/)
+    await fetchToFile(origin + '/redirect', path.join(dir, 'redirect.jar'), { onSource: event => events.push(event) })
+    assert.equal(events.at(-1).responseHost, new URL(base).host)
+    assert.equal(events.at(-1).host, new URL(origin).host)
+    assert.doesNotMatch(JSON.stringify(events), /signature|secret|\/full|\/limited|\/redirect/)
+  } finally {
+    mirror.closeAllConnections()
+    await new Promise((resolve) => mirror.close(resolve))
+  }
+})
+
 test('支持 Range：6 MB 文件用 4 条连接分段下载，内容与哈希一致', async () => {
   const target = path.join(dir, 'full', 'client.jar')
   const seen = []
@@ -147,6 +182,44 @@ test('expectedSize 也能触发分段（整合包清单只给提示大小、不�
   })
   assert.deepEqual(await fs.readFile(target), body)
   assert.ok(requests.some((item) => /^bytes=(?!0-)/.test(item.range)), '应发出分段请求')
+})
+
+test('下载进程退出后，新任务只请求缺少的块并校验整包', async () => {
+  const resumeDir = path.join(dir, 'resume')
+  const url = `${base}/full/resume`
+  const options = { sha1: goodSha1, size: SIZE, threads: 1, resumeDir }
+  const moduleUrl = new URL('../src/server/launcher/download.js', import.meta.url).href
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import { fetchToFile } from ${JSON.stringify(moduleUrl)}
+    await fetchToFile(process.argv[1], process.argv[2], {
+      ...JSON.parse(process.argv[3]),
+      onProgress: ({ received }) => { if (received > 1024 * 1024) process.exit(17) }
+    })
+  `, url, path.join(dir, 'old-job', 'pack.zip'), JSON.stringify(options)], { windowsHide: true, stdio: 'ignore' })
+  assert.equal((await once(child, 'exit'))[0], 17)
+  requests.length = 0
+  const seen = []
+  const target = path.join(dir, 'new-job', 'pack.zip')
+  await fetchToFile(url, target, { ...options, threads: 3, onProgress: state => seen.push(state) })
+  assert.deepEqual(await fs.readFile(target), body)
+  assert.equal(seen.at(-1).restored, 1024 * 1024)
+  assert.ok(!requests.some(item => item.range === 'bytes=0-1048575'))
+  assert.ok(requests.some(item => item.range === 'bytes=1048576-2097151'))
+  assert.deepEqual(await fs.readdir(resumeDir), [])
+})
+
+test('主动取消会清理已完成的块和任务半成品', async () => {
+  const resumeDir = path.join(dir, 'cancel-checkpoint')
+  const target = path.join(dir, 'explicit-cancel', 'pack.zip')
+  const controller = new AbortController()
+  await assert.rejects(fetchToFile(`${base}/full/cancel`, target, {
+    sha1: goodSha1, size: SIZE, threads: 1, resumeDir, signal: controller.signal,
+    onProgress: ({ received }) => {
+      if (received > 1024 * 1024) controller.abort(Object.assign(new Error('已取消'), { code: 'JOB_CANCELLED' }))
+    }
+  }), /已取消/)
+  assert.deepEqual(await fs.readdir(resumeDir), [])
+  assert.deepEqual(await fs.readdir(path.dirname(target)), [])
 })
 
 test('429 限流：分段请求被拒绝时自动降为单连接，文件仍然下完', async () => {

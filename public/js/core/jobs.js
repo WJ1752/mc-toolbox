@@ -20,6 +20,12 @@ const STATUS_LABEL = {
 
 export { ACTIVE as ACTIVE_JOB_STATUSES, FINISHED as FINISHED_JOB_STATUSES }
 
+export function cancelJobMessage(job) {
+  return job.type === 'pack'
+    ? `取消「${job.name || job.id}」？未完成的整包下载将清除续传分块。`
+    : `取消「${job.name || job.id}」？已下载完成的文件会保留。`
+}
+
 export function isActiveJob(job) {
   return !!job && ACTIVE.has(job.status)
 }

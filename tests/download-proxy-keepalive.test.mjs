@@ -148,7 +148,9 @@ test('代理保留 Modrinth 批量 POST、表单和二进制请求体，并按�
     for (const status of [301, 302, 303, 307, 308]) {
       const crossOrigin = status === 308
       const to = crossOrigin ? base.replace('127.0.0.1', 'other.test') + '/echo' : '/echo'
-      const result = await (await fetchVia(base + '/redirect?' + new URLSearchParams({ status, to }), post)).json()
+      const response = await fetchVia(base + '/redirect?' + new URLSearchParams({ status, to }), post)
+      assert.equal(response.url, new URL(to, base).href)
+      const result = await response.json()
       const kept = status === 307 || status === 308
       assert.equal(result.method, kept ? 'POST' : 'GET')
       assert.equal(result.bytes, kept ? Buffer.from(payload).toString('base64') : '')

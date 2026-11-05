@@ -258,6 +258,7 @@ export async function findModUpdates(inst, { force = false, signal, fetcher } = 
   const updates = []
   const unknown = []
   const checked = []
+  const relationProjects = []
   items.forEach((item, index) => {
     const relPath = item.relPath
     const hashInfo = hashResults[index] || {}
@@ -275,6 +276,12 @@ export async function findModUpdates(inst, { force = false, signal, fetcher } = 
       unknown.push({ ...base, reason: 'modrinth-not-found' })
       return
     }
+    relationProjects.push({
+      relPath, size: item.size, mtime: item.mtime,
+      projectId: installed.project_id, versionId: installed.id, version: installed.version_number,
+      dependencies: (installed.dependencies || []).filter(dep => dep.project_id || dep.version_id)
+        .map(dep => ({ projectId: dep.project_id, versionId: dep.version_id, type: dep.dependency_type }))
+    })
     const latest = latestByHash[hashInfo.hash]
     if (!latest || !versionFile(latest)) {
       unknown.push({ ...base, reason: 'no-compatible-version' })
@@ -304,7 +311,8 @@ export async function findModUpdates(inst, { force = false, signal, fetcher } = 
     total: items.length,
     updates,
     unknown,
-    items: checked
+    items: checked,
+    relationProjects
   }
   // 批量接口整体失败时不能伪装成“这些模组都没收录”，否则用户会以为已经是最新。
   if (batchError && checked.length === 0 && items.length > 0) {

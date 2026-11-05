@@ -59,6 +59,7 @@ export async function hydrateCurseForgeFiles(root, onProgress, signal, {
   const errors = []
   const skipped = []
   const blocked = []
+  const installedPaths = {}
   const destinations = new Map()
   const projectCache = new Map()
 
@@ -225,6 +226,7 @@ export async function hydrateCurseForgeFiles(root, onProgress, signal, {
         }
         await fsp.mkdir(path.join(root, folder), { recursive: true })
         await fsp.copyFile(cached, path.join(root, folder, meta.fileName))
+        installedPaths[projectId] = folder + '/' + meta.fileName
       } catch (e) {
         signal?.throwIfAborted()
         if (e.message === '__skip__') { if (!skip) skipped.push(`${id}（${meta?.fileName || '未知文件'}）`) }
@@ -257,6 +259,7 @@ export async function hydrateCurseForgeFiles(root, onProgress, signal, {
     downloaded: done,
     skipped: skipped.length,
     blocked,
+    installedPaths,
     metadataSource: (apiKey || process.env.CURSEFORGE_API_KEY)
       ? 'CurseForge 官方 API'
       : 'curse.tools 公共元数据服务；文件来自作者提供的下载地址并校验 SHA-1'

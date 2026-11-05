@@ -532,7 +532,14 @@ async function startAndProbe() {
     if (!log.includes('本地地址:')) throw new Error('exe 启动失败：' + log)
     const base = `http://127.0.0.1:${port}`
     const res = await fetch(base + '/api/bootstrap').then(r => r.json())
-    if (!res.features?.length) throw new Error('bootstrap 未返回功能')
+    if (res.version !== JSON.parse(await fsp.readFile(path.join(here, 'package.json'), 'utf8')).version) {
+      throw new Error('EXE 版本与 package.json 不一致：' + res.version)
+    }
+    if (!res.features?.some(feature => feature.id === 'seed-map')) throw new Error('EXE 缺少种子地图磁贴')
+    const wasmPath = '/vendor/seedmaps/seed_engine.wasm'
+    const wasm = await fetch(base + wasmPath)
+    const sourceWasm = await fsp.readFile(path.join(here, 'public', wasmPath))
+    if (!wasm.ok || !Buffer.from(await wasm.arrayBuffer()).equals(sourceWasm)) throw new Error('EXE 内置地图引擎校验失败')
     const html = await fetch(base + '/').then(r => r.text())
     const info = await fetch(base + '/api/system/info').then(r => r.json())
     if (info.author !== AUTHOR || !html.includes('class="author-watermark" aria-hidden="true">' + AUTHOR)) throw new Error('作者信息或角落水印验证失败')

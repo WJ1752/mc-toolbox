@@ -2,7 +2,7 @@
 // 每个条目都能定位到对应内容：普通文件打开所在文件夹，实例任务跳转实例页。
 import { h, clear, fmtBytes } from '../core/dom.js'
 import {
-  isActiveJob, isFinishedJob, jobProgress, jobPercentText, jobBytesText, jobElapsedText,
+  cancelJobMessage, isActiveJob, isFinishedJob, jobProgress, jobPercentText, jobBytesText, jobElapsedText,
   jobSpeedText, jobEtaText, jobIdleText, jobStatusLabel, jobMetaText
 } from '../core/jobs.js'
 import { icon } from '../ui/icons.js'
@@ -143,6 +143,18 @@ export function jobRowSummary(job, now = Date.now()) {
 
 function toneOf(job) {
   return STATUS_TONE[job?.status] || STATUS_TONE.running
+}
+
+export function downloadRouteText(route, now = Date.now()) {
+  if (!route?.host) return ''
+  const hosts = [route.host]
+  if (route.responseHost && route.responseHost !== route.host) hosts.push(route.responseHost)
+  const parts = ['最近下载线路 ' + hosts.join(' → ')]
+  if (route.bps > 0) parts.push('线路参考速度 ' + fmtBytes(route.bps) + '/s')
+  if (route.lastSwitch) parts.push('最近切源 ' + route.lastSwitch)
+  const seconds = Math.ceil((route.cooldownUntil - now) / 1000)
+  if (route.limitedHost && seconds > 0) parts.push(`${route.limitedHost} 收到 HTTP 429，冷却 ${seconds} 秒`)
+  return parts.join(' · ')
 }
 
 function communityLabel(job) {
@@ -313,7 +325,7 @@ function buildView(ctx, container) {
   }
 
   async function cancelLauncher(job) {
-    if (!(await ctx.confirm(`取消「${job.name || job.id}」？已下载完成的文件会保留。`, { title: '取消任务', danger: true, okText: '取消任务' }))) return
+    if (!(await ctx.confirm(cancelJobMessage(job), { title: '取消任务', danger: true, okText: '取消任务' }))) return
     try {
       if (job.type === 'export' && typeof ctx.api.cancelExport === 'function') await ctx.api.cancelExport(job.id)
       else await ctx.api.cancelJob(job.id)
@@ -347,6 +359,7 @@ function buildView(ctx, container) {
     const sub = [job.phase, job.detail].filter(Boolean).join(' · ')
     const iconName = LAUNCHER_ICON[job.type] || 'download'
     const summary = [jobRowSummary(job), exportJobSummary(job)].filter(Boolean).join(' · ')
+    const route = downloadRouteText(job.route)
     return h('div', { class: 'lp-row lp-download-row' },
       jobIcon(job.icon, iconName),
       h('div', { class: 'lp-mod-main' },
@@ -357,7 +370,8 @@ function buildView(ctx, container) {
         h('div', { class: 'lp-hint' }, sub || '准备中…'),
         job.status === 'failed' && job.error ? h('div', { class: 'lp-hint bad', title: job.error }, job.error) : null,
         bar.el,
-        h('div', { class: 'lp-hint mono' }, summary || jobStatusLabel(job))),
+        h('div', { class: 'lp-hint mono' }, summary || jobStatusLabel(job)),
+        route ? h('div', { class: 'lp-hint' }, route) : null),
       actions)
   }
 

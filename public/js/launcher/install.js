@@ -1,7 +1,7 @@
 // 新建实例 / 整合包（在线搜索 + 本地文件）/ 导入已有 / 任务提示。
 // 所有外部文本走 textContent；轮询定时器只在 render 后启动，destroy 时清空。
 import { h, clear, fmtBytes, fmtAgo } from '../core/dom.js'
-import { jobProgress, jobStatusLabel, jobMetaText } from '../core/jobs.js'
+import { cancelJobMessage, jobProgress, jobStatusLabel, jobMetaText } from '../core/jobs.js'
 import { api as coreApi } from '../core/api.js'
 import { icon } from '../ui/icons.js'
 import { btn, input, seg, select, progress, spinner, badge, toggle } from '../ui/kit.js'
@@ -212,7 +212,7 @@ function buildView(ctx, container, initialTab) {
     if (!job?.id) return
     if (typeof ctx.confirm === 'function') {
       let ok = false
-      try { ok = await ctx.confirm('取消这个任务？已下载完成的文件会保留。', { title: '取消任务', danger: true, okText: '取消任务' }) }
+      try { ok = await ctx.confirm(cancelJobMessage(job), { title: '取消任务', danger: true, okText: '取消任务' }) }
       catch { ok = false }
       if (!ok) return
     }
@@ -238,10 +238,7 @@ function buildView(ctx, container, initialTab) {
     const errEl = h('div', { class: 'lp-hint bad', role: 'alert', style: { display: 'none' } })
     const cancelBtn = btn('取消任务', {
       size: 'xs', variant: 'danger',
-      onClick: async () => {
-        if (!job?.id) return
-        try { await ctx.api.cancelJob(job.id); notify('已请求取消任务', 'info') } catch (e) { notify('取消失败：' + e.message, 'err') }
-      }
+      onClick: () => cancelJob(job)
     })
     const logBtn = btn('查看日志', { size: 'xs', iconName: 'terminal', onClick: () => ctx.showView?.('downloads') })
     const openBtn = btn('打开实例', { size: 'xs', variant: 'primary', iconName: 'arrow-right', onClick: () => { if (job?.instanceId) void openInstance(job.instanceId) } })
@@ -324,6 +321,7 @@ function buildView(ctx, container, initialTab) {
   const loaderSeg = seg(LOADERS.map((id) => [id, loaderInfo(id).label]), form.loader, (value) => {
     if (form.loader === value) return
     form.loader = value
+    resetSpaceEstimate()
     form.loaderVersion = ''
     syncName()
     toggleLoaderFields()
@@ -361,8 +359,34 @@ function buildView(ctx, container, initialTab) {
   const formError = h('div', { class: 'lp-hint bad', role: 'alert', style: { display: 'none' } })
   const installBtn = btn('安装实例', { variant: 'primary', iconName: 'download', onClick: () => submitInstall() })
   const inlineInstall = createInlineJobCard('安装进度')
-  const rootNote = hint('文件将下载到当前启动器游戏目录' + (settings.root ? ' · ' + settings.root : '')
-    + '。原版客户端约 20 MB，资源文件通常数百 MB；首次安装需要一些时间。')
+  const defaultRootNote = '游戏目录' + (settings.root ? ' · ' + settings.root : '使用启动器设置')
+  const rootNote = hint(defaultRootNote)
+  let estimateEpoch = 0
+  const estimateBtn = btn('预估安装空间', { onClick: async () => {
+    if (!form.mc) return
+    const epoch = ++estimateEpoch
+    estimateBtn.disabled = true
+    setHint(rootNote, '正在读取版本清单、检查本地文件…')
+    try {
+      const info = await ctx.api.estimateInstall({ mc: form.mc, loader: form.loader })
+      if (disposed || epoch !== estimateEpoch) return
+      const free = info.freeBytes === null ? '可用空间未知' : '可用 ' + fmtBytes(info.freeBytes)
+      setHint(rootNote, [info.root, free, '预计下载 ' + fmtBytes(info.downloadBytes),
+        '按大小可复用 ' + fmtBytes(info.cachedBytes), '预计净新增 ' + fmtBytes(info.growthBytes),
+        '最大单文件暂存 ' + fmtBytes(info.largestPartBytes), ...info.notes,
+        info.insufficient ? '目标盘空间不足，请清理或更换游戏目录' : ''].filter(Boolean).join(' · '),
+      info.insufficient ? 'bad' : '')
+    } catch (e) {
+      if (!disposed && epoch === estimateEpoch) setHint(rootNote, '预估失败：' + e.message, 'bad')
+    } finally {
+      if (!disposed && epoch === estimateEpoch) estimateBtn.disabled = false
+    }
+  } })
+  function resetSpaceEstimate() {
+    estimateEpoch++
+    estimateBtn.disabled = !form.mc
+    setHint(rootNote, defaultRootNote)
+  }
   const createPane = h('div', { style: paneStyle },
     card('版本与加载器', '选择 Minecraft 版本，再决定是否安装模组加载器',
       row('row wrap', versionTypeSeg, h('div', { class: 'grow' }, searchInput)), versionField,
@@ -372,7 +396,7 @@ function buildView(ctx, container, initialTab) {
         fld('初始内存（MB）', minInput), fld('最大内存（MB）', maxInput), fld('分组', groupInput), javaField,
         optimizeJvmRow),
       hint('初始内存应小于或等于最大内存；留空 Java 路径时由启动器自动选择。'),
-      rootNote, formError, row('row', installBtn)))
+      rootNote, formError, row('row', estimateBtn, installBtn)))
   async function loadVersions(type, preferId = '') {
     form.versionType = type
     versionTypeSeg.setValue?.(type)
@@ -391,6 +415,7 @@ function buildView(ctx, container, initialTab) {
     } catch (e) {
       if (disposed || epoch !== versionEpoch) return
       form.mc = ''
+      resetSpaceEstimate()
       fill(versionSel, '（获取版本失败）')
       setHint(versionHint, '获取版本失败：' + e.message, 'bad')
       clearLoaderForNoMc()
@@ -409,7 +434,7 @@ function buildView(ctx, container, initialTab) {
     if (!list.length) {
       fill(versionSel, q ? '没有匹配的版本' : '（没有可用版本）')
       setHint(versionHint, q ? `没有匹配「${form.search}」的版本` : '版本列表为空，请稍后刷新', q ? 'warnc' : 'bad')
-      if (form.mc) { form.mc = ''; clearLoaderForNoMc(); clearJavaForNoMc() }
+      if (form.mc) { form.mc = ''; clearLoaderForNoMc(); clearJavaForNoMc(); resetSpaceEstimate() }
       syncName()
       return
     }
@@ -422,7 +447,7 @@ function buildView(ctx, container, initialTab) {
       : `${form.versions.length} 个版本可用 · 可直接搜索过滤`)
     if (next !== form.mc) { form.mc = next; onMcChanged() }
   }
-  function onMcChanged() { form.loaderVersion = ''; syncName(); loadLoaderVersions(); loadJava() }
+  function onMcChanged() { form.loaderVersion = ''; resetSpaceEstimate(); syncName(); loadLoaderVersions(); loadJava() }
   function syncName() {
     if (!form.nameDirty) nameInput.value = form.mc ? form.mc + (form.loader === 'vanilla' ? '' : ' ' + loaderInfo(form.loader).label) : ''
   }
@@ -673,7 +698,7 @@ function buildView(ctx, container, initialTab) {
       fld('初始内存（MB）', packMinInput), fld('最大内存（MB）', packMaxInput),
       fld('分组', packGroupInput)),
     packOpenRow,
-    hint('初始内存应小于或等于最大内存。在线安装会先把整合包下载到启动器缓存，任务结束（成功 / 失败 / 取消）后自动清理临时文件。'),
+    hint('在线版本列表显示整包下载大小。安装器会在下载前检查缓存磁盘，读取清单后再核对模组和解压所需空间。'),
     hint('CurseForge 整合包需要 API Key 才能补齐文件；缺少 Key 时搜索区域会显示设置引导。'))
   const packPane = h('div', { style: { ...paneStyle, display: 'none' } },
     row('row wrap', packModeSeg, h('span', { class: 'spacer' }), packModeHint),
@@ -716,7 +741,10 @@ function buildView(ctx, container, initialTab) {
         badge(meta?.mc || '未声明 MC 版本', meta?.mc ? '' : 'warn'),
         badge(loaderInfo(meta?.loader).label + (meta?.loaderVersion ? ' ' + meta.loaderVersion : '')))
       show(packMetaRow, true)
-      setHint(packInspectHint, '已解析：' + (meta?.name || basename(path)))
+      const space = meta?.space
+      setHint(packInspectHint, space
+        ? `清单需下载 ${fmtBytes(space.downloadBytes)} · 解压暂存 ${fmtBytes(space.unpackBytes)} · 覆盖文件 ${fmtBytes(space.overrideBytes)}${space.unknownFiles ? ' · ' + space.unknownFiles + ' 个文件大小未知' : ''}（基础游戏另计）`
+        : '已解析：' + (meta?.name || basename(path)))
       if (!pack.nameDirty || !packNameInput.value.trim()) {
         packNameInput.value = meta?.name || basename(path).replace(/\.(mrpack|zip)$/i, '')
       }

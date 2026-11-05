@@ -1,0 +1,13 @@
+{
+  "id": "seed-map",
+  "name": "种子地图",
+  "desc": "离线查看 Java 版世界的群系、结构预测位置和史莱姆区块",
+  "icon": "🗺️",
+  "color": "#64ac84",
+  "version": "1.0.0",
+  "author": "builtin",
+  "size": { "w": 2, "h": 1 },
+  "builtin": true,
+  "enabled": true,
+  "entry": "tile.js"
+}

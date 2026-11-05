@@ -563,6 +563,15 @@ function renderWorldPane(inst, pane) {
   pane.appendChild(h('div', { class: 'se-meta' },
     `版本 ${w.version || '?'} · 上次游玩 ${w.lastPlayed ? fmtDateTime(w.lastPlayed) : '未知'} · 种子 ${w.seed || '?'}`))
 
+  if (w.seed !== undefined && w.seed !== '') pane.appendChild(btn('在种子地图中查看', {
+    size: 'sm', onClick: async () => {
+      try {
+        const { openSeedMap } = await import('../seed-map/tile.js')
+        openSeedMap({ seed: String(w.seed), version: w.version, x: f.SpawnX, z: f.SpawnZ, y: f.SpawnY })
+      } catch (error) { toast(error.message, 'err') }
+    }
+  }))
+
   const btnSave = btn('保存世界属性', {
     size: 'sm',
     variant: 'primary',

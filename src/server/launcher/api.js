@@ -10,6 +10,7 @@ import {
   listInstances,
   findInstance,
   publicInstance,
+  instancePaths,
   updateInstance,
   deleteInstance,
   duplicateInstance,
@@ -46,6 +47,8 @@ import {
 } from './pack-export.js'
 import { findModUpdates, resolveMissingDependencies } from './updates.js'
 import { getModUpdateBackup, undoModUpdate, withModUpdateLock } from './mod-update-transaction.js'
+import { backupWorld, listWorldBackups, restoreWorldBackup } from './world-backups.js'
+import { gameDirKey } from './running-processes.js'
 import { store } from '../store.js'
 import {
   prepareLaunch,
@@ -64,11 +67,14 @@ import {
   getRunningDetectionStatus
 } from './launch.js'
 import { discoverJava, clearJavaCache } from './java.js'
+import { estimateInstallSpace } from './install-space.js'
 import { requiredJavaMajor } from './launch-plan.js'
+import { registerSkinApi } from './skins.js'
 import * as accounts from './accounts.js'
 import * as content from './content.js'
 import { scanExisting, importExisting, defaultMinecraftDirs } from './import.js'
 import { registerPrismMigrationApi } from './prism-migration.js'
+import { registerPackUpdateApi } from './pack-update.js'
 import { getNews } from './news.js'
 import { receiveUploadedPack } from '../pack-converter.js'
 import { RUNTIME_DIR, isSEA } from '../paths.js'
@@ -109,6 +115,25 @@ async function assertInstanceIdle(id, action = '操作') {
 function safeInt(value, fallback = 0) {
   const n = Number(value)
   return Number.isFinite(n) ? Math.round(n) : fallback
+}
+
+function withIdleWorlds(inst, operation) {
+  return withModUpdateLock(inst, async () => {
+    // 多个导入实例可能使用同一 saves 目录；启动入口也通过同一个目录锁。
+    const check = async () => {
+      const detection = await refreshRunningGames({ force: true })
+      if (detection.error) throw new Error('无法确认游戏已退出，请稍后重试')
+      const records = listInstances()
+      const game = gameDirKey(instancePaths(inst).gameDir)
+      const ids = records.filter(item => gameDirKey(item.paths.gameDir) === game).map(item => item.id)
+      if (ids.some(isInstanceStarting) || listSessions().some(item =>
+        ids.includes(item.instanceId) && ['starting', 'running', 'stopping'].includes(item.status))) {
+        throw new Error('游戏正在使用此存档目录，请先退出游戏')
+      }
+    }
+    await check()
+    return operation(check)
+  })
 }
 
 function filterSettings(settings) {
@@ -157,6 +182,7 @@ async function launcherStatusPayload() {
 }
 
 export function registerLauncherApi(on, { readBody }) {
+  registerSkinApi(on, readBody)
   /* ---------------- bootstrap / settings ---------------- */
   on('GET', '/api/launcher/bootstrap', async () => {
     const data = await launcherStatusPayload()
@@ -347,6 +373,18 @@ export function registerLauncherApi(on, { readBody }) {
   })
 
   /* ---------------- content ---------------- */
+  on('GET', '/api/launcher/instances/:id/world-backups', async (_req, params) =>
+    ({ backups: await listWorldBackups(instanceOf(params.id)) }))
+  on('POST', '/api/launcher/instances/:id/world-backups', async (req, params) => {
+    const { name } = await readBody(req)
+    const inst = instanceOf(params.id)
+    return withIdleWorlds(inst, check => backupWorld(inst, name, check))
+  })
+  on('POST', '/api/launcher/instances/:id/world-backups/restore', async (req, params) => {
+    const { id } = await readBody(req)
+    const inst = instanceOf(params.id)
+    return withIdleWorlds(inst, check => restoreWorldBackup(inst, id, check))
+  })
   on('GET', '/api/launcher/instances/:id/content', async (_req, params, query) => {
     const inst = instanceOf(params.id)
     switch (query.type) {
@@ -425,6 +463,7 @@ export function registerLauncherApi(on, { readBody }) {
   on('POST', '/api/launcher/instances/:id/content/delete', async (req, params) => {
     const body = await readBody(req)
     const inst = instanceOf(params.id)
+    if (body.type === 'worlds') return withIdleWorlds(inst, () => content.deleteContent(inst, body.type, body.name))
     return await content.deleteContent(inst, body.type, body.name)
   })
   on('POST', '/api/launcher/instances/:id/resourcepack', async (req, params) => {
@@ -513,6 +552,10 @@ export function registerLauncherApi(on, { readBody }) {
       return { items: [], error: e.message }
     }
   })
+  on('POST', '/api/launcher/install/estimate', async (req) => {
+    const { mc, loader } = await readBody(req)
+    return estimateInstallSpace({ mc, loader })
+  })
   on('POST', '/api/launcher/install', async (req) => {
     const body = await readBody(req)
     return startInstall({
@@ -599,6 +642,7 @@ export function registerLauncherApi(on, { readBody }) {
 
   /* ---------------- import existing installations ---------------- */
   registerPrismMigrationApi(on, readBody)
+  registerPackUpdateApi(on, { readBody })
   on('GET', '/api/launcher/import/scan', async (_req, _p, query) => await scanExisting({ dir: query.dir || '' }))
   on('POST', '/api/launcher/import', async (req) => {
     const body = await readBody(req)
@@ -619,6 +663,7 @@ export function registerLauncherApi(on, { readBody }) {
     return {
       name: meta.name,
       kind: meta.kind,
+      space: meta.space,
       mc: meta.mc,
       loader: meta.loader,
       loaderVersion: meta.loaderVersion

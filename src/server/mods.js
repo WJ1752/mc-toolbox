@@ -25,7 +25,7 @@ const TOP_LEVEL_FILES = [
 ]
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i
 const META_CACHE_LIMIT = 5000
-const META_CACHE_VERSION = 2
+const META_CACHE_VERSION = 3
 
 /** 模组图标字段可能是字符串，也可能是 Fabric 的 { small, large } 对象。 */
 function iconPathOf(value) {
@@ -197,14 +197,25 @@ function parseFabricMeta(buf) {
   const obj = jsonParseLoose(buf.toString('utf8'))
   if (!obj) return null
   const dependencies = []
-  parseDependencyMap(obj.depends, dependencies)
-  parseDependencyMap(obj.recommends, dependencies, { optional: true })
-  parseDependencyMap(obj.suggests, dependencies, { optional: true })
+  const conflicts = []
+  const fabricMap = (map, out, defaults) => {
+    for (const [id, rule] of Object.entries(map || {})) {
+      addDependency(out, { id, version: Array.isArray(rule) ? rule.join(' || ') : rule }, defaults)
+    }
+  }
+  fabricMap(obj.depends, dependencies)
+  fabricMap(obj.recommends, dependencies, { optional: true })
+  fabricMap(obj.suggests, dependencies, { optional: true })
+  fabricMap(obj.breaks, conflicts)
+  fabricMap(obj.conflicts, conflicts, { optional: true })
   return {
     modid: obj.id || null,
     name: obj.name || obj.id || null,
     version: obj.version || null,
     loader: 'fabric',
+    metadataSource: 'fabric.mod.json',
+    aliases: Array.isArray(obj.provides) ? obj.provides.filter(id => typeof id === 'string') : [],
+    conflicts,
     environment: obj.environment || '*',
     icon: iconPathOf(obj.icon),
     dependencies: uniqueDependencies(dependencies)
@@ -218,13 +229,23 @@ function parseQuiltMeta(buf) {
   const id = typeof ql.id === 'string' ? ql.id : ql.id?.id || null
   const meta = ql.metadata || {}
   const dependencies = []
+  const conflicts = []
+  // Quilt 复合/条件声明需由加载器求值，只展示可明确归属的单个 ID。
+  for (const item of Array.isArray(ql.breaks) ? ql.breaks : []) {
+    if (typeof item === 'string') addDependency(conflicts, item)
+    else if (typeof item?.id === 'string' && !item.unless) {
+      const versions = item.versions || item.version
+      if (versions && typeof versions !== 'string' && !(Array.isArray(versions) && versions.every(v => typeof v === 'string'))) continue
+      addDependency(conflicts, { id: item.id, version: Array.isArray(versions) ? versions.join(' || ') : versions })
+    }
+  }
   const qdeps = ql.depends || ql.dependencies || []
   if (Array.isArray(qdeps)) {
     for (const item of qdeps) {
       if (typeof item === 'string') addDependency(dependencies, item)
       else if (item && typeof item === 'object') {
         const id = item.id || item.modId || item.name
-        const version = item.version || item.versionRange || item.range
+        const version = item.versions || item.version || item.versionRange || item.range
         addDependency(dependencies, { id, version, optional: item.optional === true })
       }
     }
@@ -234,6 +255,8 @@ function parseQuiltMeta(buf) {
     name: meta.name || id,
     version: ql.version || null,
     loader: 'quilt',
+    metadataSource: 'quilt.mod.json',
+    conflicts,
     environment: obj.minecraft?.environment || '*',
     icon: iconPathOf(meta.icon || ql.icon || obj.icon),
     dependencies: uniqueDependencies(dependencies)
@@ -269,6 +292,7 @@ function parseModsToml(buf, { neo = false } = {}) {
   }
   if (!mods.length) return null
   const dependencies = []
+  const conflicts = []
   // Forge/NeoForge 用重复的 [[dependencies.<modid>]] 块；type / side 必须一起解析，
   // 否则 optional、incompatible、仅客户端依赖都会被当成「必需依赖」。
   // 只接受属于本 jar 已声明 modId 的依赖块：有些 jar 会留下 [[dependencies.子模块]]
@@ -286,9 +310,13 @@ function parseModsToml(buf, { neo = false } = {}) {
     const type = (/^\s*type\s*=\s*["']([^"']+)["']/im.exec(block)?.[1] || '').toLowerCase()
     const side = (/^\s*side\s*=\s*["']([^"']+)["']/im.exec(block)?.[1] || '').toUpperCase()
     // incompatible 的语义是「装了才冲突」，未安装才是正确状态，不能要求存在。
-    if (type === 'incompatible' || type === 'discouraged') continue
-    const optional = type === 'optional' || mandatory === 'false' || side === 'CLIENT'
-    addDependency(dependencies, { id, versionRange: range, mandatory: !optional })
+    if (type === 'incompatible' || type === 'discouraged') {
+      if (side !== 'SERVER') addDependency(conflicts, { id, versionRange: range, optional: type === 'discouraged' })
+      continue
+    }
+    const optional = type === 'optional' || mandatory === 'false'
+    const dep = dependency(id, range, optional || side === 'CLIENT')
+    if (dep) dependencies.push({ ...dep, side, clientOptional: optional })
   }
   return {
     modid: mods[0].modid,
@@ -296,6 +324,8 @@ function parseModsToml(buf, { neo = false } = {}) {
     name: mods[0].name,
     version: mods[0].version || null,
     loader: isNeo ? 'neoforge' : 'forge',
+    metadataSource: isNeo ? 'META-INF/neoforge.mods.toml' : 'META-INF/mods.toml',
+    conflicts,
     environment: '*',
     icon: iconPathOf(mods.find((item) => item.logo)?.logo || ''),
     dependencies: uniqueDependencies(dependencies)
@@ -522,12 +552,14 @@ export async function readModMeta(filePath, runtime = {}, depth = 0) {
       ].filter(Boolean)
       // 嵌套模块的 ID 全部算作「已被这个 jar 提供」，包括客户端模块；否则
       // 客户端整合包里 lambdynlights_api / spruceui / xaerolib 会被误报缺失。
-      meta.nestedModIds = [...new Set([...meta.nestedModIds, ...childVisibleIds, ...(child.nestedModIds || [])])]
+      meta.nestedModIds = [...new Set([...meta.nestedModIds, ...childVisibleIds, ...(child.nestedModIds || []), ...(child.aliases || [])])]
       // 纯客户端的嵌套模块不能把宿主拖下水：不把它的 modid 并进服务端转换
       // 使用的 modids，也不把它的客户端依赖强加给服务端转换。
       if (child.environment === 'client') continue
       meta.modids = [...new Set([...(meta.modids || []), ...(meta.modid ? [meta.modid] : []), ...childVisibleIds].filter(Boolean))]
-      meta.dependencies = uniqueDependencies([...meta.dependencies, ...child.dependencies])
+      meta.dependencies = uniqueDependencies([...meta.dependencies, ...child.dependencies.map(dep => ({
+        ...dep, source: dep.source || `内嵌 ${child.modid || 'JAR'} / ${child.metadataSource || '模组声明'}`
+      }))])
       meta.providedVersions = { ...meta.providedVersions, [child.modid?.toLowerCase()]: child.version, ...child.providedVersions }
     }
   } finally { await fsp.rm(tmp, { recursive: true, force: true }) }
@@ -635,7 +667,7 @@ export async function scanModsDir(dir, opts = {}) {
     const nestedIds = [...new Set(meta?.nestedModIds || [])]
     // 依赖是否满足只看真实元数据（含内嵌 jar）。文件名推断只在完全没有元数据时兜底：
     // xaerominimap-forge-... 这种文件名不是可靠的 modid，拿来当「已提供」会掩盖缺失。
-    const providedIds = [...new Set([...actualIds, ...nestedIds])]
+    const providedIds = [...new Set([...actualIds, ...nestedIds, ...(meta?.aliases || [])])]
     return {
       file: name,
       path: full,
@@ -655,6 +687,8 @@ export async function scanModsDir(dir, opts = {}) {
       loaderHints: meta?.loaderHints || [],
       environment: meta?.environment || '*',
       dependencies: meta?.dependencies || [],
+      metadataSource: meta?.metadataSource || (meta?.loader === 'legacy-forge' ? 'mcmod.info / Forge 注解' : ''),
+      conflicts: meta?.conflicts || [],
       icon: meta?.icon || '',
       hasMeta: !!meta
     }

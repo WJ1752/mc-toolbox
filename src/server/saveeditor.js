@@ -120,7 +120,7 @@ function readLevelData(worldPath) {
 
 function worldSummary(dirName, worldPath, data) {
   const versionNode = data.Version && typeof data.Version === 'object' ? data.Version : {}
-  const seedNode = (data.WorldGenSettings && data.WorldGenSettings.seed) || data.RandomSeed
+  const seedNode = data.WorldGenSettings?.seed ?? data.RandomSeed
   return {
     name: dirName,
     path: worldPath,

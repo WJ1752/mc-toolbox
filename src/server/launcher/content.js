@@ -112,7 +112,7 @@ function serializeOptions(original, map) {
 function dependencyId(value) {
   // Forge/Fabric 的 ID 大小写不敏感；yumi-commons-core 与 yumi_commons_core
   // 是同一个模组，不能因为分隔符不同就报「缺少前置」。
-  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+  return String(value || '').trim().toLowerCase().replace(/-/g, '_')
 }
 
 function modLoaderMatches(instanceLoader, modLoader) {
@@ -137,11 +137,6 @@ export async function listMods(inst, { signal } = {}) {
     signal
   })
   const provided = new Set()
-  for (const item of items) {
-    const ids = item.providedModIds || [item.modid, ...(item.modids || []), ...(item.nestedModIds || [])]
-    for (const id of ids) if (id) provided.add(dependencyId(id))
-    for (const id of Object.keys(item.providedVersions || {})) provided.add(dependencyId(id))
-  }
   const platform = new Set(['minecraft', 'forge', 'neoforge', 'fabricloader', 'fabric', 'quilt_loader', 'quilt', 'java']
     .map((id) => dependencyId(id)))
   for (const item of items) {
@@ -151,8 +146,17 @@ export async function listMods(inst, { signal } = {}) {
     // 旧 Forge 模组常用 FMLCorePlugin / TweakClass / ModLauncher Service 加载，
     // 没有 mods.toml；不能因为只看到 fabric.mod.json 就判成 Fabric 模组。
     item.loaderMismatch = !modLoaderMatches(inst.loader, item.loader) && !hinted
+    if (item.disabled || item.loaderMismatch) continue
+    for (const id of [...(item.providedModIds || []), ...Object.keys(item.providedVersions || {})]) {
+      if (id) provided.add(dependencyId(id))
+    }
+  }
+  for (const item of items) {
     const missing = []
-    if (!item.loaderMismatch) {
+    // 共用的解析器也为服务端转换工作，此处按客户端声明选择 side / mandatory。
+    item.dependencies = (item.dependencies || []).filter(dep => dep.side !== 'SERVER')
+      .map(dep => dep.clientOptional === undefined ? dep : { ...dep, optional: dep.clientOptional, required: !dep.clientOptional })
+    if (!item.disabled && !item.loaderMismatch) {
       for (const dep of item.dependencies || []) {
         if (!dep || typeof dep !== 'object') continue
         const id = dependencyId(dep.id || dep.modid)
@@ -190,6 +194,10 @@ export async function listMods(inst, { signal } = {}) {
         nestedModIds: item.nestedModIds || [],
         modIdHints: item.modIdHints || [],
         providedModIds: item.providedModIds || [],
+        providedVersions: item.providedVersions || {},
+        dependencies: item.dependencies || [],
+        conflicts: item.conflicts || [],
+        metadataSource: item.metadataSource || '',
         name: item.name,
         version: item.version,
         loader: item.loader,

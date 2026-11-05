@@ -105,7 +105,7 @@ function parseCentralDirectory(buf, count) {
       }
     }
 
-    map.set(name, { method, compSize, size, offset })
+    map.set(name, { method, compSize, size, offset, crc32: buf.readUInt32LE(p + 16) })
     p += 46 + nameLen + extraLen + commentLen
   }
   return map.size ? map : null
@@ -159,6 +159,7 @@ export async function readJarEntries(filePath, wanted, options = {}) {
     if (stats) {
       stats.zip = true
       stats.entries = map.size
+      if (options.includeDirectory) stats.directory = map
     }
 
     const wildcard = wanted.filter((name) => name.includes('*'))

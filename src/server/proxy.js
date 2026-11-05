@@ -250,7 +250,11 @@ export function makeProxyFetch(proxy) {
       current.hash = ''
       const res = await singleRequest(current.href, options)
       const loc = res.headers.get('location')
-      if (!loc || ![301, 302, 303, 307, 308].includes(res.status) || request.redirect === 'manual') return res
+      if (!loc || ![301, 302, 303, 307, 308].includes(res.status) || request.redirect === 'manual') {
+        // 手工构造的 Response 默认 url 为空，保留实际响应地址供下载诊断识别 CDN。
+        Object.defineProperty(res, 'url', { value: current.href })
+        return res
+      }
       await res.body?.cancel?.().catch(() => {})
       if (request.redirect === 'error') throw new Error('代理请求遇到重定向')
       const next = new URL(loc, current)

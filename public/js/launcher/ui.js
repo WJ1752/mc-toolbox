@@ -95,7 +95,7 @@ export function playerAvatar(account = {}, { size = 30 } = {}) {
         class: 'lp-skin-layer ' + cls,
         style: {
           backgroundImage: `url("${String(account.skin).replace(/"/g, '%22')}")`,
-          backgroundSize: `${64 * scale}px ${64 * scale}px`,
+          backgroundSize: `${64 * scale}px auto`,
           backgroundPosition: `${-x * scale}px ${-y * scale}px`
         }
       }))

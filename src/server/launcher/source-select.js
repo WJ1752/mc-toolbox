@@ -90,6 +90,11 @@ export function knownSpeed(url, now = Date.now()) {
   return null
 }
 
+export function cooldownUntil(url, now = Date.now()) {
+  const until = stats.get(hostOf(url))?.blockedUntil || 0
+  return until > now ? until : 0
+}
+
 /** 候选线路近期出现故障或限流时，暂缓增加素材下载连接数。 */
 export function canGrowConcurrency(urls, now = Date.now()) {
   return urls.every((url) => knownSpeed(url, now) !== 0)

@@ -1,3 +1,4 @@
+import { openSkins } from './skins.js'
 // 账户管理：离线登录、微软设备码 OAuth、authlib-injector 第三方登录。
 //
 // 令牌只保存在后端（launcherAccounts.json），本模块只处理脱敏后的账户信息。
@@ -443,6 +444,7 @@ export function openAccountManager(ctx = {}) {
       const refreshBtn = btn('刷新', { size: 'sm', iconName: 'refresh', onClick: () => refreshAccount(account, refreshBtn) })
       actions.appendChild(refreshBtn)
     }
+    actions.appendChild(btn('皮肤', { size: 'sm', onClick: () => openSkins({ account, openModal, toast, onApplied: setAccounts }) }))
     actions.appendChild(btn('删除', { size: 'sm', variant: 'danger', onClick: () => deleteAccount(account) }))
 
     const meta = [`UUID ${shortUuid(account.uuid)}`]
@@ -551,7 +553,9 @@ export function openAccountManager(ctx = {}) {
   else loadAccounts()
 
   const body = h('div', { class: 'lp-accounts' },
-    h('div', { class: 'lp-subhead' }, h('b', {}, '账户'), countEl, h('span', { class: 'spacer' }), listRefresh),
+    h('div', { class: 'lp-subhead' }, h('b', {}, '账户'), countEl, h('span', { class: 'spacer' }), btn('皮肤衣柜', { size: 'sm',
+      onClick: () => openSkins({ openModal, toast, onApplied: setAccounts })
+    }), listRefresh),
     listEl,
     listFoot,
     h('div', { class: 'lp-subhead' }, '添加账户'),
