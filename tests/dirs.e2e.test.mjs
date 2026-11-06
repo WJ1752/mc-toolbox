@@ -68,6 +68,29 @@ try {
   assert(restored.general.tileColumns === 4 && restored.monitor.autoStart === false && restored.network.concurrency > 0, '启动时补齐旧配置并保留自定义项')
   assert(!d0.custom.configDir && !d0.custom.dataDir && !d0.custom.clientModsDir, '初始全部为默认目录')
   const defCfg = d0.defaults.configDir
+  const receivedDir = path.join(d0.dataDir, 'friends', 'received')
+  const savedFolder = path.join(receivedDir, 'old-transfer')
+  const externalFolder = path.join(TMP, 'user-downloads')
+  fs.mkdirSync(savedFolder, { recursive: true })
+  fs.mkdirSync(externalFolder, { recursive: true })
+  fs.writeFileSync(path.join(savedFolder, 'pack.mrpack'), 'received pack')
+  fs.writeFileSync(path.join(externalFolder, 'other.mrpack'), 'external copy')
+  fs.mkdirSync(path.join(d0.dataDir, 'friends', 'images'), { recursive: true })
+  fs.writeFileSync(path.join(d0.dataDir, 'friends', 'images', 'f_abcd.bin'), 'cached image')
+  fs.writeFileSync(path.join(d0.dataDir, 'friends', 'images', 'f_abcd.json'), JSON.stringify({
+    file: path.join(d0.dataDir, 'friends', 'images', 'f_abcd.bin'), mime: 'image/png', name: 'cached.png'
+  }))
+  fs.writeFileSync(path.join(defCfg, 'friends.json'), JSON.stringify({
+    server: {}, session: {},
+    prefs: { nickname: '', showActivity: true, allowPull: true, downloadDir: path.join(d0.dataDir, 'exports'), autoApplyMods: true },
+    received: [{ id: 'old-transfer', kind: 'pack', name: 'pack.mrpack', peerName: 'friend', at: 1,
+      files: [
+        { name: 'pack.mrpack', path: path.join(savedFolder, 'pack.mrpack'), size: 13, sha1: '' },
+        { name: 'other.mrpack', path: path.join(externalFolder, 'other.mrpack'), size: 13, sha1: '' }
+      ] }]
+  }))
+  fs.writeFileSync(path.join(defCfg, 'launcherSkins.json'), JSON.stringify([{ id: 'skin-fixture', data: 'fixture' }]))
+  await fetch(BASE + '/api/friends/diagnostics').then(J)
 
   // 产生配置文件
   await fetch(BASE + '/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ general: { tileColumns: 7 } }) }).then(J)
@@ -78,7 +101,10 @@ try {
   const r1 = await post('/api/dirs/change', { which: 'configDir', target: dirA })
   assert(r1.ok, 'configDir 迁移成功（' + r1.files + ' 文件）')
   assert(fs.existsSync(path.join(dirA, 'settings.json')), 'settings.json 已转移到新目录')
+  assert(fs.existsSync(path.join(dirA, 'friends.json')), '好友配置归入并迁移到配置目录')
+  assert(fs.existsSync(path.join(dirA, 'launcherSkins.json')), '皮肤衣柜配置归入并迁移到配置目录')
   assert(!fs.existsSync(path.join(defCfg, 'settings.json')), '原目录 settings.json 已清空')
+  assert(!fs.existsSync(path.join(defCfg, 'friends.json')), '原目录好友配置已迁出')
   assert(JSON.parse(fs.readFileSync(path.join(dirA, 'settings.json'), 'utf8')).general.tileColumns === 7, '内容完整（tileColumns=7）')
   const d1 = await fetch(BASE + '/api/dirs').then(J)
   assert(d1.configDir === dirA && d1.custom.configDir, '/api/dirs 立即反映新目录')
@@ -100,6 +126,10 @@ try {
   assert(e3.error && e3.error.includes('不是空的'), '非空目标被拒绝')
   const e4 = await post('/api/dirs/change', { which: 'bogus', target: path.join(TMP, 'x') })
   assert(e4.error, '未知目录类型被拒绝')
+  const e5 = await post('/api/dirs/change', { which: 'configDir', target: 'relative-config' })
+  assert(e5.error && e5.error.includes('绝对路径'), '相对目标路径被拒绝')
+  const e6 = await post('/api/dirs/change', { which: 'configDir', target: '   ' })
+  assert(e6.error && e6.error.includes('绝对路径'), '空白目标路径不会被解释为当前工作目录')
 
   // ---- 迁移 clientModsDir（dev 模式与 configDir 同盘同目录，验证归属拆分） ----
   await post('/api/mods/client-list', { modid: 'testmod' })
@@ -121,6 +151,15 @@ try {
   assert(!fs.existsSync(path.join(dirC, 'dirs.json')), 'dirs.json 没有被搬到新数据目录')
   const d3 = await fetch(BASE + '/api/dirs').then(J)
   assert(d3.dataDir === dirC, 'dataDir 已切换')
+  const friendsAfterDataMove = await fetch(BASE + '/api/friends/diagnostics').then(J)
+  const friendState = JSON.parse(fs.readFileSync(path.join(dirA, 'friends.json'), 'utf8'))
+  assert(friendsAfterDataMove.receivedRoot === path.join(dirC, 'friends', 'received'), '默认好友接收目录跟随 dataDir 更新')
+  assert(friendState.received[0].files[0].path === path.join(dirC, 'friends', 'received', 'old-transfer', 'pack.mrpack'), '接收记录内的数据目录绝对路径同步重基')
+  assert(friendState.received[0].files[1].path === path.join(externalFolder, 'other.mrpack'), '用户另存目录绝对路径保持不变')
+  assert(friendState.prefs.downloadDir === path.join(dirC, 'exports'), '好友下载目录偏好跟随 dataDir 更新')
+  assert(fs.existsSync(friendState.received[0].files[0].path), '迁移后的接收文件仍可访问')
+  const cachedImage = await fetch(BASE + '/api/friends/images/f_abcd')
+  assert(cachedImage.ok, '图片缓存元数据可回退到新数据目录中的稳定缓存文件')
 
   // ---- 重启后自定义目录仍然生效（引导文件持久化） ----
   child.kill()

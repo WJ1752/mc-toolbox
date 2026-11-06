@@ -22,9 +22,6 @@ import * as accounts from '../launcher/accounts.js'
 import { applyJar, diffManifests, fillPlan, findStagedBySha, groupJoinPlan, manifestFromItems, sha1File } from './mods-sync.js'
 import { sanitizeFileName, uniqueFileName } from './transfer.js'
 
-const RECEIVED_ROOT = process.env.MC_TOOLBOX_FRIENDS_RECEIVED || path.join(DATA_DIR, 'friends', 'received')
-const IMAGE_CACHE_DIR = path.join(DATA_DIR, 'friends', 'images')
-const IMAGE_TMP_DIR = path.join(DATA_DIR, 'friends', 'tmp')
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024
 const MODRINTH_VERSION_FILE = 'https://api.modrinth.com/v2/version_file'
 const USER_AGENT = `MC-Toolbox/${PRODUCT_VERSION} (friends-server)`
@@ -32,16 +29,30 @@ const HEARTBEAT_MS = 25000
 
 let store = null
 let client = null
-let receivedRoot = RECEIVED_ROOT
+let receivedRoot = process.env.MC_TOOLBOX_FRIENDS_RECEIVED || path.join(DATA_DIR, 'friends', 'received')
 let cache = null
 let cacheAt = 0
 let refreshing = null
 let heartbeatTimer = null
+let dataDirMigrating = false
+let activeDataWrites = 0
 const events = []
 const uploads = new Map()
 const downloads = new Map()
 const jobs = new Map()
 const hashCache = new Map()
+const imageCacheDir = () => path.join(DATA_DIR, 'friends', 'images')
+const imageTmpDir = () => path.join(DATA_DIR, 'friends', 'tmp')
+
+function ensureDataWritable() {
+  if (dataDirMigrating) throw new Error('运行数据目录正在迁移，请稍后重试')
+}
+
+async function withDataAccess(work) {
+  ensureDataWritable()
+  activeDataWrites++
+  try { return await work() } finally { activeDataWrites-- }
+}
 
 function logEvent(text, kind = 'info') {
   events.unshift({ at: Date.now(), text: String(text).slice(0, 300), kind })
@@ -49,7 +60,12 @@ function logEvent(text, kind = 'info') {
 }
 
 function getStore() {
-  if (!store) store = new ClientStore(process.env.MC_TOOLBOX_FRIENDS_CONFIG || path.join(CONFIG_DIR, 'friends.json'), { logger: console })
+  const file = process.env.MC_TOOLBOX_FRIENDS_CONFIG || path.join(CONFIG_DIR, 'friends.json')
+  if (!store) store = new ClientStore(file, { logger: console })
+  else if (!process.env.MC_TOOLBOX_FRIENDS_CONFIG && path.resolve(store.file) !== path.resolve(file)) {
+    store.file = file
+    store.saveNow()
+  }
   return store
 }
 
@@ -174,8 +190,70 @@ function pickPeerInstance(peerInstances, mine) {
   return same[0]
 }
 
-export function configurePaths({ received = '' } = {}) {
-  if (received) receivedRoot = path.resolve(received)
+function pathWithin(file, root) {
+  if (typeof file !== 'string' || !file) return ''
+  const resolvedRoot = path.resolve(root)
+  const resolvedFile = path.resolve(file)
+  const relative = path.relative(resolvedRoot, resolvedFile)
+  return relative && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative)
+    ? relative
+    : ''
+}
+
+export function configurePaths({ received = '', fromDirs, toDirs } = {}) {
+  if (received) {
+    receivedRoot = path.resolve(received)
+    return
+  }
+  const oldReceivedRoot = receivedRoot
+  if (!process.env.MC_TOOLBOX_FRIENDS_RECEIVED) {
+    receivedRoot = path.join(DATA_DIR, 'friends', 'received')
+  }
+
+  let changed = false
+  if (store && !process.env.MC_TOOLBOX_FRIENDS_CONFIG) {
+    const nextStoreFile = path.join(CONFIG_DIR, 'friends.json')
+    if (path.resolve(store.file) !== path.resolve(nextStoreFile)) {
+      store.file = nextStoreFile
+      changed = true
+    }
+  }
+
+  if (fromDirs && toDirs && path.resolve(fromDirs.dataDir) !== path.resolve(toDirs.dataDir)) {
+    const state = getStore().get()
+    if (!process.env.MC_TOOLBOX_FRIENDS_RECEIVED) {
+      for (const record of state.received || []) {
+        for (const file of record.files || []) {
+          const relative = pathWithin(file.path, fromDirs.dataDir)
+          if (relative) {
+            file.path = path.join(toDirs.dataDir, relative)
+            changed = true
+          }
+        }
+      }
+      const downloadDir = pathWithin(state.prefs?.downloadDir, fromDirs.dataDir)
+      if (downloadDir) {
+        state.prefs.downloadDir = path.join(toDirs.dataDir, downloadDir)
+        changed = true
+      }
+    }
+    if (path.resolve(oldReceivedRoot) !== path.resolve(receivedRoot)) changed = true
+  }
+  if (changed && store) store.saveNow()
+  dataDirMigrating = false
+}
+
+export async function beginDirMigration(which) {
+  if (which === 'dataDir') {
+    if (dataDirMigrating) throw new Error('好友文件正在迁移，请稍后重试')
+    if (activeDataWrites) throw new Error('好友文件传输或图片缓存正在进行，请完成后再迁移运行数据目录')
+    dataDirMigrating = true
+  }
+  if (store) await store.flush()
+}
+
+export function endDirMigration() {
+  dataDirMigrating = false
 }
 
 function invalidate() {
@@ -448,29 +526,40 @@ export async function markGroupRead(groupId, upTo = 0) {
 const IMAGE_DATA_RE = /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/
 
 function imageCacheMeta(id) {
-  return path.join(IMAGE_CACHE_DIR, String(id) + '.json')
+  return path.join(imageCacheDir(), String(id) + '.json')
 }
 
 /** 取聊天图片：优先本地缓存，没有再从好友服务器下载并缓存。 */
 export async function imageFor(id) {
   const key = String(id || '')
   if (!/^f_[A-Za-z0-9_-]{4,60}$/.test(key)) throw new Error('图片标识无效')
-  const metaFile = imageCacheMeta(key)
-  try {
-    const meta = JSON.parse(await fsp.readFile(metaFile, 'utf8'))
-    if (meta?.file && fs.existsSync(meta.file)) return meta
-  } catch {}
-  const instance = requireClient()
-  const result = await instance.downloadBuffer(key)
-  const mime = String(result.contentType || '').startsWith('image/')
-    ? String(result.contentType).split(';')[0]
-    : (String(result.name || '').toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg')
-  await fsp.mkdir(IMAGE_CACHE_DIR, { recursive: true })
-  const file = path.join(IMAGE_CACHE_DIR, key + '.bin')
-  await fsp.writeFile(file, result.buffer)
-  const meta = { file, mime, name: result.name || 'image', at: Date.now() }
-  await fsp.writeFile(metaFile, JSON.stringify(meta), 'utf8')
-  return meta
+  return withDataAccess(async () => {
+    const metaFile = imageCacheMeta(key)
+    let cachedMeta = null
+    try {
+      cachedMeta = JSON.parse(await fsp.readFile(metaFile, 'utf8'))
+    } catch {}
+    // Image bytes use a stable id-based filename. Prefer the current cache root
+    // over the old absolute path retained by legacy metadata after dataDir moves.
+    const cachedFile = path.join(imageCacheDir(), key + '.bin')
+    if (fs.existsSync(cachedFile)) {
+      const meta = { ...(cachedMeta || {}), file: cachedFile }
+      if (!cachedMeta || cachedMeta.file !== cachedFile) await fsp.writeFile(metaFile, JSON.stringify(meta), 'utf8')
+      return meta
+    }
+    if (cachedMeta?.file && fs.existsSync(cachedMeta.file)) return cachedMeta
+    const instance = requireClient()
+    const result = await instance.downloadBuffer(key)
+    const mime = String(result.contentType || '').startsWith('image/')
+      ? String(result.contentType).split(';')[0]
+      : (String(result.name || '').toLowerCase().endsWith('.png') ? 'image/png' : 'image/jpeg')
+    await fsp.mkdir(imageCacheDir(), { recursive: true })
+    const file = path.join(imageCacheDir(), key + '.bin')
+    await fsp.writeFile(file, result.buffer)
+    const meta = { file, mime, name: result.name || 'image', at: Date.now() }
+    await fsp.writeFile(metaFile, JSON.stringify(meta), 'utf8')
+    return meta
+  })
 }
 
 /**
@@ -478,6 +567,7 @@ export async function imageFor(id) {
  * 的消息。图片和普通文件共用 12 小时中转缓存，不占用「传输」面板。
  */
 export async function sendImage({ to = '', groupId = '', text = '', dataUrl = '', name = '', width = 0, height = 0 } = {}) {
+  ensureDataWritable()
   const match = IMAGE_DATA_RE.exec(String(dataUrl || ''))
   if (!match) throw new Error('只支持 PNG / JPEG / WebP / GIF 图片')
   const mime = match[1]
@@ -486,14 +576,15 @@ export async function sendImage({ to = '', groupId = '', text = '', dataUrl = ''
   if (buffer.length > MAX_IMAGE_BYTES) throw new Error('图片太大（最大 10 MB）')
   const ext = mime === 'image/png' ? '.png' : mime === 'image/webp' ? '.webp' : mime === 'image/gif' ? '.gif' : '.jpg'
   const fileName = sanitizeFileName(name || ('image' + ext), { fallback: 'image' + ext })
-  const temp = path.join(IMAGE_TMP_DIR, 'img_' + crypto.randomBytes(8).toString('hex') + ext)
-  await fsp.mkdir(IMAGE_TMP_DIR, { recursive: true })
-  await fsp.writeFile(temp, buffer)
   const instance = requireClient()
-  const targets = groupId
-    ? [{ type: 'group', id: groupIdOf(groupId) }]
-    : [{ type: 'friend', id: String(to || '') }]
+  activeDataWrites++
+  const temp = path.join(imageTmpDir(), 'img_' + crypto.randomBytes(8).toString('hex') + ext)
   try {
+    await fsp.mkdir(imageTmpDir(), { recursive: true })
+    await fsp.writeFile(temp, buffer)
+    const targets = groupId
+      ? [{ type: 'group', id: groupIdOf(groupId) }]
+      : [{ type: 'friend', id: String(to || '') }]
     const sha1 = crypto.createHash('sha1').update(buffer).digest('hex')
     const created = await instance.request('POST', '/api/files', {
       body: { targets, kind: 'image', name: fileName, size: buffer.length, sha1, width: Number(width) || 0, height: Number(height) || 0 }
@@ -509,6 +600,7 @@ export async function sendImage({ to = '', groupId = '', text = '', dataUrl = ''
     return result
   } finally {
     await fsp.rm(temp, { force: true }).catch(() => {})
+    activeDataWrites--
   }
 }
 
@@ -580,6 +672,7 @@ function peerName(uuid) {
  *   不再让用户自己去中转目录里手动搬运。
  */
 export async function downloadFile(id, { dir = '', instanceId = '' } = {}) {
+  ensureDataWritable()
   const file = await findPeerFile(id)
   if (!file) throw new Error('文件不存在或已被清理')
   if (downloads.get(id)?.status === 'downloading') return { ok: true, already: true }
@@ -589,6 +682,8 @@ export async function downloadFile(id, { dir = '', instanceId = '' } = {}) {
   const applyToInstance = file.kind === 'mod' && !!inst
   const downloadDir = applyToInstance ? '' : preferredDownloadDir(dir)
   const target = applyToInstance ? fileTargetPath(file) : downloadTargetFor(file, downloadDir)
+  const writesDataDir = !downloadDir || !!pathWithin(target, DATA_DIR)
+  if (writesDataDir) ensureDataWritable()
   const record = {
     id,
     kind: file.kind,
@@ -612,17 +707,18 @@ export async function downloadFile(id, { dir = '', instanceId = '' } = {}) {
     error: '',
     startedAt: Date.now()
   }
-  downloads.set(id, record)
   const instance = requireClient()
+  downloads.set(id, record)
+  if (writesDataDir) activeDataWrites++
   const meter = makeSpeedMeter(record)
-  instance.downloadFile(id, target, {
+  Promise.resolve().then(() => instance.downloadFile(id, target, {
     onProgress: ({ loaded, total, ratio }) => {
       record.progress = ratio * 100
       record.loaded = loaded
       record.total = total
       meter(loaded)
     }
-  }).then(async (result) => {
+  })).then(async (result) => {
     record.progress = 100
     record.speed = 0
     let finalPath = result.path
@@ -666,7 +762,7 @@ export async function downloadFile(id, { dir = '', instanceId = '' } = {}) {
     record.error = error.message
     record.finishedAt = Date.now()
     logEvent(`接收 ${file.name} 失败：${error.message}`, 'err')
-  })
+  }).finally(() => { if (writesDataDir) activeDataWrites-- })
   return { ok: true, id }
 }
 
@@ -680,7 +776,7 @@ export async function saveReceivedAs(id, { dir = '', name = '' } = {}) {
   if (!targetDir) throw new Error('请选择保存目录')
   const fileName = uniqueFileName(targetDir, name || path.basename(src.path))
   const target = path.join(targetDir, fileName)
-  await fsp.copyFile(src.path, target)
+  await withDataAccess(() => fsp.copyFile(src.path, target))
   logEvent(`已另存 ${fileName}`)
   return { ok: true, path: target, dir: targetDir, name: fileName }
 }
@@ -1052,6 +1148,10 @@ export async function compareMods({ friendId, instanceId } = {}) {
 }
 
 async function resolveModrinthFile(sha1) {
+  return withDataAccess(() => loadModrinthFile(sha1))
+}
+
+async function loadModrinthFile(sha1) {
   if (!/^[0-9a-f]{40}$/.test(sha1)) throw new Error('模组哈希无效')
   const cacheDir = path.join(DATA_DIR, 'friends', 'mods-cache')
   const cacheFile = path.join(cacheDir, `${sha1}.jar`)
@@ -1504,12 +1604,16 @@ export async function removeReceived(id) {
 
 /** 只删默认接收目录里的暂存文件夹；另存到其它目录的副本保持不动。 */
 async function removeReceivedFiles(record) {
-  for (const file of Array.isArray(record?.files) ? record.files : []) {
-    const target = path.resolve(String(file?.path || ''))
-    if (!target || target === path.resolve(receivedRoot)) continue
-    if (!target.startsWith(path.resolve(receivedRoot) + path.sep)) continue
-    await fsp.rm(path.dirname(target), { recursive: true, force: true }).catch(() => {})
-  }
+  await withDataAccess(async () => {
+    for (const file of record.files || []) {
+      const relative = pathWithin(file.path, receivedRoot)
+      // 默认接收布局是 <传输 ID>/<文件>；自选目录中可能还有其它传输或玩家文件。
+      const parent = path.dirname(relative)
+      if (!relative || parent === '.' || parent !== record.id) continue
+      await fsp.unlink(file.path).catch(() => {})
+      await fsp.rmdir(path.dirname(file.path)).catch(() => {})
+    }
+  })
 }
 
 /** 一键清除全部接收记录：同时清理默认接收目录中的暂存文件，返回清掉的条数。 */

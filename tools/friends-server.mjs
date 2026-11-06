@@ -41,6 +41,29 @@ const MAX_GROUPS_PER_USER = 50
 const MAX_MANIFEST_ITEMS = 500
 
 function now() { return Date.now() }
+function upperBound(values, target) {
+  let low = 0
+  let high = values.length
+  while (low < high) {
+    const middle = low + ((high - low) >> 1)
+    if (values[middle] <= target) low = middle + 1
+    else high = middle
+  }
+  return low
+}
+
+function cacheGroupMessage(cache, message) {
+  const { items, index } = cache
+  const at = Number(message.at) || 0
+  if (at < index.allAt.at(-1)) index.sorted = false
+  items.push(message)
+  index.allAt.push(at)
+  if (!index.bySender.has(message.from)) index.bySender.set(message.from, [])
+  index.bySender.get(message.from).push(at)
+  // 老 JSONL 可能有重复 ID，重试沿用日志中的第一条。
+  if (message.id && !index.byId.has(message.id)) index.byId.set(message.id, message)
+}
+
 function randomId(prefix = '') { return prefix + crypto.randomBytes(12).toString('base64url') }
 function sha256(text) { return crypto.createHash('sha256').update(String(text)).digest('hex') }
 function safeEqual(a, b) {
@@ -248,26 +271,46 @@ class Store {
     return [...this.groups.values()].filter((group) => group.members.includes(account.uuid))
   }
 
-  groupMessagesFor(group) {
+  groupMessageCacheFor(group) {
     if (!this.groupMessages.has(group.id)) {
-      let items = []
+      let text = ''
       try {
-        items = fs.readFileSync(path.join(this.groupMessagesDir, group.id + '.jsonl'), 'utf8')
-          .split('\n').filter(Boolean).map((line) => {
-            try { return JSON.parse(line) } catch { return null }
-          }).filter(Boolean)
-      } catch {}
-      this.groupMessages.set(group.id, items)
+        text = fs.readFileSync(path.join(this.groupMessagesDir, group.id + '.jsonl'), 'utf8')
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error
+      }
+      const cache = { items: [], index: { sorted: true, allAt: [], bySender: new Map(), byId: new Map() }, write: Promise.resolve() }
+      for (const line of text.split('\n')) {
+        if (!line) continue
+        let message
+        try { message = JSON.parse(line) } catch { continue }
+        if (message) cacheGroupMessage(cache, message)
+      }
+      this.groupMessages.set(group.id, cache)
     }
     return this.groupMessages.get(group.id)
   }
 
-  async appendGroupMessage(group, message) {
-    const items = this.groupMessagesFor(group)
-    items.push(message)
-    group.updatedAt = message.at
-    await fsp.appendFile(path.join(this.groupMessagesDir, group.id + '.jsonl'), JSON.stringify(message) + '\n', 'utf8')
-    return message
+  groupMessagesAfter(group, after) {
+    const { items, index } = this.groupMessageCacheFor(group)
+    if (!after) return items.slice(-500)
+    if (!index.sorted) return items.filter((message) => message.at > after).slice(-500)
+    const first = upperBound(index.allAt, after)
+    return items.slice(Math.max(first, items.length - 500))
+  }
+
+  appendGroupMessage(group, message) {
+    const cache = this.groupMessageCacheFor(group)
+    // 按群串行落盘。失败的发送不会进入聊天记录或占用重试 ID。
+    cache.write = cache.write.catch(() => {}).then(async () => {
+      const existing = cache.index.byId.get(message.id)
+      if (existing) return existing
+      await fsp.appendFile(path.join(this.groupMessagesDir, group.id + '.jsonl'), JSON.stringify(message) + '\n', 'utf8')
+      cacheGroupMessage(cache, message)
+      group.updatedAt = message.at
+      return message
+    })
+    return cache.write
   }
 
   groupReadsFor(account, groupId) {
@@ -276,11 +319,15 @@ class Store {
 
   unreadForGroup(account, group) {
     const readAt = this.groupReadsFor(account, group.id)
-    return this.groupMessagesFor(group).filter((message) => message.from !== account.uuid && message.at > readAt).length
+    const { items, index } = this.groupMessageCacheFor(group)
+    if (!index.sorted) return items.filter((message) => message.from !== account.uuid && message.at > readAt).length
+    const all = index.allAt.length - upperBound(index.allAt, readAt)
+    const own = index.bySender.get(account.uuid) || []
+    return all - (own.length - upperBound(own, readAt))
   }
 
   lastGroupMessage(group) {
-    const items = this.groupMessagesFor(group)
+    const { items } = this.groupMessageCacheFor(group)
     return items.length ? items[items.length - 1] : null
   }
 
@@ -1107,7 +1154,7 @@ export function createFriendsServer(options = {}) {
         const group = groupOrFail(account, id, res)
         if (!group) return
         const after = Number(url.searchParams.get('after')) || 0
-        const items = store.groupMessagesFor(group).filter((message) => !after || message.at > after).slice(-500)
+        const items = store.groupMessagesAfter(group, after)
         if (url.searchParams.get('markRead') === '1') {
           account.groupReads = { ...(account.groupReads || {}), [group.id]: now() }
           await store.saveAccounts()
@@ -1128,13 +1175,11 @@ export function createFriendsServer(options = {}) {
         }
         if (!text && !image) return json(res, 400, { error: '消息不能为空' })
         const messageId = /^[a-zA-Z0-9_-]{6,40}$/.test(String(body.clientId || '')) ? String(body.clientId) : randomId('m_')
-        const existing = store.groupMessagesFor(group).find((message) => message.id === messageId)
-        if (existing) return json(res, 200, { message: existing })
         const message = { id: messageId, from: account.uuid, groupId: group.id, text, at: now() }
         if (image) message.image = image
-        await store.appendGroupMessage(group, message)
-        await store.saveGroups()
-        return json(res, 200, { message })
+        const saved = await store.appendGroupMessage(group, message)
+        if (saved === message) await store.saveGroups()
+        return json(res, 200, { message: saved })
       }
       if (method === 'POST' && pathname.startsWith('/api/groups/') && pathname.endsWith('/read')) {
         const id = pathname.slice('/api/groups/'.length, -'/read'.length)

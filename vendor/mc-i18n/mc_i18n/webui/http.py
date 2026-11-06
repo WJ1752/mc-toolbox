@@ -243,7 +243,9 @@ def serve(port: int = 0, open_browser: bool = True,
     safe_print()
     safe_print("─" * 56)
     safe_print(f"  mc-i18n 汉化工具箱 v{__version__}")
-    safe_print(f"  图形界面地址：{url}")
+    # The desktop launcher reads this line from a pipe to discover the bound
+    # port; flush it immediately so startup does not depend on console buffering.
+    safe_print(f"  图形界面地址：{url}", flush=True)
     safe_print("  浏览器没有自动打开？手动复制上方地址访问。")
     safe_print("  关闭本窗口 / 按 Ctrl+C 即退出。")
     safe_print("─" * 56)

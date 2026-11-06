@@ -61,6 +61,11 @@ function seedConfig() {
 
 test('clearReceived：清空全部记录、删除暂存目录、保留另存文件', async (t) => {
   const seeded = seedConfig()
+  const direct = path.join(seeded.receivedRoot, '自选位置.mrpack')
+  fs.writeFileSync(direct, 'custom download')
+  const config = JSON.parse(fs.readFileSync(seeded.config, 'utf8'))
+  config.received[2].files.push({ name: path.basename(direct), path: direct })
+  fs.writeFileSync(seeded.config, JSON.stringify(config))
   const previousConfig = process.env.MC_TOOLBOX_FRIENDS_CONFIG
   const previousRoot = process.env.MC_TOOLBOX_FRIENDS_RECEIVED
   process.env.MC_TOOLBOX_FRIENDS_CONFIG = seeded.config
@@ -79,6 +84,7 @@ test('clearReceived：清空全部记录、删除暂存目录、保留另存文�
   assert.equal(fs.existsSync(path.join(seeded.receivedRoot, 'in_a')), false, '默认接收目录的暂存文件夹应被删除')
   assert.equal(fs.existsSync(path.join(seeded.receivedRoot, 'in_b')), false)
   assert.equal(fs.existsSync(seeded.files.saved), true, '另存到其它目录的文件不受影响')
+  assert.equal(fs.readFileSync(direct, 'utf8'), 'custom download', '用户选了接收根目录时不能清空整棵目录')
   assert.equal(JSON.parse(fs.readFileSync(seeded.config, 'utf8')).received.length, 0, '记录应落盘清空')
 
   // 再清一次不报错，也不会把文件恢复出来。

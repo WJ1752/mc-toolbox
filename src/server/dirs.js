@@ -23,6 +23,7 @@ import fsp from 'node:fs/promises'
 import path from 'node:path'
 import { getDirs, applyDirs } from './paths.js'
 import { store } from './store.js'
+import { beginDirMigration, endDirMigration, configurePaths } from './friends/manager.js'
 
 const WHICHES = ['configDir', 'clientModsDir', 'dataDir']
 const LABELS = { configDir: '配置目录', clientModsDir: 'mod 库目录', dataDir: '运行数据目录' }
@@ -36,6 +37,8 @@ const FILE_OWNERS = {
   // 恢复 dataDir 时会挡住「目标目录不是空的」。
   'launcher.json': 'configDir',
   'launcherAccounts.json': 'configDir',
+  'launcherSkins.json': 'configDir',
+  'friends.json': 'configDir',
   'clientmods.json': 'clientModsDir',
   'history.json': 'dataDir'
 }
@@ -111,13 +114,18 @@ export async function changeDir(which, targetArg) {
   const dirs = getDirs()
   const current = dirs[which]
   const isReset = targetArg === null || targetArg === undefined || targetArg === ''
-  const target = isReset ? dirs.defaults[which] : path.resolve(String(targetArg).trim())
+  const rawTarget = isReset ? '' : String(targetArg).trim()
+  if (!isReset && (!rawTarget || !path.isAbsolute(rawTarget))) return { error: '目标必须是绝对路径：' + rawTarget }
+  const target = isReset ? dirs.defaults[which] : path.resolve(rawTarget)
 
   if (path.resolve(current) === target) return { error: '新目录与当前目录相同' }
   if (isInside(current, target)) return { error: '新目录不能在当前目录内部' }
   if (isInside(target, current)) return { error: '当前目录不能在新目录内部' }
 
   busy = true
+  let migrationStarted = false
+  let switched = false
+  let committed = false
   try {
     fs.mkdirSync(target, { recursive: true })
     // 归属排除：dev 模式下三类目录共用同一个物理目录，不能把别的类别的文件搬走；
@@ -127,11 +135,12 @@ export async function changeDir(which, targetArg) {
     const existing = fs.readdirSync(target).filter(n => !sharedTarget || !skip(n))
     if (existing.length) return { error: '目标目录不是空的（存在：' + existing.slice(0, 3).join('、') + '），请选择一个空目录' }
 
+    store.flushAll() // 未落盘的先写盘，保证迁移的是最新内容
+    await beginDirMigration(which)
+    migrationStarted = true
     const entries = fs.existsSync(current)
       ? fs.readdirSync(current, { withFileTypes: true }).filter((e) => !skip(e.name))
       : []
-
-    store.flushAll() // 未落盘的先写盘，保证迁移的是最新内容
 
     // 复制 + 校验：不覆盖、不静默跳过；此阶段原目录仍未动
     let moved
@@ -145,7 +154,10 @@ export async function changeDir(which, targetArg) {
     }
 
     // 切换 + 清空旧目录 + 缓存重写到新目录
+    switched = true
     applyDirs({ [which]: isReset || target === dirs.defaults[which] ? null : target })
+    configurePaths({ fromDirs: dirs, toDirs: getDirs() })
+    committed = true
     for (const ent of entries) {
       fs.rmSync(path.join(current, ent.name), { recursive: true, force: true })
     }
@@ -161,8 +173,21 @@ export async function changeDir(which, targetArg) {
       note: isReset ? '已恢复默认目录' : '文件已完整转移，立即生效'
     }
   } catch (e) {
+    if (switched && !committed) {
+      try {
+        const currentDirs = getDirs()
+        const previous = {}
+        for (const key of WHICHES) previous[key] = dirs[key] === dirs.defaults[key] ? null : dirs[key]
+        applyDirs(previous)
+        configurePaths({ fromDirs: currentDirs, toDirs: getDirs() })
+      } catch {}
+    }
+    if (committed) {
+      return { ok: true, which, from: current, target, note: '目录已切换，但收尾失败：' + e.message }
+    }
     return { error: '迁移失败（原目录未受影响）：' + e.message }
   } finally {
+    if (migrationStarted) endDirMigration()
     busy = false
   }
 }
@@ -191,6 +216,7 @@ export async function changeRoot(targetArg) {
 
   busy = true
   let committed = false
+  let migrationStarted = false
   let files = 0
   let bytes = 0
   const plan = []
@@ -225,6 +251,8 @@ export async function changeRoot(targetArg) {
     fs.mkdirSync(target, { recursive: true })
 
     store.flushAll() // 未落盘的先写盘，保证三类迁移的都是最新内容
+    await beginDirMigration('dataDir')
+    migrationStarted = true
 
     // 1) 规划 + 空目录校验：三类目标都检查完再开始复制，避免留下半成品
     for (const which of WHICHES) {
@@ -267,10 +295,12 @@ export async function changeRoot(targetArg) {
     //    切换失败要先把内存里的路径恢复回旧目录，否则回滚会删掉进程正在使用的副本。
     try {
       applyDirs(nextDirs)
+      configurePaths({ fromDirs: dirs, toDirs: getDirs() })
     } catch (e) {
       const prev = {}
       for (const which of WHICHES) prev[which] = dirs[which] === dirs.defaults[which] ? null : dirs[which]
       try { applyDirs(prev) } catch {}
+      try { configurePaths({ fromDirs: nextDirs, toDirs: getDirs() }) } catch {}
       return abandon('切换目录失败（原目录未受影响）：' + e.message)
     }
     committed = true
@@ -309,6 +339,7 @@ export async function changeRoot(targetArg) {
     }
     return abandon('迁移失败（原目录未受影响）：' + e.message)
   } finally {
+    if (migrationStarted) endDirMigration()
     busy = false
   }
 }

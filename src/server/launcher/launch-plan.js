@@ -5,6 +5,7 @@
 // HMCL / Prism 的公开实现，但所有代码均为本项目自行编写。
 import crypto from 'node:crypto'
 import path from 'node:path'
+import { PRODUCT_VERSION } from '../build-meta.js'
 
 const DEFAULT_LIBRARY_BASE = 'https://libraries.minecraft.net/'
 
@@ -279,11 +280,21 @@ export function splitArgs(input) {
   const out = []
   let current = ''
   let quote = ''
-  let escaped = false
   let has = false
-  for (const ch of text) {
-    if (escaped) { current += ch; escaped = false; has = true; continue }
-    if (ch === '\\' && quote === '"') { escaped = true; continue }
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]
+    if (quote === '"' && ch === '\\') {
+      // Windows 路径中的反斜杠原样保留；只有紧邻双引号时才按奇偶数转义。
+      const start = i
+      while (text[i + 1] === '\\') i++
+      const count = i - start + 1
+      if (text[i + 1] !== '"') current += '\\'.repeat(count)
+      else {
+        current += '\\'.repeat(Math.floor(count / 2))
+        if (count % 2) { current += '"'; i++ }
+      }
+      continue
+    }
     if (quote) {
       if (ch === quote) quote = ''
       else { current += ch; has = true }
@@ -344,7 +355,7 @@ export function javaCompatible(required, major) {
 /* ------------------------------------------------------------------ */
 
 export const LAUNCHER_BRAND = 'MC-Toolbox'
-export const LAUNCHER_VERSION = '1.9.0'
+export const LAUNCHER_VERSION = PRODUCT_VERSION
 
 export function offlineUuid(name) {
   const md5 = crypto.createHash('md5').update(`OfflinePlayer:${name}`).digest()
@@ -477,7 +488,7 @@ export function buildLaunchPlan({
   if (paths.logConfigFile && version.logging?.client?.argument) {
     jvm.push(substitute(version.logging.client.argument, { ...vars, path: paths.logConfigFile }))
   }
-  if (!jvm.some((arg) => arg === '-cp' || arg === '-classpath' || arg.startsWith('-Djava.library.path'))) {
+  if (!jvm.some((arg) => arg === '-cp' || arg === '-classpath' || arg === '--class-path' || arg.startsWith('--class-path='))) {
     jvm.push('-cp', vars.classpath)
   }
   if (!jvm.some((arg) => arg.startsWith('-Djava.library.path'))) {

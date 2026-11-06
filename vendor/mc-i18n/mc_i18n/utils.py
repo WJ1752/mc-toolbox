@@ -126,7 +126,7 @@ def ensure_console_encoding(force_utf8: bool = False) -> None:
             pass
 
 
-def safe_print(text: str = "", *, stream: Any = None) -> None:
+def safe_print(text: str = "", *, stream: Any = None, flush: bool = False) -> None:
     """防御式输出：编码 / IO 失败绝不中断调用方流程。
 
     用于横幅、启动提示、菜单等"展示了更好、展示失败也无所谓"的输出。
@@ -136,6 +136,6 @@ def safe_print(text: str = "", *, stream: Any = None) -> None:
     ``stream`` 为 ``None`` 时输出到标准输出（等同内置 ``print``）。
     """
     try:
-        print(text, file=stream)
+        print(text, file=stream, flush=flush)
     except Exception:  # noqa: BLE001 - 输出失败不允许影响主流程
         pass

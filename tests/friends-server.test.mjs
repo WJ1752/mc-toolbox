@@ -388,6 +388,107 @@ test('群聊：创建、拉人、消息、未读与已读', async (t) => {
   assert.equal(denied.status, 404)
 })
 
+test('长群聊：最近消息、增量轮询与未读游标复用索引', async (t) => {
+  const ctx = await startServer()
+  t.after(() => ctx.close())
+  const a = await login(ctx.base, 'token-alice')
+  const b = await login(ctx.base, 'token-bob')
+  await api(ctx.base, 'POST', '/api/friends/request', { token: a.token, body: { mcName: 'Bob' } })
+  await api(ctx.base, 'POST', '/api/friends/respond', { token: b.token, body: { uuid: UUID_A, accept: true } })
+  const created = await api(ctx.base, 'POST', '/api/groups', {
+    token: a.token, body: { name: '长消息群', members: [UUID_B] }
+  })
+  const group = created.data.group
+  const messages = Array.from({ length: 10000 }, (_, index) => ({
+    id: `m_long_${index}`, from: index % 2 ? UUID_A : UUID_B, groupId: group.id,
+    text: `message ${index}`, at: index + 1
+  }))
+  fs.writeFileSync(path.join(ctx.dataDir, 'messages', 'groups', group.id + '.jsonl'),
+    messages.map((item) => JSON.stringify(item)).join('\n') + '\n')
+  ctx.store.groupMessages.delete(group.id)
+
+  const initial = await api(ctx.base, 'GET', `/api/groups/${group.id}/messages`, { token: b.token })
+  assert.equal(initial.status, 200)
+  assert.equal(initial.data.items.length, 500)
+  assert.equal(initial.data.items[0].id, 'm_long_9500')
+  assert.equal(initial.data.items.at(-1).id, 'm_long_9999')
+  assert.equal(initial.data.unread, 5000)
+
+  const incremental = await api(ctx.base, 'GET', `/api/groups/${group.id}/messages?after=9995`, { token: b.token })
+  assert.deepEqual(incremental.data.items.map((item) => item.id), ['m_long_9995', 'm_long_9996', 'm_long_9997', 'm_long_9998', 'm_long_9999'])
+  assert.equal(incremental.data.unread, 5000)
+
+  const read = await api(ctx.base, 'GET', `/api/groups/${group.id}/messages?markRead=1`, { token: b.token })
+  assert.equal(read.data.unread, 0)
+  await new Promise((resolve) => setTimeout(resolve, 2))
+  const newlySent = await api(ctx.base, 'POST', `/api/groups/${group.id}/messages`, {
+    token: a.token, body: { text: 'new message', clientId: 'm_new_after_read' }
+  })
+  assert.equal(newlySent.status, 200)
+  assert.equal((await api(ctx.base, 'GET', `/api/groups/${group.id}/messages?after=${messages.at(-1).at}`, { token: b.token })).data.unread, 1)
+
+  const file = path.join(ctx.dataDir, 'messages', 'groups', group.id + '.jsonl')
+  const sendRetry = () => api(ctx.base, 'POST', `/api/groups/${group.id}/messages`, {
+    token: a.token, body: { text: 'disk retry', clientId: 'm_disk_retry' }
+  })
+  fs.renameSync(file, file + '.bak')
+  fs.mkdirSync(file)
+  assert.equal((await sendRetry()).status, 500)
+  assert.equal((await api(ctx.base, 'GET', `/api/groups/${group.id}/messages`, { token: b.token })).data.unread, 1)
+  fs.rmdirSync(file)
+  fs.renameSync(file + '.bak', file)
+  const retries = await Promise.all([sendRetry(), sendRetry()])
+  assert.ok(retries.every(r => r.status === 200))
+  assert.deepEqual(retries[0].data.message, retries[1].data.message)
+  assert.equal(fs.readFileSync(file, 'utf8').split('"m_disk_retry"').length - 1, 1)
+})
+
+test('群聊时间戳乱序回退原筛选语义，同毫秒游标严格排除相等消息', async (t) => {
+  const ctx = await startServer()
+  t.after(() => ctx.close())
+  const a = await login(ctx.base, 'token-alice')
+  const b = await login(ctx.base, 'token-bob')
+  await api(ctx.base, 'POST', '/api/friends/request', { token: a.token, body: { mcName: 'Bob' } })
+  await api(ctx.base, 'POST', '/api/friends/respond', { token: b.token, body: { uuid: UUID_A, accept: true } })
+  const created = await api(ctx.base, 'POST', '/api/groups', {
+    token: a.token, body: { name: '乱序时间戳群', members: [UUID_B] }
+  })
+  const group = created.data.group
+  const messages = [
+    { id: 'm_duplicate', from: UUID_A, groupId: group.id, text: 'first duplicate', at: 20 },
+    { id: 'm_same_a', from: UUID_A, groupId: group.id, text: 'same timestamp peer', at: 10 },
+    { id: 'm_duplicate', from: UUID_B, groupId: group.id, text: 'second duplicate', at: 20 },
+    { id: 'm_same_b', from: UUID_A, groupId: group.id, text: 'same timestamp peer 2', at: 10 }
+  ]
+  fs.writeFileSync(path.join(ctx.dataDir, 'messages', 'groups', group.id + '.jsonl'),
+    messages.map((item) => JSON.stringify(item)).join('\n') + '\n')
+  ctx.store.groupMessages.delete(group.id)
+
+  const after = await api(ctx.base, 'GET', `/api/groups/${group.id}/messages?after=15`, { token: b.token })
+  assert.deepEqual(after.data.items.map((item) => item.text), ['first duplicate', 'second duplicate'])
+  assert.equal(after.data.unread, 3)
+  const duplicate = await api(ctx.base, 'POST', `/api/groups/${group.id}/messages`, {
+    token: a.token, body: { text: 'retry', clientId: 'm_duplicate' }
+  })
+  assert.equal(duplicate.data.message.text, 'first duplicate')
+
+  const sameGroup = await api(ctx.base, 'POST', '/api/groups', {
+    token: a.token, body: { name: '同毫秒群', members: [UUID_B] }
+  })
+  const sameGroupId = sameGroup.data.group.id
+  const equalTimes = [
+    { id: 'm_equal_a', from: UUID_A, groupId: sameGroupId, text: 'peer 1', at: 10 },
+    { id: 'm_equal_b', from: UUID_B, groupId: sameGroupId, text: 'self', at: 10 },
+    { id: 'm_equal_c', from: UUID_A, groupId: sameGroupId, text: 'peer 2', at: 10 }
+  ]
+  fs.writeFileSync(path.join(ctx.dataDir, 'messages', 'groups', sameGroupId + '.jsonl'),
+    equalTimes.map((item) => JSON.stringify(item)).join('\n') + '\n')
+  ctx.store.groupMessages.delete(sameGroupId)
+  const sameMillis = await api(ctx.base, 'GET', `/api/groups/${sameGroupId}/messages?after=10`, { token: b.token })
+  assert.deepEqual(sameMillis.data.items, [])
+  assert.equal(sameMillis.data.unread, 2)
+})
+
 test('群发文件：好友与群聊一起发，按收件人分别记录送达', async (t) => {
   const ctx = await startServer()
   t.after(() => ctx.close())

@@ -99,7 +99,15 @@ async function main() {
   // 页面切换
   await evaluate(`document.querySelector('.page-switch [data-page="workbench"]').click()`)
   check('切换到工作台', await waitFor(`document.body.dataset.page === 'workbench' && !document.getElementById('workspace').hidden`))
-  check('工作台磁贴可见', await evaluate(`document.querySelectorAll('#workspace .tile, #workspace [data-id]').length >= 0`))
+  const features = await fetch(BASE + '/api/features').then(r => r.json())
+  const visibleIds = features.items.filter(f => f.enabled && f.visible).map(f => f.id).sort()
+  const tilesReady = await waitFor(`(() => {
+    const ids = [...document.querySelectorAll('#grid .tile[data-id]')].map(el => el.dataset.id).sort()
+    const expected = ${JSON.stringify(visibleIds)}
+    return ids.length === expected.length && ids.every((id, i) => id === expected[i])
+      && document.getElementById('emptyHint').hidden === (ids.length > 0)
+  })()`)
+  check('工作台磁贴与已启用的可见功能一致', tilesReady, visibleIds.join(', ') || '空工作台')
   await screenshot('02-workbench')
   await evaluate(`document.querySelector('.page-switch [data-page="launcher"]').click()`)
   check('切回启动器', await waitFor(`document.body.dataset.page === 'launcher' && !document.getElementById('launcherPage').hidden`))

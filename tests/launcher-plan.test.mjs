@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import path from 'node:path'
+import { PRODUCT_VERSION } from '../src/server/build-meta.js'
 import {
   normalizeOs,
   rulesAllow,
@@ -96,6 +97,8 @@ test('argument flattening, quoting and substitution', () => {
   ]
   assert.deepEqual(flattenArguments(entries, { os: win, features: {} }), ['-Dkeep=1', '--width', '${resolution_width}'])
   assert.deepEqual(splitArgs('-Dmessage="hello world" -Dpath="C:/Java Path" plain'), ['-Dmessage=hello world', '-Dpath=C:/Java Path', 'plain'])
+  assert.deepEqual(splitArgs(String.raw`-javaagent:"C:\Minecraft Tools\agent.jar" "\\host\share name" "say \"hi\"" "C:\ends with slash\\"`),
+    ['-javaagent:C:\\Minecraft Tools\\agent.jar', '\\\\host\\share name', 'say "hi"', 'C:\\ends with slash\\'])
   assert.throws(() => splitArgs('"unclosed'), /引号/)
   assert.equal(substitute('${a}-${b}-${missing}', { a: 1, b: 2 }), '1-2-')
 })
@@ -200,13 +203,14 @@ test('legacy minecraftArguments are split and substituted', () => {
       libraries: 'libs', assets: 'assets', assetIndexId: '1.7.10', gameDir: 'game',
       nativesDir: 'natives', clientJar: 'client.jar', versionName: '1.7.10'
     },
-    options: {},
+    options: { jvmArgs: '-Djava.library.path=natives' },
     account: { type: 'offline', name: 'Steve', uuid: 'x', accessToken: 'y' },
     os: win
   })
   assert.ok(plan.gameArgs.includes('Steve'))
   assert.ok(plan.gameArgs.includes('game'))
-  assert.ok(plan.jvmArgs.includes('-cp'))
+  assert.equal(plan.jvmArgs[plan.jvmArgs.indexOf('-cp') + 1], 'client.jar')
+  assert.ok(plan.jvmArgs.includes('-Dminecraft.launcher.version=' + PRODUCT_VERSION))
 })
 
 test('crash analysis recognizes common failures', () => {

@@ -75,6 +75,9 @@ export function statsOf(r) {
   const h = r.history
   const okPoints = h.filter((p) => p.ok)
   const lat = okPoints.map((p) => p.ms).filter((n) => typeof n === 'number')
+  const jitter = lat.length > 1
+    ? lat.slice(1).reduce((sum, value, i) => sum + Math.abs(value - lat[i]), 0) / (lat.length - 1)
+    : null
   const total = h.length || 1
   const recent = h.slice(-60)
   const recentOk = recent.filter((p) => p.ok).length
@@ -85,7 +88,7 @@ export function statsOf(r) {
     avg: lat.length ? +(lat.reduce((a, b) => a + b, 0) / lat.length).toFixed(1) : null,
     min: lat.length ? +Math.min(...lat).toFixed(1) : null,
     max: lat.length ? +Math.max(...lat).toFixed(1) : null,
-    jitter: lat.length > 1 ? +(Math.max(...lat) - Math.min(...lat)).toFixed(1) : null,
+    jitter: jitter == null ? null : +jitter.toFixed(1),
     loss: h.length ? +(((h.length - okPoints.length) / total) * 100).toFixed(2) : 0,
     streakFails: r.streakFails,
     totalChecks: r.totalChecks,
