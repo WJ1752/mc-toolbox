@@ -7,11 +7,13 @@ import { toast as toastDefault } from '../core/toast.js'
 import { badge, btn, iconBtn, input, seg, select, spinner, openPath as openPathDefault } from '../ui/kit.js'
 import { api as coreApi } from '../core/api.js'
 import { launcherApi } from './api.js'
-import { emptyBlock, sectionCard, loaderLabel } from './ui.js'
+import { emptyBlock, sectionCard, loaderLabel, crashHint } from './ui.js'
 import { versionCombo, partitionVersions, compatibleVersion, filterSummary, isMinecraftVersion, versionTagBadges } from './version-picker.js'
 import { createPager, pageOffset, SEARCH_PAGE_SIZE, SEARCH_SORTS } from './search-pager.js'
 import { openModRelations } from './mod-relations.js'
 import { openModDependencyMap } from './mod-dependency-map.js'
+import { showModUpdateBackup } from './mod-update-backup.js'
+import { openLaunchComparison } from './launch-comparison.js'
 const ENV = { client: ['客户端', 'info'], server: ['服务端', 'accent'], both: ['通用', ''], '*': ['通用', ''] }
 const MOD_LOADER_LABELS = { fabric: 'Fabric', forge: 'Forge', neoforge: 'NeoForge', quilt: 'Quilt', 'legacy-forge': '旧版 Forge', cleanroom: 'Cleanroom' }
 const MODES = ['生存模式', '创造模式', '冒险模式', '旁观模式']
@@ -152,19 +154,6 @@ async function deleteFlow(t, { message, title, okText = '删除', okMessage = '�
     t.toast('删除失败：' + error.message, 'err')
     return false
   }
-}
-function analyzeText(text) {
-  const lower = String(text || '').toLowerCase()
-  const hints = []
-  const add = (title, suggestion) => { if (!hints.some((item) => item.title === title)) hints.push({ title, suggestion }) }
-  if (/outofmemoryerror|java heap space/.test(lower)) add('内存不足', '在实例设置中提高最大内存（建议 6–12 GB），并关闭其他占用内存的程序。')
-  if (/unsupportedclassversionerror/.test(lower)) add('Java 版本不匹配', '换用更高版本的 64 位 Java（17/21），并在实例设置中指定。')
-  if (/noclassdeffounderror|classnotfoundexception|nosuchmethoderror|incompatibleclasschangeerror/.test(lower)) add('模组或库不兼容', '检查崩溃报告里的模组列表，移除刚安装或版本不匹配的模组，并补齐前置。')
-  if (/modresolutionexception|missing or unsupported mandatory dependencies|incompatible mod set/.test(lower)) add('模组依赖不完整', '安装缺失的前置，确认所有模组都支持当前 MC 与加载器版本。')
-  if (/pixel format not accelerated|glfw error|opengl|failed to create window/.test(lower)) add('图形驱动问题', '更新显卡驱动；笔记本尝试指定独显运行 java.exe；远程桌面可能没有可用的 OpenGL。')
-  if (/accessdeniedexception|securityexception/.test(lower)) add('文件权限被拒绝', '检查杀毒软件是否拦截了游戏目录，避免把游戏放在受保护的系统目录。')
-  if (/unknownhostexception|connection reset|sockettimeoutexception|sslhandshakeexception/.test(lower)) add('网络连接失败', '检查网络与代理设置；确认资源文件已下载完整后再启动。')
-  return hints.slice(0, 5)
 }
 function createLife() {
   const timers = new Map()
@@ -690,24 +679,12 @@ async function mountMods(container, t) {
       const { backup } = await t.api.modUpdateBackup(t.id)
       if (t.life.dead) return
       if (!backup) { t.toast('此实例暂无可撤销的更新'); return }
-      const undo = btn('撤销这次更新', { variant: 'danger', onClick: async () => {
-        undo.disabled = true
-        try {
-          await t.api.undoModUpdate(t.id, backup.id)
-          modal.close()
+      showModUpdateBackup(t.id, backup, {
+        api: t.api, modal: t.modal, notify: t.toast,
+        onUndo: async () => {
           updateState.data = null
-          t.toast('已恢复更新前的模组和启停状态', 'ok')
           await refresh()
-        } catch (error) {
-          t.toast('撤销失败：' + error.message, 'err')
-          undo.disabled = false
         }
-      } })
-      const modal = t.modal({
-        title: '最近一次模组更新', size: 'lg',
-        body: h('div', {}, tip(`${fmtDateTime(backup.createdAt)} · ${backup.items.length} 个模组 · 撤销后恢复左侧文件`),
-          h('div', { class: 'lp-list' }, backup.items.map(item => rowEl('', metaEl([item.before, '→', item.after]))))),
-        buttons: [{ label: '关闭' }, undo]
       })
     } catch (error) { t.toast('读取更新记录失败：' + error.message, 'err') }
   }
@@ -1397,10 +1374,11 @@ async function mountPacks(container, t, kind) {
   container.appendChild(tabEl(
     barEl(count, spacer(),
       btn('搜索下载', { size: 'sm', variant: 'primary', iconName: 'search', onClick: openInstall }),
+      ...(isResource ? [btn('覆盖预览', { size: 'sm', iconName: 'eye', onClick: preview })] : []),
       btn(`打开${label}文件夹`, { size: 'sm', iconName: 'folder-open', onClick: openFolder }),
       btn(`导入${label}`, { size: 'sm', iconName: 'upload', onClick: importOne })),
     tip(isResource
-      ? '启用状态直接写入 options.txt；游戏运行中修改可能被游戏覆盖。拖入 ZIP 可直接导入。'
+    ? '列表按 Minecraft Java options.txt 的 resourcePacks 逆序显示，顶部优先级最高。同路径预览显示静态来源；启用状态写入 options.txt，游戏运行中修改可能被游戏覆盖。'
       : '光影需要 Iris / Oculus 等前置模组；安装后可在游戏内“视频设置 → 光影”里选择。拖入 ZIP 可直接导入。'),
     list
   ))
@@ -1440,9 +1418,13 @@ async function mountPacks(container, t, kind) {
       mainEl(
         titleEl(h('b', { title: item.name }, item.name),
           isResource ? (item.enabled ? badge('已启用', 'ok') : badge('未启用')) : null),
-        metaEl([fmtBytes(item.size), fmtAgo(item.mtime)])
+        metaEl([...(isResource && item.enabled ? [`优先级 ${item.priority + 1}`] : []), fmtBytes(item.size), fmtAgo(item.mtime)])
       ),
       actEl(
+        ...(isResource && item.enabled ? [
+          btn('上移', { size: 'xs', disabled: busy || item.priority === 0, onClick: () => movePack(item, -1) }),
+          btn('下移', { size: 'xs', disabled: busy || item.priority === (data.items || []).filter((pack) => pack.enabled).length - 1, onClick: () => movePack(item, 1) })
+        ] : []),
         iconBtn('folder-open', { size: 13, label: `打开${label}文件夹`, onClick: openFolder }),
         iconBtn('trash', { size: 13, label: `删除${label}`, onClick: () => remove(item) })
       ))
@@ -1453,16 +1435,53 @@ async function mountPacks(container, t, kind) {
     box.disabled = true
     try {
       await t.api.setResourcePack(t.id, item.name, checked)
-      item.enabled = checked
       t.toast(`${checked ? '已启用' : '已禁用'} ${item.name}`, 'ok')
-      paint()
+      await load(false)
     } catch (error) {
       box.checked = !checked
       t.toast('切换失败：' + error.message, 'err')
     } finally {
       busy = false
       box.disabled = false
+      paint()
     }
+  }
+  async function movePack(item, delta) {
+    if (busy) return
+    const names = (data.items || []).filter((pack) => pack.enabled).map((pack) => pack.name)
+    const index = names.indexOf(item.name)
+    const target = index + delta
+    if (index < 0 || target < 0 || target >= names.length) return
+    ;[names[index], names[target]] = [names[target], names[index]]
+    busy = true
+    try {
+      const result = await t.api.orderResourcePacks(t.id, names, data.revision)
+      data.revision = result.revision
+      await load(false)
+      t.toast('资源包优先级已更新', 'ok')
+    } catch (error) { t.toast('排序失败：' + error.message, 'err') }
+    finally { busy = false; paint() }
+  }
+  async function preview() {
+    if (busy) return
+    busy = true
+    try {
+      const result = await t.api.previewResourcePacks(t.id)
+      const summary = h('div', { class: 'lp-stack' },
+        tip(result.priorityRule),
+        ...(result.stale || result.revision !== data.revision ? [tip('预览期间资源包设置或文件发生变化，请刷新后重新查看。')] : []),
+        tip(`扫描 ${result.enabled} 个已启用资源包、${result.scanned} 个资源；发现 ${result.conflictCount} 个重复路径。`),
+        ...(result.warnings || []).map((warning) => tip(`提示：${warning}`)),
+        ...(result.conflicts || []).map((conflict) => h('div', { class: 'lp-row' },
+          mainEl(titleEl(h('b', { title: conflict.path }, conflict.path), badge(`最高优先级来源：${conflict.highestPrioritySource}`, 'ok')),
+            metaEl([`来源（高到低）：${conflict.sources.join(' → ')}`])))),
+        result.truncated ? tip('结果过多，已截取前 300 条。') : null,
+        !result.conflicts?.length && !(result.warnings || []).length && !result.truncated && !result.stale
+          ? tip('扫描范围内没有发现重复资源路径。')
+          : !result.conflicts?.length ? tip('当前扫描没有发现重复路径，但由于上方提示，无法确认所有资源包都已完整检查。') : null)
+      t.modal({ title: '资源包覆盖预览', size: 'lg', body: summary })
+    } catch (error) { t.toast('预览失败：' + error.message, 'err') }
+    finally { busy = false }
   }
   async function remove(item) {
     if (busy) return
@@ -1799,6 +1818,7 @@ async function mountLogs(container, t) {
       btn('刷新', { size: 'sm', iconName: 'refresh', onClick: () => load(true) }),
       btn('复制', { size: 'sm', iconName: 'copy', onClick: copyLog }),
       btn('下载', { size: 'sm', iconName: 'download', onClick: downloadLog }),
+      btn('对比上次成功启动', { size: 'sm', onClick: () => openLaunchComparison(t.inst) }),
       liveBtn,
       spacer(), statusDot, statusText, autoSwitch.el,
       btn('游戏日志目录', { size: 'sm', iconName: 'folder-open', onClick: () => t.openPath(data.gameLogDir || (t.inst.paths?.gameDir || '') + '/logs') }),
@@ -1903,9 +1923,9 @@ async function mountLogs(container, t) {
       if (t.life.dead || token !== seq) return
       const text = result?.text || '（报告为空）'
       pane.textContent = text
-      const list = analyzeText(text)
+      const list = Array.isArray(result?.hints) ? result.hints : []
       hints.replaceChildren(...(list.length
-        ? list.map((item) => h('div', { class: 'lp-log-hint' }, h('b', {}, item.title), h('span', {}, item.suggestion)))
+        ? list.map((item) => crashHint(item))
         : [tip('没有匹配到可识别的错误特征，请在报告里搜索 “Caused by”。')]))
       pane.scrollTop = 0
     } catch (error) {
@@ -2003,10 +2023,7 @@ async function mountCrash(container, t) {
         h('div', { class: 'lp-card lp-crash-hints' },
           h('div', { class: 'lp-subhead' }, '可能原因'),
           ...(hints.length
-            ? hints.map((hint) => h('div', { class: 'lp-log-hint' },
-              h('b', {}, hint.title),
-              hint.detail ? h('p', {}, hint.detail) : null,
-              hint.suggestion ? h('span', {}, hint.suggestion) : null))
+            ? hints.map((hint) => crashHint(hint))
             : [tip('没有匹配到已知错误特征，请查看完整报告里的第一个 “Caused by”。')])),
         h('div', { class: 'lp-card lp-crash-excerpt' },
           h('div', { class: 'lp-subhead' }, '关键行'),

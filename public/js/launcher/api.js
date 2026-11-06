@@ -53,6 +53,7 @@ export const launcherApi = {
   stop: (id, force = true) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/stop`, { force }),
   cancelLaunch: (id) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/launch/cancel`, {}),
   launchState: (id) => api.get(`/api/launcher/instances/${encodeURIComponent(id)}/status`),
+  launchComparison: (id) => api.get(`/api/launcher/instances/${encodeURIComponent(id)}/launch-comparison`),
   preview: (id) => api.get(`/api/launcher/instances/${encodeURIComponent(id)}/preview`),
   instanceStatus: (id) => api.get(`/api/launcher/instances/${encodeURIComponent(id)}/status`),
   liveLog: (id, after = 0) => api.get(`/api/launcher/instances/${encodeURIComponent(id)}/log?after=${Number(after) || 0}`),
@@ -74,6 +75,8 @@ export const launcherApi = {
   backupWorld: (id, name) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/world-backups`, { name }),
   restoreWorldBackup: (id, backupId) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/world-backups/restore`, { id: backupId }),
   setResourcePack: (id, name, enabled) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/resourcepack`, { name, enabled }),
+  previewResourcePacks: (id) => api.get(`/api/launcher/instances/${encodeURIComponent(id)}/resourcepacks/preview`),
+  orderResourcePacks: (id, names, revision) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/resourcepacks/order`, { names, revision }),
   serverAction: (id, payload) => api.post(`/api/launcher/instances/${encodeURIComponent(id)}/servers`, payload),
   upload: (id, type, file, { onProgress } = {}) => upload(`/api/launcher/instances/${encodeURIComponent(id)}/upload?type=${encodeURIComponent(type)}`, file, { onProgress }),
 

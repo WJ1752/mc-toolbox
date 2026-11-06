@@ -172,6 +172,30 @@ export function statusPill(kind, text) {
   return h('span', { class: 'lp-status ' + kind }, h('i', {}), text)
 }
 
+/** Render a backend crash hint with its original source line when available. */
+export function crashHint(hint = {}) {
+  const evidence = (Array.isArray(hint.evidence) ? hint.evidence : [])
+    .filter((item) => item && typeof item.text === 'string')
+    .slice(0, 3)
+  return h('div', { class: 'lp-crash-hint' },
+    h('b', {}, hint.title || '诊断'),
+    ...evidence.map((item) => {
+      const file = String(item.file || '')
+      const line = Number(item.line)
+      const hasLocation = !!file && Number.isInteger(line) && line > 0
+      const source = hasLocation
+        ? `${file.split(/[\\/]/).pop()} · 第 ${line} 行`
+        : '原文'
+      return h('div', { class: 'lp-crash-evidence' },
+        h('span', { class: 'lp-crash-evidence-source', title: file || '原文摘录' }, source),
+        h('pre', { class: 'lp-crash-evidence-text mono' }, item.text)
+      )
+    }),
+    hint.detail ? h('p', { class: 'lp-crash-hint-detail' }, hint.detail) : null,
+    hint.suggestion ? h('span', {}, hint.suggestion) : null
+  )
+}
+
 export function progressBar(value, { indeterminate = false, className = '' } = {}) {
   const fill = h('i', { style: indeterminate ? {} : { width: Math.max(0, Math.min(100, Number(value) || 0)) + '%' } })
   const bar = h('div', { class: 'lp-bar' + (indeterminate ? ' indeterminate' : '') + (className ? ' ' + className : '') }, fill)

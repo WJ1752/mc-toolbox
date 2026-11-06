@@ -23,6 +23,12 @@ export function looksLikeWindowReady(line) {
   return WINDOW_MARKERS.some((re) => re.test(text))
 }
 
+// 只有客户端已载入资源或进入世界时才把这次配置记入成功历史。
+// 登录用户名、GLFW 窗口和 Fabric 的报错窗口都可能在初始化失败前出现。
+export function looksLikeClientReady(line) {
+  return /(?:^|:\s+)(?:Sound engine started\s*$|Created:\s*\d+x\d+(?:x\d+)?\s+.*(?:textures[\\/]atlas[\\/]blocks\.png|textures-atlas)|Starting integrated minecraft server version\s+\S+)/i.test(String(line || ''))
+}
+
 // 单条 PowerShell 常驻轮询：只回传 READY / GONE，避免 Node 端每 300ms 起一次进程。
 function pollScript(pid) {
   return [

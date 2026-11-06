@@ -309,6 +309,9 @@
   overflow-wrap: anywhere;
 }
 .lp-launch-error-panel .lp-error-actions { margin-top: 1px; }
+.lp-launch-comparison { overflow-wrap: anywhere; }
+.lp-launch-comparison .lp-row { align-items: baseline; }
+.lp-launch-comparison pre { white-space: pre-wrap; color: var(--mute); }
 .lp-launch-error-panel .lp-crash-panel .mono {
   font-family: var(--font-mono);
   font-size: 9.5px;

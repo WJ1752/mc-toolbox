@@ -12,6 +12,7 @@ import { store } from '../store.js'
 import { safeName } from './launch-plan.js'
 
 export const STORE_KEY = 'launcher'
+export const LAUNCH_HISTORY_KEY = 'launcherLaunchHistory'
 
 export const LOADERS = [
   { id: 'vanilla', label: '原版', hint: 'Mojang 官方客户端' },
@@ -610,6 +611,13 @@ export function deleteInstance(id) {
   data.instances.splice(index, 1)
   if (data.selectedInstance === id) data.selectedInstance = data.instances[0]?.id || ''
   saveState(data)
+  if (store.has(LAUNCH_HISTORY_KEY)) {
+    const history = store.get(LAUNCH_HISTORY_KEY, { instances: {} })
+    if (history?.instances && Object.hasOwn(history.instances, id)) {
+      delete history.instances[id]
+      store.set(LAUNCH_HISTORY_KEY, history)
+    }
+  }
   let removed = false
   // ownDir 始终归启动器所有（外部实例只借用它放 natives / 日志），可以安全删除；
   // 外部实例的游戏目录是用户的 .minecraft，绝不在这里删。

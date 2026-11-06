@@ -588,50 +588,120 @@ function quoteArg(value) {
 /* ------------------------------------------------------------------ */
 
 /** Turn a crash report / latest.log tail into actionable hints. */
-export function analyzeCrash(text, { javaMajor = 0, mc = '', memory = 0 } = {}) {
+export function analyzeCrash(text, { javaMajor = 0, mc = '', memory = 0, sourceFile = '', lineOffset = 0 } = {}) {
   const raw = String(text || '')
   const lower = raw.toLowerCase()
   const hints = []
-  const add = (kind, title, detail, suggestion) => {
+  const lines = raw.split(/\r?\n/)
+  const redactEvidence = (line) => String(line).slice(0, 1000)
+    .replace(/(bearer\s+)[A-Za-z0-9._~+/-]+=*/ig, '$1[已隐藏]')
+    .replace(/((?:access|refresh|client|session)[_-]?token|password|secret)(\s*[=:]\s*)[^\s,;]+/ig, '$1$2[已隐藏]')
+    .replace(/(--accessToken|--session)(\s+)[^\s]+/ig, '$1$2[已隐藏]')
+    .replace(/([A-Z]:\\Users\\)[^\\\s]+/ig, '$1[用户]')
+  const evidenceFor = (patterns = []) => {
+    if (!patterns.length) return []
+    const found = []
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index]
+      const value = line.toLowerCase()
+      const priority = patterns.findIndex((pattern) => pattern.test(value))
+      if (priority < 0) continue
+      found.push({ priority, index, line })
+    }
+    return found.sort((a, b) => a.priority - b.priority || a.index - b.index).slice(0, 3)
+      .sort((a, b) => a.index - b.index)
+      .map(({ index, line }) => ({
+        text: redactEvidence(line) + (line.length > 1000 ? ' …（原文行过长，已截断）' : ''),
+        file: sourceFile,
+        line: sourceFile ? Math.max(0, Number(lineOffset) || 0) + index + 1 : null
+      }))
+  }
+  const add = (kind, title, detail, suggestion, evidencePatterns = []) => {
     if (hints.some((item) => item.kind === kind)) return
-    hints.push({ kind, title, detail, suggestion })
+    hints.push({ kind, title, detail, suggestion, evidence: evidenceFor(evidencePatterns) })
   }
 
-  if (/outofmemoryerror|java heap space|gc overhead limit exceeded/.test(lower)) {
+  const nativeThreadOom = /outofmemoryerror:\s*(?:unable to create (?:new )?native thread|cannot create native thread)|unable to create (?:new )?native thread/.test(lower)
+  const nativeThreadEvidence = [/outofmemoryerror:\s*(?:unable to create (?:new )?native thread|cannot create native thread)|unable to create (?:new )?native thread/]
+  const arrayLimitOom = /requested array size exceeds vm limit/.test(lower)
+  const heapOom = /java\.lang\.outofmemoryerror:\s*(?:java heap space|gc overhead limit exceeded)|java heap space|gc overhead limit exceeded/.test(lower)
+  const heapEvidence = [/outofmemoryerror:\s*(?:java heap space|gc overhead limit exceeded)|java heap space|gc overhead limit exceeded/]
+  if (nativeThreadOom) {
+    const heap = Number(memory) > 0 ? `当前最大堆为 ${Math.round(Number(memory) / 1024)} GB。` : ''
+    add('memory', '本机线程资源不足',
+      'JVM 无法创建新的本机线程。这通常与线程数量、线程栈、本机内存或系统进程资源限制有关，不代表 Java 堆已耗尽。',
+      `${heap}先不要调高最大堆；关闭其他高占用程序，并检查 Java 进程的线程数量与系统可用内存。如果崩溃前刚加载某个模组，更新或暂时停用该模组，并核对其线程池配置。`,
+      nativeThreadEvidence)
+  } else if (arrayLimitOom) {
+    add('memory', '单个数组超过 JVM 限制',
+      'JVM 拒绝了一个超过可支持长度或可用内存范围的数组请求；这不等同于普通 Java 堆不足。',
+      '先查看原文附近的模组调用栈，降低相关模组或资源的数据量；如果该模组版本较旧，更新到支持当前 Minecraft 与加载器的版本。',
+      [/requested array size exceeds vm limit/])
+  } else if (heapOom) {
     add('memory', '内存不足', '游戏在分配堆内存时失败，通常发生在大型整合包或高视距场景。',
-      memory ? `当前最大内存 ${Math.round(memory / 1024)} GB，可在实例设置里调高（建议 6–12 GB），并关闭占用内存的程序。` : '在实例设置里调高最大内存（建议 6–12 GB），并关闭占用内存的程序。')
+      memory ? `当前最大内存 ${Math.round(memory / 1024)} GB，可在实例设置里适度调高，并关闭占用内存的程序。` : '在实例设置里适度调高最大堆内存，并关闭占用内存的程序。',
+      heapEvidence)
+  } else if (/outofmemoryerror/.test(lower)) {
+    add('memory', '内存分配失败', '日志没有说明是 Java 堆还是本机资源分配失败，不能仅凭 OutOfMemoryError 判断需要增加堆内存。',
+      '查看完整报告中 OutOfMemoryError 后面的具体原因，再决定是否调整最大堆；若提示创建本机线程失败，应检查线程数和本机资源，不要调高堆内存。',
+      [/outofmemoryerror/])
   }
   if (/unsupportedclassversionerror|has been compiled by a more recent version of the java runtime/.test(lower)) {
     add('java', 'Java 版本不匹配', '某个模组或加载器要求的 Java 版本高于当前运行时。',
-      javaMajor ? `当前使用 Java ${javaMajor}。请换用更高版本（例如 Java 17/21）或降低模组要求的版本。` : '请换用更高版本的 Java，或在实例设置里指定合适的 Java。')
+      javaMajor ? `当前使用 Java ${javaMajor}。请换用更高版本（例如 Java 17/21）或降低模组要求的版本。` : '请换用更高版本的 Java，或在实例设置里指定合适的 Java。',
+      [/unsupportedclassversionerror|has been compiled by a more recent version of the java runtime/])
   }
-  if (/nosuchmethoderror|noclassdeffounderror|classnotfoundexception|abstractmethoderror|incompatibleclasschangeerror/.test(lower)) {
-    add('mods', '模组或库不兼容', '游戏在加载类时找不到预期的方法/类，常见于模组版本与 MC/加载器不匹配，或缺少前置。',
-      '检查崩溃报告顶部的模组列表，移除刚安装或版本不匹配的模组，并补齐前置依赖。')
+  const hasForgeVersionMismatch = /^\s*Mod ID:\s*[^\s]+/im.test(raw) && /^\s*Actual(?:\s+[^:]{1,30})?:\s*.+/im.test(raw) && /^\s*Expected(?:\s+[^:]{1,30})?:\s*.+/im.test(raw)
+  const actualExpectedPattern = /^\s*(?:actual|expected)(?:\s+[^:]{1,30})?:\s*.+/i
+  if (/nosuchmethoderror|noclassdeffounderror|classnotfoundexception|abstractmethoderror|incompatibleclasschangeerror/.test(lower) || hasForgeVersionMismatch) {
+    const modId = /^\s*Mod ID:\s*([^\s]+)/im.exec(raw)?.[1] || ''
+    const actualExpected = lines.filter((line) => actualExpectedPattern.test(line)).slice(0, 2)
+    const context = [modId ? `报告标出的 Mod ID：${modId}` : '', ...actualExpected].filter(Boolean).join('；')
+    add('mods', '模组或库不兼容', hasForgeVersionMismatch
+      ? '崩溃报告标出了模组 ID 与实际/预期版本信息，通常表示该模组或依赖版本不兼容。'
+      : '游戏在加载类时找不到预期的方法/类，常见于模组版本与 MC/加载器不匹配，或缺少前置。',
+      `${context ? context + '。' : ''}检查崩溃报告顶部的模组列表，更新或暂时移除版本不匹配的模组，并补齐前置依赖。`,
+      [/nosuchmethoderror|noclassdeffounderror|classnotfoundexception|abstractmethoderror|incompatibleclasschangeerror/, /^\s*Mod ID:\s*[^\s]+/i, actualExpectedPattern])
   }
-  if (/modresolutionexception|missing or unsupported mandatory dependencies|mod dependency|incompatible mod set|failed to load mods/.test(lower)) {
+  const missingRequirementMatch = /requires\s+([^\r\n]+?)\s+which is missing!?/i.exec(raw)
+  const hasMissingDependency = /modresolutionexception|missing or unsupported mandatory dependencies|mod dependency|incompatible mod set|failed to load mods|mod resolution failed|incompatible mods found|some of your mods/.test(lower)
+  if (hasMissingDependency || missingRequirementMatch) {
+    const missingRequirement = missingRequirementMatch?.[1]?.trim().replace(/[,;:]+\s*$/, '') || ''
+    const modId = /^\s*Mod ID:\s*([^\s]+)/im.exec(raw)?.[1] || ''
+    const actualExpected = lines.filter((line) => actualExpectedPattern.test(line)).slice(0, 2)
+    const context = [modId ? `报告标出的 Mod ID：${modId}` : '', ...actualExpected].filter(Boolean).join('；')
+    const suggestion = missingRequirement
+      ? `Fabric 报告缺少依赖「${missingRequirement}」。安装支持当前 Minecraft ${mc || '版本'} 与加载器的对应前置后重试。`
+      : `${context ? context + '。' : ''}查看日志中的 Mod ID 与 requires 行，安装缺失前置，并确认模组支持当前 MC 与加载器版本。`
     add('deps', '模组依赖不完整', '加载器无法满足某个模组的依赖声明。',
-      '查看日志中 "Mod ID:" / "requires" 行，安装对应前置，或确认所有模组支持当前 MC 与加载器版本。')
+      suggestion,
+      [/requires\s+[^\r\n]+?\s+which is missing!?/i, /requires\s+[^\r\n]+\bof\s+[^\s,]+/i, /^\s*Mod ID:\s*[^\s]+/i, actualExpectedPattern, /modresolutionexception|missing or unsupported mandatory dependencies|mod dependency|incompatible mod set|failed to load mods|mod resolution failed|incompatible mods found|some of your mods/])
   }
-  if (/pixel format not accelerated|glfw error|opengl|failed to create window|renderer/.test(lower)) {
+  const graphicsFailure = /pixel format not accelerated|glfw error|failed to create window|wgl:.*(?:does not appear to|doesn't) support opengl|(?:failed|unable|could not|cannot) to? create opengl (?:context|window)|opengl.{0,60}(?:context|window).{0,40}(?:failed|error|unsupported|not available|not supported)/
+  if (graphicsFailure.test(lower)) {
     add('graphics', '图形驱动问题', '游戏无法创建 OpenGL 上下文或窗口。',
-      '更新显卡驱动；笔记本可尝试在显卡控制面板中指定独显运行 java.exe；远程桌面/虚拟机可能没有可用的 OpenGL。')
+      '更新显卡驱动；笔记本可尝试在显卡控制面板中指定独显运行 java.exe；远程桌面/虚拟机可能没有可用的 OpenGL。',
+      [graphicsFailure])
   }
   if (/java\.lang\.securityexception|accessdeniedexception/.test(lower)) {
     add('permission', '文件权限被拒绝', '启动器或游戏无法读取/写入文件。',
-      '检查杀毒软件是否拦截了目录；避免把游戏目录放在受保护的系统目录中。')
+      '检查杀毒软件是否拦截了目录；避免把游戏目录放在受保护的系统目录中。',
+      [/java\.lang\.securityexception|accessdeniedexception/])
   }
   if (/failed to download|connection reset|unknownhostexception|sockettimeoutexception|sslhandshakeexception/.test(lower)) {
     add('network', '网络连接失败', '游戏或启动器访问资源服务器时出错。',
-      '检查网络与代理设置；离线安装完成后再启动，或重新执行“检查并修复文件”。')
+      '检查网络与代理设置；离线安装完成后再启动，或重新执行“检查并修复文件”。',
+      [/failed to download|connection reset|unknownhostexception|sockettimeoutexception|sslhandshakeexception/])
   }
-  if (/crash report|game crashed|exit code: -?\d+/.test(lower) && !hints.length) {
+  const unclassifiedFailure = /crash report|game crashed|exit code: -?\d+|(?:exception|error)(?:[:\s]|$)/i
+  if (unclassifiedFailure.test(raw) && !hints.length) {
     add('generic', '游戏异常退出', '日志中没有匹配到已知的典型错误，需要查看完整堆栈。',
-      '打开日志或 crash-reports 目录，搜索 "Caused by" 与第一个 "at ..." 行定位问题。')
+      '打开日志或 crash-reports 目录，搜索 "Caused by" 与第一个 "at ..." 行定位问题。',
+      [unclassifiedFailure])
   }
   if (mc && /requires java ?(\d+)/.test(lower)) {
     const need = Number(/requires java ?(\d+)/i.exec(raw)[1])
-    add('java-req', `需要 Java ${need}`, raw.match(/requires java ?\d+[^\n]*/i)?.[0] || '', `请安装 64 位 Java ${need} 并在实例设置中选择。`)
+    add('java-req', `需要 Java ${need}`, raw.match(/requires java ?\d+[^\n]*/i)?.[0] || '', `请安装 64 位 Java ${need} 并在实例设置中选择。`, [/requires java ?\d+/])
   }
   return hints
 }

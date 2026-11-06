@@ -16,7 +16,7 @@ import os from 'node:os'
 import { DATA_DIR, CLIENT_MODS_DIR, CONFIG_DIR } from './paths.js'
 
 // 高频写入的运行数据留在 AppData，避免持续触发文档目录（可能被 OneDrive 同步）的变更
-const RUNTIME_DATA = new Set(['history'])
+const RUNTIME_DATA = new Set(['history', 'launcherLaunchHistory'])
 
 const cache = new Map()
 const timers = new Map()

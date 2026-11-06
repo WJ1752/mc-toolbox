@@ -645,6 +645,10 @@
 }
 .lp-crash-hint b { font-size: 11px; color: var(--gold); }
 .lp-crash-hint span { font-size: 10.5px; color: var(--dim); line-height: 1.55; }
+.lp-crash-evidence { display: flex; flex-direction: column; gap: 3px; }
+.lp-crash-hint .lp-crash-evidence-source { color: var(--mute); font-size: 9px; }
+.lp-crash-evidence-text { margin: 0; padding: 5px 7px; border: 1px solid var(--line); border-radius: 3px; background: color-mix(in srgb, var(--bg) 72%, transparent); color: var(--text); font-size: 9.5px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.lp-crash-hint-detail { margin: 2px 0; color: var(--dim); font-size: 10.5px; line-height: 1.5; }
 
 .lp-hint { font-size: 10.5px; color: var(--mute); line-height: 1.6; overflow-wrap: anywhere; }
 .lp-hint.bad { color: var(--redstone); }

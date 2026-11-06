@@ -3,9 +3,11 @@ import { receiveUpload, removeTempPack } from '../upload.js'
 import fs from 'node:fs'
 import fsp from 'node:fs/promises'
 import path from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
 import { instancePaths, findInstance } from './state.js'
 import { scanModsDir } from '../mods.js'
 import { readJarEntries } from '../zip.js'
+import { analyzeCrash } from './launch-plan.js'
 import { groupModDuplicates, analyzeModDuplicates, cleanupDuplicateMods } from './mod-dedupe.js'
 import { listWorlds } from '../saveeditor.js'
 import { inspectCrash } from './launch.js'
@@ -16,6 +18,7 @@ const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i
 const ICON_MAX_BYTES = 2 * 1024 * 1024
 const ICON_CACHE_LIMIT = 600
 const iconCache = new Map()
+const resourcePackLocks = new Map()
 
 const ICON_MIME = {
   '.png': 'image/png',
@@ -77,32 +80,25 @@ function parseJsonArray(value) {
 
 async function readOptions(gameDir) {
   const file = path.join(gameDir, 'options.txt')
-  const text = await fsp.readFile(file, 'utf8').catch(() => '')
+  let text
+  try { text = await fsp.readFile(file, 'utf8') }
+  catch (error) { if (error.code === 'ENOENT') text = ''; else throw error }
   const map = readOptionLines(text)
+  let resourcePacks = []
+  if (map.has('resourcePacks')) {
+    try {
+      const parsed = JSON.parse(map.get('resourcePacks'))
+      if (!Array.isArray(parsed) || parsed.some((value) => typeof value !== 'string')) throw new Error()
+      resourcePacks = parsed
+    } catch { throw new Error('options.txt 的 resourcePacks 格式无效，已停止修改') }
+  }
   return {
     file,
     text,
     map,
-    resourcePacks: parseJsonArray(map.get('resourcePacks')),
+    resourcePacks,
     incompatiblePacks: parseJsonArray(map.get('incompatibleResourcePacks'))
   }
-}
-
-function serializeOptions(original, map) {
-  const lines = String(original || '').split(/\r?\n/).filter((line, index, arr) => !(index === arr.length - 1 && line === ''))
-  const seen = new Set()
-  const out = lines.map((line) => {
-    const idx = line.indexOf(':')
-    if (idx <= 0) return line
-    const key = line.slice(0, idx)
-    if (map.has(key)) {
-      seen.add(key)
-      return `${key}:${map.get(key)}`
-    }
-    return line
-  })
-  for (const [key, value] of map) if (!seen.has(key)) out.push(`${key}:${value}`)
-  return out.join('\n') + '\n'
 }
 
 /* ------------------------------------------------------------------ */
@@ -411,30 +407,207 @@ export async function listResourcePacks(inst) {
   const paths = instancePaths(inst)
   const options = await readOptions(paths.gameDir)
   const entries = await listEntries(paths.resourcePacksDir, { exts: ['.zip', '.jar'] })
-  const enabledSet = new Set(options.resourcePacks)
+  const byName = new Map(entries.map((entry) => [entry.name, entry]))
+  const ordered = []
+  const enabledNames = new Set()
+  for (let index = options.resourcePacks.length - 1; index >= 0; index--) {
+    const value = options.resourcePacks[index]
+    const name = resourcePackLocalName(value)
+    const entry = byName.get(name)
+    if (entry && !enabledNames.has(name)) { ordered.push(entry); enabledNames.add(name) }
+  }
+  const priorities = new Map([...enabledNames].map((name, index) => [name, index]))
+  for (const entry of entries) if (!enabledNames.has(entry.name)) ordered.push(entry)
   return {
     dir: paths.resourcePacksDir,
     optionsFile: options.file,
-    items: entries.map((entry) => ({
+    revision: resourcePackRevision(options.text),
+    items: ordered.map((entry) => ({
       ...entry,
-      enabled: enabledSet.has(entry.name) || enabledSet.has(`file/${entry.name}`)
+      enabled: enabledNames.has(entry.name),
+      priority: priorities.get(entry.name) ?? null
     }))
   }
 }
 
+function resourcePackLocalName(value) {
+  if (value === 'vanilla') return null
+  return value.startsWith('file/') ? value.slice(5) : value
+}
+
 export async function setResourcePackEnabled(inst, name, enabled) {
   const paths = instancePaths(inst)
-  const options = await readOptions(paths.gameDir)
-  const target = path.basename(String(name || ''))
-  if (!target) throw new Error('缺少资源包名称')
-  const variants = new Set([target, `file/${target}`])
-  let list = options.resourcePacks.filter((item) => !variants.has(item))
-  if (enabled) list.push(`file/${target}`)
-  options.map.set('resourcePacks', JSON.stringify(list))
-  const text = serializeOptions(options.text, options.map)
-  await fsp.mkdir(paths.gameDir, { recursive: true })
-  await fsp.writeFile(options.file, text, 'utf8')
-  return { enabled, name: target }
+  return withResourcePackLock(paths.gameDir, async () => {
+    const options = await readOptions(paths.gameDir)
+    const target = String(name || '')
+    if (!target || path.basename(target) !== target || /[\\/\0]/.test(target)) throw new Error('非法资源包名称')
+    const existing = await listEntries(paths.resourcePacksDir, { exts: ['.zip', '.jar'] })
+    if (enabled && !existing.some((entry) => entry.name === target)) throw new Error('资源包不存在')
+    const variants = target === 'vanilla' ? new Set([`file/${target}`]) : new Set([target, `file/${target}`])
+    const list = options.resourcePacks.filter((item) => !variants.has(item))
+    if (enabled) list.push(`file/${target}`)
+    options.map.set('resourcePacks', JSON.stringify(list))
+    await writeResourcePackOptions(options)
+    return { enabled, name: target, revision: resourcePackRevision(await fsp.readFile(options.file, 'utf8')) }
+  })
+}
+
+function resourcePackRevision(text) { return createHash('sha256').update(String(text)).digest('hex') }
+
+async function withResourcePackLock(key, action) {
+  const prior = resourcePackLocks.get(key) || Promise.resolve()
+  let release
+  const current = new Promise((resolve) => { release = resolve })
+  const queued = prior.then(() => current)
+  resourcePackLocks.set(key, queued)
+  await prior
+  try { return await action() } finally {
+    release()
+    if (resourcePackLocks.get(key) === queued) resourcePackLocks.delete(key)
+  }
+}
+
+async function writeResourcePackOptions(options) {
+  let latest
+  try { latest = await fsp.readFile(options.file, 'utf8') }
+  catch (error) { if (error.code === 'ENOENT') latest = ''; else throw error }
+  if (latest !== options.text) throw new Error('options.txt 已变化，请刷新后重试')
+  const lines = options.text.split(/(\r?\n)/)
+  let found = false
+  for (let i = 0; i < lines.length; i += 2) {
+    const line = lines[i]
+    const idx = line.indexOf(':')
+    if (idx > 0 && line.slice(0, idx) === 'resourcePacks') {
+      if (found) throw new Error('options.txt 中存在重复 resourcePacks 项，已停止写入')
+      lines[i] = `resourcePacks:${options.map.get('resourcePacks')}`
+      found = true
+    }
+  }
+  const newline = options.text.includes('\r\n') ? '\r\n' : '\n'
+  const text = found ? lines.join('') : `${options.text}${options.text && !options.text.endsWith('\n') ? newline : ''}resourcePacks:${options.map.get('resourcePacks')}${options.text.endsWith('\r\n') ? '\r\n' : options.text.endsWith('\n') ? '\n' : ''}`
+  await fsp.mkdir(path.dirname(options.file), { recursive: true })
+  const temp = `${options.file}.resourcepacks-${randomUUID()}.tmp`
+  try {
+    await fsp.writeFile(temp, text, { encoding: 'utf8', flag: 'wx' })
+    let latest
+    try { latest = await fsp.readFile(options.file, 'utf8') }
+    catch (error) { if (error.code === 'ENOENT') latest = ''; else throw error }
+    if (latest !== options.text) throw new Error('options.txt 已变化，请刷新后重试')
+    await fsp.rename(temp, options.file)
+  } finally { await fsp.rm(temp, { force: true }).catch(() => {}) }
+}
+
+export async function setResourcePackOrder(inst, names, expectedRevision) {
+  const paths = instancePaths(inst)
+  return withResourcePackLock(paths.gameDir, async () => {
+    const options = await readOptions(paths.gameDir)
+    if (!expectedRevision || expectedRevision !== resourcePackRevision(options.text)) throw new Error('资源包列表已变化，请刷新后重试')
+    if (!Array.isArray(names)) throw new Error('资源包排序数据无效')
+    const entries = await listEntries(paths.resourcePacksDir, { exts: ['.zip', '.jar'] })
+    const valid = new Set(entries.map((entry) => entry.name))
+    const tokenByName = new Map()
+    for (const value of options.resourcePacks) {
+      const name = resourcePackLocalName(value)
+      if (!valid.has(name)) continue
+      if (tokenByName.has(name)) throw new Error('资源包启用项有重复或旧格式/新格式并存，请先切换一次启用状态后再排序')
+      tokenByName.set(name, value)
+    }
+    const enabled = new Set(tokenByName.keys())
+    if (new Set(names).size !== names.length || names.some((name) => typeof name !== 'string' || !enabled.has(name)) || names.length !== enabled.size) throw new Error('资源包排序与当前启用列表不一致')
+    let cursor = names.length - 1
+    const next = options.resourcePacks.map((value) => {
+      const name = resourcePackLocalName(value)
+      if (!valid.has(name)) return value
+      const replacement = names[cursor--]
+      return tokenByName.get(replacement)
+    })
+    options.map.set('resourcePacks', JSON.stringify(next))
+    await writeResourcePackOptions(options)
+    return { revision: resourcePackRevision(await fsp.readFile(options.file, 'utf8')), order: [...names] }
+  })
+}
+
+function safePackEntry(name) {
+  const normalized = String(name || '').replace(/\\/g, '/')
+  return normalized && !normalized.startsWith('/') && !/^[a-zA-Z]:/.test(normalized) && !normalized.split('/').some((part) => part === '..' || part === '.') && !normalized.includes('\0')
+}
+
+async function packResourceNames(entry, baseDir) {
+  const root = path.join(baseDir, entry.name)
+  const rootStat = await fsp.lstat(root)
+  if (rootStat.isSymbolicLink()) throw new Error(`已跳过符号链接：${entry.name}`)
+  if (entry.isDir) {
+    const names = []
+    const metadata = path.join(root, 'pack.mcmeta')
+    const metadataStat = await fsp.lstat(metadata).catch((error) => error.code === 'ENOENT' ? null : Promise.reject(error))
+    const hasMetadata = !!metadataStat?.isFile() && !metadataStat.isSymbolicLink()
+    let visited = 0
+    const walk = async (dir, rel = 'assets') => {
+      for (const child of await fsp.readdir(dir, { withFileTypes: true })) {
+        if (++visited > 50000) throw new Error(`目录条目过多，已停止预览：${entry.name}`)
+        if (child.isSymbolicLink()) continue
+        const childRel = rel ? `${rel}/${child.name}` : child.name
+        if (!safePackEntry(childRel)) continue
+        if (child.isDirectory()) await walk(path.join(dir, child.name), childRel)
+        else if (child.isFile()) names.push(childRel)
+        if (names.length > 20000) throw new Error('资源包条目过多，已停止预览')
+      }
+    }
+    const assetsRoot = path.join(root, 'assets')
+    const assetsStat = await fsp.lstat(assetsRoot).catch((error) => error.code === 'ENOENT' ? null : Promise.reject(error))
+    if (assetsStat?.isDirectory() && !assetsStat.isSymbolicLink()) await walk(assetsRoot)
+    return { names, hasMetadata }
+  }
+  const stats = {}
+  await readJarEntries(root, [], { stats, includeDirectory: true, maxEntries: 50000 })
+  if (!stats.zip || !stats.directory) throw new Error(`无法读取压缩包：${entry.name}`)
+  if (stats.entries > 50000) throw new Error(`压缩包条目超过预览上限：${entry.name}`)
+  const names = [...stats.directory.keys()].filter((name) => safePackEntry(name) && name.startsWith('assets/') && !name.endsWith('/'))
+  return { names, hasMetadata: stats.directory.has('pack.mcmeta') }
+}
+
+export async function previewResourcePackConflicts(inst) {
+  const paths = instancePaths(inst)
+  const data = await listResourcePacks(inst)
+  const active = data.items.filter((item) => item.enabled)
+  const owners = new Map()
+  const warnings = []
+  let scanned = 0
+  for (const item of active) {
+    try {
+      const pack = await packResourceNames(item, paths.resourcePacksDir)
+      if (!pack.hasMetadata) { warnings.push(`缺少根目录 pack.mcmeta，跳过：${item.name}`); continue }
+      const names = pack.names
+      const remaining = Math.max(0, 100000 - scanned)
+      const limitedNames = names.slice(0, remaining)
+      scanned += limitedNames.length
+      if (limitedNames.length < names.length) warnings.push('资源总数达到预览上限，后续条目未扫描')
+      for (const name of limitedNames) {
+        const list = owners.get(name) || []
+        list.push(item.name)
+        owners.set(name, list)
+      }
+      if (limitedNames.length < names.length) break
+    } catch (error) { warnings.push(error.message) }
+  }
+  const conflicts = [...owners].filter(([, packs]) => packs.length > 1)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .slice(0, 300)
+    .map(([pathName, packs]) => ({ path: pathName, highestPrioritySource: packs[0], sources: packs }))
+  const latest = await listResourcePacks(inst)
+  const activeSignature = active.map(({ name, size, mtime }) => `${name}\0${size}\0${mtime}`).join('\n')
+  const latestSignature = latest.items.filter((item) => item.enabled).map(({ name, size, mtime }) => `${name}\0${size}\0${mtime}`).join('\n')
+  return {
+    revision: data.revision,
+    stale: latest.revision !== data.revision || latestSignature !== activeSignature,
+    priorityRule: '按 Minecraft Java options.txt 的 resourcePacks 逆序显示；列表顶部优先级最高。此处列出静态同路径来源及其中优先级最高者；语言包合并、overlays、filters 等规则可能改变最终呈现。',
+    enabled: active.length,
+    scanned,
+    conflictCount: [...owners.values()].filter((packs) => packs.length > 1).length,
+    conflicts,
+    truncated: [...owners.values()].filter((packs) => packs.length > 1).length > conflicts.length,
+    warnings
+  }
 }
 
 export async function listShaderPacks(inst) {
@@ -647,8 +820,15 @@ export async function readCrashReport(inst, name = '') {
   const paths = instancePaths(inst)
   if (!name) return await inspectCrash(inst)
   const file = pathIn(paths.crashDir, name)
-  const text = await fsp.readFile(file, 'utf8')
-  return { file, name: path.basename(file), text: text.slice(0, 512 * 1024), mtime: fs.statSync(file).mtimeMs }
+  const fullText = await fsp.readFile(file, 'utf8')
+  const text = fullText.slice(0, 512 * 1024)
+  return {
+    file,
+    name: path.basename(file),
+    text,
+    mtime: fs.statSync(file).mtimeMs,
+    hints: analyzeCrash(text, { mc: inst.mc, memory: inst.memory?.max || 0, sourceFile: file })
+  }
 }
 
 /* ------------------------------------------------------------------ */

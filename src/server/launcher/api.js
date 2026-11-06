@@ -48,6 +48,7 @@ import {
 import { findModUpdates, resolveMissingDependencies } from './updates.js'
 import { getModUpdateBackup, undoModUpdate, withModUpdateLock } from './mod-update-transaction.js'
 import { backupWorld, listWorldBackups, restoreWorldBackup } from './world-backups.js'
+import { getLaunchComparison } from './launch-history.js'
 import { gameDirKey } from './running-processes.js'
 import { store } from '../store.js'
 import {
@@ -355,6 +356,8 @@ export function registerLauncherApi(on, { readBody }) {
     }
   })
   on('GET', '/api/launcher/instances/:id/status', async (_req, params) => await launchStatus(params.id))
+  on('GET', '/api/launcher/instances/:id/launch-comparison', async (_req, params) =>
+    getLaunchComparison(instanceOf(params.id)))
   on('GET', '/api/launcher/instances/:id/log', async (_req, params, query) => {
     const inst = instanceOf(params.id)
     if (query.saved === '1' || query.source) {
@@ -470,6 +473,13 @@ export function registerLauncherApi(on, { readBody }) {
     const body = await readBody(req)
     const inst = instanceOf(params.id)
     return await content.setResourcePackEnabled(inst, body.name, body.enabled !== false)
+  })
+  on('GET', '/api/launcher/instances/:id/resourcepacks/preview', async (req, params) => {
+    return await content.previewResourcePackConflicts(instanceOf(params.id))
+  })
+  on('POST', '/api/launcher/instances/:id/resourcepacks/order', async (req, params) => {
+    const body = await readBody(req)
+    return await content.setResourcePackOrder(instanceOf(params.id), body.names, body.revision)
   })
   on('POST', '/api/launcher/instances/:id/servers', async (req, params) => {
     const body = await readBody(req)

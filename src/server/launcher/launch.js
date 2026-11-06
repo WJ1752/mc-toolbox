@@ -28,8 +28,14 @@ import {
   analyzeCrash
 } from './launch-plan.js'
 import { javaForInstance, discoverJava } from './java.js'
-import { looksLikeWindowReady, watchProcessWindow } from './game-window.js'
+import { looksLikeClientReady, looksLikeWindowReady, watchProcessWindow } from './game-window.js'
 import { getSelectedAccount, ensureFreshAccount, ensureAuthlibInjector } from './accounts.js'
+import {
+  beginLaunchAttempt,
+  captureLaunchAttempt,
+  updateLaunchAttempt,
+  promoteLaunchAttempt
+} from './launch-history.js'
 import {
   LAUNCH_PHASES,
   createLaunchError,
@@ -173,9 +179,19 @@ export function getRunningDetectionStatus() {
   return runningGameTracker.status()
 }
 
+function confirmSuccessfulLaunch(session) {
+  if (session.launchAttemptCaptured && session.windowReady && !session.launchReadyConfirmed) {
+    session.launchReadyConfirmed = promoteLaunchAttempt(session.inst, session.launchAttemptId)
+  }
+}
+
 function pushLine(session, line, kind = '') {
   const seq = ++session.seq
   const text = String(line ?? '')
+  if (kind === 'out' && !session.exited && !session.clientReady && looksLikeClientReady(text)) {
+    session.clientReady = true
+    confirmSuccessfulLaunch(session)
+  }
   const entry = { seq, t: clock(), text, kind }
   session.lines.push(entry)
   if (session.lines.length > MAX_LINES) session.lines.splice(0, session.lines.length - MAX_LINES)
@@ -969,7 +985,7 @@ function waitForWindow(session, child, { signal, onTick } = {}) {
     try { signal?.addEventListener?.('abort', onAbort, { once: true }) } catch {}
 
     const stopPollWatch = watchProcessWindow(session.pid || child.pid, (kind) => {
-      if (kind === 'window') finish('window')
+      if (kind === 'window') { session.nativeWindowSeen = true; finish('window') }
       else if (kind === 'gone') finish('exit')
     })
     stopPoll = stopPollWatch
@@ -1028,6 +1044,7 @@ async function handleGameExit(session, code, signal) {
   }
 
   if (stoppedByUser) {
+    if (session.launchAttemptId) updateLaunchAttempt(session.inst, session.launchAttemptId, { status: session.launchReadyConfirmed ? 'success' : 'stopped' })
     if (state) {
       updateState(state, { status: 'idle', detail: '游戏已停止', error: null, progress: null, indeterminate: true })
     }
@@ -1035,6 +1052,11 @@ async function handleGameExit(session, code, signal) {
     return
   }
   if (code === 0) {
+    // 没有标准客户端日志的旧版本，可用真实主窗口加正常退出确认。
+    if (session.nativeWindowSeen) confirmSuccessfulLaunch(session)
+    if (session.launchAttemptId) updateLaunchAttempt(session.inst, session.launchAttemptId, session.launchReadyConfirmed
+      ? { status: 'success' }
+      : { status: 'exited' })
     if (state) {
       updateState(state, { status: 'exited', detail: '游戏已正常退出', error: null, progress: null, indeterminate: true })
     }
@@ -1058,6 +1080,10 @@ async function handleGameExit(session, code, signal) {
     crash,
     detail: exitDetail(code, signal, crash),
     paths: inst ? errorPaths(inst, session.paths || undefined, { clientJar: state?.clientJar || '' }) : {}
+  })
+  if (session.launchAttemptId) updateLaunchAttempt(inst, session.launchAttemptId, {
+    status: 'failed',
+    failure: { code: launchError.code, message: launchError.message, endedAt: session.endedAt, hints: crash?.hints || [] }
   })
   session.error = launchError.message
   if (state) {
@@ -1089,6 +1115,15 @@ function failLaunch(state, session, error) {
   session.status = 'failed'
   session.error = err.message
   session.endedAt = session.endedAt || Date.now()
+  if (session.launchAttemptId) updateLaunchAttempt(session.inst || findInstance(session.instanceId), session.launchAttemptId, {
+    status: 'failed',
+    failure: {
+      code: err.code,
+      message: err.message,
+      endedAt: session.endedAt,
+      hints: err.crash?.hints || session.crash?.hints || []
+    }
+  })
   session.stopping = false
   pushLine(session, `[错误] ${err.message}`, 'err')
   if (err.detail) pushLine(session, `[原因] ${String(err.detail).split('\n')[0]}`, 'err')
@@ -1113,6 +1148,7 @@ function finalizeCancel(state, session) {
     session.endedAt = session.endedAt || now
     session.error = ''
     session.stopping = true
+    if (session.launchAttemptId) updateLaunchAttempt(session.inst, session.launchAttemptId, { status: 'cancelled' })
     endSessionStream(session)
   }
   updateState(state, {
@@ -1161,6 +1197,15 @@ async function runLaunchPreparation(instanceId, state, session, inst, { accountI
     signal.throwIfAborted()
     session.command = plan.preview
     state.clientJar = plan.clientJar
+    if (session.launchAttemptId) {
+      const captured = await captureLaunchAttempt(inst, session.launchAttemptId, {
+        javaPath: javaInfo.java.path,
+        javaMajor: javaInfo.java.major,
+        jvmArgs: inst.jvmArgs || getSettings().jvmArgs
+      }, { signal })
+      session.launchAttemptCaptured = captured.ok === true
+      if (!captured.ok && !captured.stale) pushLine(session, `[对比] 无法保存本次模组快照：${captured.error?.message || '未知错误'}`, 'warn')
+    }
 
     // 4. files
     setPhase(state, 'files', '正在检查客户端文件、库与资源…')
@@ -1238,6 +1283,10 @@ async function runLaunchPreparation(instanceId, state, session, inst, { accountI
     signal.throwIfAborted()
     session.status = 'running'
     session.windowReady = true
+    if (session.launchAttemptId) {
+      updateLaunchAttempt(inst, session.launchAttemptId, { status: 'window-ready' })
+      if (session.clientReady) confirmSuccessfulLaunch(session)
+    }
     const windowWaitSec = Math.max(1, Math.round((Date.now() - windowWaitStart) / 1000))
     updateState(state, {
       status: 'running',
@@ -1289,7 +1338,12 @@ function makeSession(inst, paths) {
     exited: false,
     gotOutput: false,
     windowReady: false,
-    launchState: null
+    launchState: null,
+    launchAttemptId: '',
+    launchAttemptCaptured: false,
+    launchReadyConfirmed: false,
+    clientReady: false,
+    nativeWindowSeen: false
   }
 }
 
@@ -1349,6 +1403,7 @@ export async function startInstance(instanceId, { accountId = '', resolveServer 
     }
     const paths = instancePaths(inst)
     const session = makeSession(inst, paths)
+    session.launchAttemptId = beginLaunchAttempt(inst, session.startedAt)
     sessions.set(instanceId, session)
 
     const state = {
@@ -1577,11 +1632,15 @@ async function newestFileIn(dir, predicate, since = 0) {
 
 export async function inspectCrash(inst, session = null) {
   const paths = instancePaths(inst)
-  const cutoff = session?.startedAt ? session.startedAt - 5000 : Date.now() - 7 * 24 * 3600 * 1000
+  // A crash report belongs to this failed launch only when it was written
+  // after that launch began. The former five-second grace period could attach
+  // a previous attempt's report to a fast retry.
+  const cutoff = session?.startedAt ? session.startedAt : Date.now() - 7 * 24 * 3600 * 1000
   const crash = await newestFileIn(paths.crashDir, (name) => /^crash-.*\.txt$/i.test(name), cutoff)
   let text = ''
   let file = ''
   let mtime = 0
+  let lineOffset = 0
   if (crash) {
     text = await fsp.readFile(crash.file, 'utf8').catch(() => '')
     file = crash.file
@@ -1591,8 +1650,14 @@ export async function inspectCrash(inst, session = null) {
     // it for diagnosis after a launch actually failed.
     const latest = path.join(paths.gameDir, 'logs', 'latest.log')
     const stat = await fsp.stat(latest).catch(() => null)
-    if (stat) {
-      text = (await fsp.readFile(latest, 'utf8').catch(() => '')).slice(-400 * 1024)
+    if (stat && stat.mtimeMs >= session.startedAt) {
+      const fullText = await fsp.readFile(latest, 'utf8').catch(() => '')
+      const tailStart = Math.max(0, fullText.length - 400 * 1024)
+      // Start at a real line boundary so source line numbers remain absolute.
+      const previousNewline = tailStart > 0 ? fullText.lastIndexOf('\n', tailStart) : -1
+      const start = previousNewline >= 0 ? previousNewline + 1 : 0
+      lineOffset = (fullText.slice(0, start).match(/\n/g) || []).length
+      text = fullText.slice(start)
       file = latest
       mtime = stat.mtimeMs
     }
@@ -1601,17 +1666,32 @@ export async function inspectCrash(inst, session = null) {
   const hints = analyzeCrash(text, {
     javaMajor: session?.javaMajor || 0,
     mc: inst.mc,
-    memory: inst.memory?.max || 0
+    memory: inst.memory?.max || 0,
+    sourceFile: file,
+    lineOffset
   })
   const description = /Description:\s*(.+)/i.exec(text)?.[1]?.trim() || /The game crashed whilst ([^\n]+)/i.exec(text)?.[1]?.trim() || ''
   if (!hints.length && !description && !crash) return null
+  const lines = text.split(/\r?\n/)
+  const excerptIndexes = new Set()
+  for (let index = 0; index < lines.length && excerptIndexes.size < 24; index++) {
+    if (!/Description:|Caused by:|Exception|Error|crash/i.test(lines[index])) continue
+    excerptIndexes.add(index)
+    for (let next = index + 1; next < lines.length && excerptIndexes.size < 24 && /^\s*at\s/.test(lines[next]); next++) {
+      excerptIndexes.add(next)
+    }
+  }
+  const excerpt = [...excerptIndexes].sort((a, b) => a - b).map((index) => {
+    const line = lines[index]
+    return line.length > 1000 ? line.slice(0, 1000) + ' …（原文行过长，已截断）' : line
+  })
   return {
     file,
     name: file ? path.basename(file) : '',
     mtime,
     description,
     hints,
-    excerpt: text.split(/\r?\n/).filter((line) => /Description:|Caused by:|Exception|Error|crash/i.test(line)).slice(0, 24)
+    excerpt
   }
 }
 

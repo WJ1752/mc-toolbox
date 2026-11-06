@@ -1,6 +1,15 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { looksLikeWindowReady } from '../src/server/launcher/game-window.js'
+import { looksLikeClientReady, looksLikeWindowReady } from '../src/server/launcher/game-window.js'
+
+test('成功启动记录须等客户端初始化，用户名和普通渲染线程信息只用于窗口提示', () => {
+  for (const line of ['Setting user: Audit', '[Render thread/INFO]: starting', 'GLFW error 65542', '进程已启动（PID 123）']) {
+    assert.equal(looksLikeClientReady(line), false, line)
+  }
+  for (const line of ['[Render thread/INFO]: Sound engine started', 'Created: 1024x512x4 minecraft:textures/atlas/blocks.png-atlas', 'Starting integrated minecraft server version 1.20.1']) {
+    assert.equal(looksLikeClientReady(line), true, line)
+  }
+})
 
 test('窗口就绪标记：命中窗口创建后才会出现的日志行', () => {
   const positives = [

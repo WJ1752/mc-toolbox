@@ -16,6 +16,7 @@ import * as ui from './ui.js'
 import { optimizedJvmArgs, hasOptimizedJvm } from './jvm.js'
 import { openGameDirSetup } from './setup.js'
 import { openPackUpdate } from './pack-update.js'
+import { openLaunchComparison } from './launch-comparison.js'
 import { initUpdateChecker, disposeUpdateChecker, checkForUpdates } from './update.js'
 
 const TABS = [
@@ -62,7 +63,7 @@ const LAUNCH_ERROR_REASONS = {
   EXTERNAL_DIR_UNWRITABLE: '外部游戏目录不可写。启动器需要写入日志、natives 等运行文件，请检查目录权限，或改用启动器管理的实例。',
   ALREADY_RUNNING: '这个实例已经在启动或运行中，请先停止当前游戏。',
   SPAWN_FAILED: 'Java 进程没有成功启动，常见原因是 Java 路径错误、内存参数过大或系统权限限制。',
-  GAME_CRASHED: '游戏进程异常退出并留下了崩溃报告。请查看日志与崩溃诊断，优先检查模组冲突或内存不足。',
+  GAME_CRASHED: '游戏进程异常退出并留下了崩溃报告。先核对诊断列出的原文、来源文件与行号，再按证据检查 Java、模组或系统资源。',
   GAME_EXITED: '游戏进程启动后异常退出（退出码非 0）。请查看日志末尾的错误信息。'
 }
 
@@ -1609,12 +1610,17 @@ function buildLaunchErrorPanel(info, inst, { onAction = null } = {}) {
     wrap.appendChild(h('div', { class: 'lp-crash-panel' },
       h('b', {}, crash.name || crash.file || '崩溃报告'),
       crash.description ? h('p', {}, crash.description) : null,
-      ...hints.map((hint) => h('p', {}, `${hint.title || '诊断'}：${hint.suggestion || hint.detail || ''}`)),
+      ...hints.map((hint) => ui.crashHint(hint)),
       crash.file ? h('p', { class: 'mono' }, crash.file) : null
     ))
   }
 
   const actions = h('div', { class: 'lp-error-actions' })
+  if (inst?.id && info.code !== 'ALREADY_RUNNING') {
+    actions.appendChild(btn('对比上次成功启动', {
+      size: 'sm', onClick: () => openLaunchComparison(inst)
+    }))
+  }
   for (const action of info.actions) {
     const button = launchErrorActionButton(action, info, inst, onAction)
     if (button) actions.appendChild(button)
@@ -1781,8 +1787,7 @@ async function renderOverview(container, inst) {
       actions: btn('查看日志', { size: 'sm', onClick: () => setTab('logs') }),
       body: h('div', { class: 'lp-crash' },
         crash.description ? h('p', { class: 'lp-crash-desc' }, crash.description) : null,
-        ...(hints.length ? hints.map((hint) => h('div', { class: 'lp-crash-hint' },
-          h('b', {}, hint.title), h('span', {}, hint.suggestion || hint.detail))) : [h('p', { class: 'lp-hint' }, '请打开日志查看完整堆栈。')])
+        ...(hints.length ? hints.map((hint) => ui.crashHint(hint)) : [h('p', { class: 'lp-hint' }, '请打开日志查看完整堆栈。')])
       )
     }))
   }

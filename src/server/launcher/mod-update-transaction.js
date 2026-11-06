@@ -182,10 +182,31 @@ export function recoverModUpdate(inst) {
   return withModUpdateLock(inst, () => {})
 }
 
-export function getModUpdateBackup(inst) {
-  return withDirectory(inst, (_ctx, { backup }) => ({
-    backup: backup && { id: backup.id, createdAt: backup.createdAt, items: backup.items.map(({ before, after }) => ({ before, after })) }
-  }))
+async function verifyUndo(ctx, batch) {
+  const dir = await batchDir(ctx, batch)
+  for (const [i, item] of batch.items.entries()) {
+    const before = await modFile(ctx, item.before)
+    const after = await modFile(ctx, item.after)
+    if (keyOf(before.file) !== keyOf(after.file) && before.exists) throw new Error('旧文件名已被占用：' + item.before)
+    await verifyFile(after.file, item.sha1, item.after)
+    await verifyFile(path.join(dir, i + '.old'), item.oldSha1, item.before)
+  }
+}
+
+export function getModUpdateBackup(inst, { verify = false, includeHashes = false } = {}) {
+  return withDirectory(inst, async (ctx, { backup }) => {
+    if (verify && backup) await verifyUndo(ctx, backup)
+    return {
+      backup: backup && {
+        id: backup.id,
+        createdAt: backup.createdAt,
+        items: backup.items.map(({ before, after, oldSha1, sha1 }) => ({
+          before, after,
+          ...(includeHashes ? { oldSha1, sha1 } : {})
+        }))
+      }
+    }
+  })
 }
 
 export function applyModUpdate(inst, items, { download, signal, onCommit } = {}) {
@@ -242,15 +263,8 @@ export function undoModUpdate(inst, id) {
   return withDirectory(inst, async (ctx, state) => {
     const batch = state.backup
     if (!batch || batch.id !== id) throw new Error('备份已变化，请刷新后再撤销')
-    const dir = await batchDir(ctx, batch)
-    // 撤销前全批验算。保留用户后来替换的文件与新的同名文件。
-    for (const [i, item] of batch.items.entries()) {
-      const before = await modFile(ctx, item.before)
-      const after = await modFile(ctx, item.after)
-      if (keyOf(before.file) !== keyOf(after.file) && before.exists) throw new Error('旧文件名已被占用：' + item.before)
-      await verifyFile(after.file, item.sha1, item.after)
-      await verifyFile(path.join(dir, i + '.old'), item.oldSha1, item.before)
-    }
+    // 界面预览与实际撤销复用同一套整批校验，预览通过后若文件有变化仍会拒绝。
+    await verifyUndo(ctx, batch)
     state.pending = { ...batch, phase: 'undoing' }
     await saveState(ctx, state)
     await recover(ctx, state)
